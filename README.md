@@ -31,6 +31,10 @@ The server returns JSON Streamable HTTP responses and advertises Events during
 `initialize`. It supports initialized MCP versions 2025-03-26, 2025-06-18 and
 2025-11-25. It does not implement MCP 2.0 `server/discover`, SSE subscriptions, or
 MCP batch requests. An authenticated GET receives 405; notifications receive 202.
+Standard `params._meta` is accepted separately from strict tool arguments and
+subscription filters. Progress tokens are validated but do not require progress
+notifications from this server. Idle/backoff worker ticks do not introspect tokens;
+a due delivery rechecks authorization before reserving its attempt and sending.
 
 ## Configuration and OAuth
 

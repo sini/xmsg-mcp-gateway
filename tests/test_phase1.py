@@ -747,3 +747,112 @@ def test_invalid_origin_host(env, headers):
         json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
     )
     assert response.status_code == 403
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        "initialize",
+        "ping",
+        "tools/list",
+        "tools/call",
+        "events/list",
+        "events/subscribe",
+        "events/unsubscribe",
+    ],
+)
+@pytest.mark.parametrize("progress_token", ["progress-one", 42])
+def test_protocol_metadata_accepted(env, method, progress_token):
+    _, token, _, client = env
+    params = {
+        "_meta": {
+            "progressToken": progress_token,
+            "com.example/trace": {"value": "fixture"},
+        }
+    }
+    if method == "initialize":
+        params.update(
+            protocolVersion="2025-03-26",
+            capabilities={},
+            clientInfo={"name": "fixture", "version": "1"},
+        )
+    elif method == "tools/call":
+        params.update(name="xmsg_identity", arguments={})
+    elif method in ("events/subscribe", "events/unsubscribe"):
+        params.update(
+            name="xmsg.message.received.v1",
+            arguments={},
+            delivery={"mode": "webhook", "url": "https://callback.example/events"},
+        )
+        if method == "events/subscribe":
+            params["delivery"]["secret"] = secret()
+    response = rpc(client, token, method, params)
+    assert response.status_code == 200
+    assert "result" in response.json()
+
+
+def test_metadata_does_not_select_sender_or_loosen_arguments(env):
+    _, token, _, client = env
+    metadata = {"progressToken": "test", "from": "attacker", "mailbox": "other"}
+    response = rpc(
+        client,
+        token,
+        "tools/call",
+        {"name": "xmsg_identity", "arguments": {}, "_meta": metadata},
+    )
+    assert (
+        response.json()["result"]["structuredContent"]["identity"]
+        == "dot@phase1-synthetic"
+    )
+    for arguments in ({"_meta": metadata}, {"from": "attacker"}):
+        rejected = rpc(
+            client,
+            token,
+            "tools/call",
+            {"name": "xmsg_identity", "arguments": arguments, "_meta": metadata},
+        )
+        assert rejected.json()["error"]["code"] == -32602
+    rejected = sub(client, token, _meta=metadata, from_sender="attacker")
+    assert rejected.json()["error"]["code"] == -32602
+    rejected = rpc(
+        client,
+        token,
+        "events/subscribe",
+        {
+            "name": "xmsg.message.received.v1",
+            "arguments": {"_meta": metadata},
+            "_meta": metadata,
+            "delivery": {
+                "mode": "webhook",
+                "url": "https://callback.example/events",
+                "secret": secret(),
+            },
+        },
+    )
+    assert rejected.json()["error"]["code"] == -32602
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        "string",
+        [],
+        None,
+        {"progressToken": None},
+        {"progressToken": True},
+        {"progressToken": 1.5},
+    ],
+)
+def test_invalid_protocol_metadata(env, metadata):
+    _, token, _, client = env
+    response = rpc(client, token, "ping", {"_meta": metadata})
+    assert response.json()["error"]["code"] == -32602
+
+
+def test_metadata_not_part_of_subscription_identity(env):
+    _, token, callback, client = env
+    key = secret()
+    first = sub(client, token, key, _meta={"progressToken": "one"}).json()["result"]
+    second = sub(client, token, key, _meta={"progressToken": "two"}).json()["result"]
+    assert first["id"] == second["id"]
+    assert len(callback.calls) == 1

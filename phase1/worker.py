@@ -11,20 +11,17 @@ class Worker:
 
     def once(self):
         with self.store.guard(), self.store.db() as db:
+            event = db.execute(
+                "SELECT * FROM outbox WHERE state='pending' ORDER BY sequence LIMIT 1"
+            ).fetchone()
+            if not event or event["next_attempt"] > time.time():
+                return False
             subscription = db.execute("SELECT * FROM subscription").fetchone()
             if (
                 not subscription
                 or not subscription["active"]
                 or subscription["expires"] <= time.time()
-                or not self.store.credential_active(
-                    db, subscription["credential"], self.oauth
-                )
             ):
-                return False
-            event = db.execute(
-                "SELECT * FROM outbox WHERE state='pending' ORDER BY sequence LIMIT 1"
-            ).fetchone()
-            if not event or event["next_attempt"] > time.time():
                 return False
             if event["attempts"] >= 5:
                 db.execute(
@@ -32,6 +29,10 @@ class Worker:
                     (event["event_id"],),
                 )
                 return True
+            if not self.store.credential_active(
+                db, subscription["credential"], self.oauth
+            ):
+                return False
             attempts = event["attempts"] + 1
             db.execute(
                 "UPDATE outbox SET attempts=?,next_attempt=? WHERE event_id=?",

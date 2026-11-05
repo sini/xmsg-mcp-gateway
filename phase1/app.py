@@ -17,9 +17,9 @@ from .schemas import (
     PAYLOAD,
     RPC,
     Call,
-    Empty,
     Initialize,
     ListEvents,
+    RequestParams,
     Subscribe,
     Unsubscribe,
 )
@@ -68,13 +68,13 @@ def create_app(settings, store=None, http=None, oauth=None, run_worker=False):
                         },
                     }
                 case "notifications/initialized":
-                    Empty.model_validate(request.params)
+                    RequestParams.model_validate(request.params)
                     return None
                 case "ping":
-                    Empty.model_validate(request.params)
+                    RequestParams.model_validate(request.params)
                     result = {}
                 case "tools/list":
-                    Empty.model_validate(request.params)
+                    RequestParams.model_validate(request.params)
                     result = {
                         "tools": [
                             {

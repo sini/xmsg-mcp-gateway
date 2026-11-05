@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
 EVENT = "xmsg.message.received.v1"
 
@@ -13,19 +13,30 @@ class Empty(Strict):
     pass
 
 
+class RequestParams(Strict):
+    metadata: dict[str, JsonValue] = Field(default_factory=dict, alias="_meta")
+
+    @field_validator("metadata")
+    @classmethod
+    def progress_token(cls, value):
+        if "progressToken" in value and type(value["progressToken"]) not in (str, int):
+            raise ValueError("progressToken must be a string or integer")
+        return value
+
+
 class ClientInfo(Strict):
     name: str
     version: str
     title: str | None = None
 
 
-class Initialize(Strict):
+class Initialize(RequestParams):
     protocolVersion: str
     capabilities: dict
     clientInfo: ClientInfo
 
 
-class Call(Strict):
+class Call(RequestParams):
     name: Literal["xmsg_identity"]
     arguments: Empty = Field(default_factory=Empty)
 
@@ -39,7 +50,7 @@ class SignedDelivery(Delivery):
     secret: str = Field(max_length=128)
 
 
-class Subscribe(Strict):
+class Subscribe(RequestParams):
     name: Literal["xmsg.message.received.v1"]
     arguments: Empty
     delivery: SignedDelivery
@@ -47,13 +58,13 @@ class Subscribe(Strict):
     ttlMs: int | None = Field(default=None, ge=1000, le=604800000)
 
 
-class Unsubscribe(Strict):
+class Unsubscribe(RequestParams):
     name: Literal["xmsg.message.received.v1"]
     arguments: Empty
     delivery: Delivery
 
 
-class ListEvents(Strict):
+class ListEvents(RequestParams):
     cursor: None = None
 
 
