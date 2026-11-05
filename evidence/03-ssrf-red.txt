@@ -1,0 +1,94 @@
+FFFFFFFFFFFFFFF                                                          [100%]
+=================================== FAILURES ===================================
+_____________________________ test_ssrf[127.0.0.1] _____________________________
+tests/test_phase1.py:172: in test_ssrf
+    with pytest.raises(transport.DestinationError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE DestinationError
+_____________________________ test_ssrf[10.0.0.1] ______________________________
+tests/test_phase1.py:172: in test_ssrf
+    with pytest.raises(transport.DestinationError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE DestinationError
+____________________________ test_ssrf[172.16.0.1] _____________________________
+tests/test_phase1.py:172: in test_ssrf
+    with pytest.raises(transport.DestinationError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE DestinationError
+____________________________ test_ssrf[192.168.0.1] ____________________________
+tests/test_phase1.py:172: in test_ssrf
+    with pytest.raises(transport.DestinationError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE DestinationError
+__________________________ test_ssrf[169.254.169.254] __________________________
+tests/test_phase1.py:172: in test_ssrf
+    with pytest.raises(transport.DestinationError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE DestinationError
+____________________________ test_ssrf[100.64.0.1] _____________________________
+tests/test_phase1.py:172: in test_ssrf
+    with pytest.raises(transport.DestinationError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE DestinationError
+__________________________ test_ssrf[100.127.255.254] __________________________
+tests/test_phase1.py:172: in test_ssrf
+    with pytest.raises(transport.DestinationError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE DestinationError
+________________________________ test_ssrf[::1] ________________________________
+tests/test_phase1.py:172: in test_ssrf
+    with pytest.raises(transport.DestinationError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE DestinationError
+______________________________ test_ssrf[fc00::1] ______________________________
+tests/test_phase1.py:172: in test_ssrf
+    with pytest.raises(transport.DestinationError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE DestinationError
+______________________________ test_ssrf[fe80::1] ______________________________
+tests/test_phase1.py:172: in test_ssrf
+    with pytest.raises(transport.DestinationError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE DestinationError
+_________________________ test_ssrf[::ffff:127.0.0.1] __________________________
+tests/test_phase1.py:172: in test_ssrf
+    with pytest.raises(transport.DestinationError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE DestinationError
+___________________________ test_ssrf[2002:7f00:1::] ___________________________
+tests/test_phase1.py:172: in test_ssrf
+    with pytest.raises(transport.DestinationError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE DestinationError
+__________________________ test_ssrf[64:ff9b::7f00:1] __________________________
+tests/test_phase1.py:172: in test_ssrf
+    with pytest.raises(transport.DestinationError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE DestinationError
+______________________________ test_ssrf[0.0.0.0] ______________________________
+tests/test_phase1.py:172: in test_ssrf
+    with pytest.raises(transport.DestinationError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE DestinationError
+_____________________________ test_ssrf[224.0.0.1] _____________________________
+tests/test_phase1.py:172: in test_ssrf
+    with pytest.raises(transport.DestinationError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE DestinationError
+=========================== short test summary info ============================
+FAILED tests/test_phase1.py::test_ssrf[127.0.0.1] - Failed: DID NOT RAISE Des...
+FAILED tests/test_phase1.py::test_ssrf[10.0.0.1] - Failed: DID NOT RAISE Dest...
+FAILED tests/test_phase1.py::test_ssrf[172.16.0.1] - Failed: DID NOT RAISE De...
+FAILED tests/test_phase1.py::test_ssrf[192.168.0.1] - Failed: DID NOT RAISE D...
+FAILED tests/test_phase1.py::test_ssrf[169.254.169.254] - Failed: DID NOT RAI...
+FAILED tests/test_phase1.py::test_ssrf[100.64.0.1] - Failed: DID NOT RAISE De...
+FAILED tests/test_phase1.py::test_ssrf[100.127.255.254] - Failed: DID NOT RAI...
+FAILED tests/test_phase1.py::test_ssrf[::1] - Failed: DID NOT RAISE Destinati...
+FAILED tests/test_phase1.py::test_ssrf[fc00::1] - Failed: DID NOT RAISE Desti...
+FAILED tests/test_phase1.py::test_ssrf[fe80::1] - Failed: DID NOT RAISE Desti...
+FAILED tests/test_phase1.py::test_ssrf[::ffff:127.0.0.1] - Failed: DID NOT RA...
+FAILED tests/test_phase1.py::test_ssrf[2002:7f00:1::] - Failed: DID NOT RAISE...
+FAILED tests/test_phase1.py::test_ssrf[64:ff9b::7f00:1] - Failed: DID NOT RAI...
+FAILED tests/test_phase1.py::test_ssrf[0.0.0.0] - Failed: DID NOT RAISE Desti...
+FAILED tests/test_phase1.py::test_ssrf[224.0.0.1] - Failed: DID NOT RAISE Des...
+15 failed in 0.16s

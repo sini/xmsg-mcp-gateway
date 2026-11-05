@@ -1,0 +1,3 @@
+# Fixture authentication, restricted to loopback; never use for hosted setup.
+auth_mode = "local-test"
+state_dir = ".state"

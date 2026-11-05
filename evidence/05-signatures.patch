@@ -1,0 +1,11 @@
+--- a/phase1/transport.py
++++ b/phase1/transport.py
+@@ -145,7 +145,7 @@
+ def signed_post(http, url, body, event_id, subscription_id, keys):
+     stamp = datetime.now(UTC)
+     signature = " ".join(
+-        Webhook(key).sign(event_id, stamp, body.decode()) for key in keys
++        Webhook(key).sign(event_id, stamp, "tampered") for key in keys
+     )
+     headers = {
+         "Content-Type": "application/json",

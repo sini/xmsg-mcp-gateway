@@ -1,0 +1,11 @@
+--- a/phase1/schemas.py
++++ b/phase1/schemas.py
+@@ -6,7 +6,7 @@
+ 
+ 
+ class Strict(BaseModel):
+-    model_config = ConfigDict(extra="forbid", strict=True)
++    model_config = ConfigDict(extra="ignore", strict=True)
+ 
+ 
+ class Empty(Strict):

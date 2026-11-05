@@ -1,0 +1,21 @@
+[project]
+name = "dot-phase1-placeholder"
+version = "0.1.0"
+description = "Isolated synthetic MCP Events feasibility server"
+requires-python = ">=3.12"
+dependencies = ["starlette>=0.48,<1", "uvicorn>=0.35,<1", "standardwebhooks>=1,<2", "cryptography>=45", "pydantic>=2.11,<3"]
+[dependency-groups]
+dev = ["pytest>=8", "httpx>=0.28", "ruff>=0.12"]
+[project.scripts]
+phase1 = "phase1.cli:main"
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+[tool.hatch.build.targets.wheel]
+packages = ["phase1"]
+[tool.ruff]
+target-version = "py312"
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B", "UP"]
+[tool.pytest.ini_options]
+filterwarnings = ["ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning"]

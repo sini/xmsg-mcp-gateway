@@ -1,0 +1,189 @@
+# Phase 1 placeholder
+
+An isolated synthetic MCP Events feasibility server. The component name and
+repository visibility are owner decisions. Nothing here connects to xmsg.
+
+The authenticated Streamable HTTP endpoint is `/mcp`. It offers one tool,
+`xmsg_identity`, and `events/list`, `events/subscribe`, `events/unsubscribe` for
+`xmsg.message.received.v1`. There are no messaging or discovery tools.
+
+## Local setup
+
+Requires Linux, Python 3.12 or newer, and uv. This uses a fresh repository, not a
+worktree of the infrastructure or fleet repositories.
+
+```sh
+uv sync --locked --link-mode copy
+uv run pytest -q
+uv run ruff check phase1 tests scripts
+uv run python scripts/mutations.py
+uv run phase1 --config config.local-test.toml issue-local-test --output .state/test-token
+uv run phase1 --config config.local-test.toml serve
+```
+
+The listener defaults to loopback. `config.local-test.toml` enables only local
+fixture authentication; the generated high-entropy token is written directly to
+a file, and only its SHA-256 verifier is stored in the credential table. This
+mode cannot bind externally and is not a supported hosted connection method.
+Tests create credentials in temporary directories; never commit credential files.
+The `.state/` directory is gitignored and private to its OS account.
+
+The server returns JSON Streamable HTTP responses and advertises Events during
+`initialize`. It supports initialized MCP versions 2025-03-26, 2025-06-18 and
+2025-11-25. It does not implement MCP 2.0 `server/discover`, SSE subscriptions, or
+MCP batch requests. An authenticated GET receives 405; notifications receive 202.
+
+## Configuration and OAuth
+
+Use `config.oauth.example.toml` as the field reference. Save the real configuration
+and generated credentials under `.state/`. Run:
+
+```sh
+uv run phase1 --config .state/oauth.toml serve
+```
+
+OAuth is the default. Incomplete configuration refuses startup. The server is an
+OAuth resource server, not an authorization server. An owner must provision a
+compatible provider and its dedicated introspection client. Every request and
+every dispatch checks access-token activity, exact issuer, exact resource audience,
+owner subject, expiration, not-before and both declared scopes:
+`identity:read events:subscribe`. There is one principal:
+`dot@phase1-synthetic`. No argument can select a sender or another mailbox.
+
+Public protected-resource metadata is available at the standard well-known path
+and the resource-path variant, including the URL advertised in a 401 challenge.
+The provider must supply authorization-server metadata, authorization code with
+PKCE S256, and an appropriate client-registration method. This server never
+rewrites a token audience to make an incompatible provider appear compatible.
+
+The repository includes no live provider configuration or credentials. Kanidm
+reuse is desirable but direct compatibility is unproved: the checked upstream
+source returns a client-ID audience. See REPORT.md before registering a client.
+A dedicated client, compatible resource audience and accessible OAuth endpoints
+must be verified first. Do not reuse another application's client registration.
+
+OAuth tokens retained for delivery-time introspection are Fernet encrypted;
+connection fixture tokens are stored only as verifiers. Signing secrets are also
+encrypted. The local key is outside the database, in the private state directory.
+This protects a copied database, not a compromised OS account. Back up the state
+directory and key together. Do not enable raw HTTP or proxy credential logging.
+
+## Local administration and custody
+
+Admin commands are executable only through the local CLI; no HTTP admin trigger
+exists. One invocation emits one occurrence; reuse its occurrence ID to retry the
+same logical occurrence without adding a row:
+
+```sh
+uv run phase1 --state .state emit review-occurrence-one
+uv run phase1 --state .state status
+uv run phase1 --state .state revoke '<credential-verifier-id>'
+uv run phase1 --state .state retry-dead '<event-id>'
+uv run phase1 --state .state reset-binding
+```
+
+The verifier ID is the SHA-256 digest of a fixture token or OAuth access token;
+inspect only IDs locally if manual revocation is needed. Upstream OAuth revocation
+also stops dispatch through per-attempt introspection. An already initiated
+request cannot be recalled; local revocation serializes with dispatch.
+
+SQLite uses full synchronous commits. A committed outbox occurrence survives
+process exit before its callback. Attempts are reserved durably before sending.
+The event ID and exact body survive retries; signing metadata is generated per
+attempt. A callback might receive the event twice if it accepted a request before
+the server recorded that acceptance. HTTP receipt does not prove dot ran a task.
+
+There are five attempts, with exponential delays of 2, 4, 8 and 16 seconds before
+subsequent retries. Only transport failures, HTTP 408, HTTP 429 and server errors
+retry; redirects and other client errors are terminal, including 410 and 413.
+`status` and `xmsg_identity` expose pending, accepted and dead-letter counts;
+`status` lists individual event IDs, states and categorized errors. Manual
+`retry-dead` preserves the original ID and explicitly resets its attempt budget.
+
+The hard quota is 1,000 retained occurrences, including accepted/dead entries.
+There is no automatic garbage collection or expiry deletion in this phase.
+Exhaustion refuses new custody. Keep this synthetic test small; retention design
+belongs before production use. No body-fetch tool exists, so `body_available`
+is false. Protocol replay is not implemented: cursors are always null and a
+non-null resume cursor is rejected. Persisted pending work still survives restart.
+
+Subscription identity is deterministic. A callback cannot silently replace an
+existing binding, including after unsubscribe. `reset-binding` is an explicit
+local migration operation; it retains pending events for the next verified binding.
+Refresh is idempotent, with finite expiry bounded by the OAuth token lifetime.
+The default subscription lifetime is one hour, capped at one day; null lifetime
+requests receive a finite grant. Verification is cached for five minutes only
+for the same binding and key. Rotating a key verifies again and signs with the
+previous and current key for five minutes. A restart preserves that window.
+
+Callbacks require HTTPS, public addresses, hostname-verified TLS and no redirects.
+DNS is checked on every connection, and the dial uses the checked IP. A mixed
+public/private answer is refused. DNS has a three-second deadline and four
+resolver slots; HTTP has a ten-second socket timeout and response watchdog.
+Responses are bounded to 64 KiB. Requests are capped at 64 KiB, event bodies at
+256 KiB by contract (this fixed synthetic payload is much smaller).
+
+## Owner steps: private tunnel
+
+No tunnel or endpoint has been created by this project.
+
+1. Resolve the authorization-provider compatibility question in REPORT.md. Configure
+   a dedicated OAuth client using the exact redirect URI shown by ChatGPT for this
+   connection, with PKCE enabled, the two scopes, and only the owner account allowed.
+   Configure the provider to issue tokens for the exact MCP resource URI.
+2. Ensure the browser can reach login/consent, and the hosted OAuth exchange can
+   reach discovery and token endpoints. Tunnel transport does not automatically
+   expose the authorization server. Provision the introspection secret directly
+   into the private file referenced by `.state/oauth.toml`.
+3. In Platform tunnel settings, obtain an authorized tunnel and associate it with
+   the intended ChatGPT workspace and Platform organization. Tunnel management
+   requires Read + Manage; the runtime and operator need Read + Use.
+4. Obtain the official tunnel-client release from Platform or the official release
+   page. Record the selected version and checksum, run `tunnel-client help quickstart`,
+   and follow its current HTTP profile instructions with the local `/mcp` endpoint.
+   Provide its runtime credential through secure local input/environment, never
+   arguments or committed config. Keep its credential separate from OAuth credentials.
+5. With `CONTROL_PLANE_API_KEY` securely supplied and `CONTROL_PLANE_TUNNEL_ID`
+   set to the authorized tunnel ID, the documented environment-based HTTP binding is:
+
+   ```sh
+   export MCP_SERVER_URL="http://localhost:8765/mcp"
+   tunnel-client doctor --explain
+   tunnel-client run
+   ```
+
+   Confirm these flags against the selected release's help. Run the client under
+   a separate restricted account/unit. It needs access only to the MCP listener
+   and OpenAI control plane, not fleet sockets. Check the protected-resource
+   metadata as seen through the tunnel: the token audience must match the exact
+   resource identifier the hosted OAuth flow requests.
+6. In ChatGPT Plugins, choose **+ → Add custom MCP server → Connection: Tunnel**,
+   select that tunnel, and choose **OAuth**. Enter the dedicated client ID/secret
+   through supported secure fields if using predefined client registration.
+   Complete the owner's review and create/install the private plugin.
+7. Rescan and confirm exactly one tool and one event. Call `xmsg_identity`.
+8. Ask dot to monitor the synthetic event and report its preview once. Verify that
+   subscription creation, signed callback challenge and durable state all succeed.
+9. Run the local `emit` command once. Observe callback acceptance locally and the
+   event-triggered response in the intended idle dot conversation. Record these as
+   separate observations. Stop monitoring and verify unsubscribe prevents delivery.
+10. Repeat hosted expiry/refresh/revocation and restart checks before declaring the
+    hosted feasibility gate passed. An independent reviewer gates phase 2.
+
+## Owner steps: public HTTPS fallback
+
+If the combined private-tunnel flow is unsupported, the owner may configure a
+stable HTTPS reverse proxy for this new MCP endpoint and its public discovery
+metadata. Keep the listener on loopback where possible. Set `exposure` to
+`public-https` and `public_url` to the canonical HTTPS MCP URL; OAuth remains
+mandatory. A non-loopback bind is refused unless this fallback is explicit.
+
+Preserve Host and Authorization headers, enforce TLS and request bounds, and keep
+credentials and callback URLs out of access logs. Add the custom MCP server by URL
+with OAuth, then perform the same hosted lifecycle test. This project does not
+provision DNS, certificates, proxies, public ingress, tailnet membership or tunnels.
+
+References: [MCP Events](https://developers.openai.com/plugins/build/mcp-events),
+[Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels),
+[OAuth](https://developers.openai.com/plugins/build/auth),
+[custom MCP setup](https://developers.openai.com/api/docs/guides/custom-mcp-server).
