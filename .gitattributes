@@ -1,0 +1,3 @@
+# Preserve verbatim pytest output and unified-diff context lines in review evidence.
+evidence/** -whitespace
+REPORT.md -whitespace
