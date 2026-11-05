@@ -1,8 +1,0 @@
-01-auth: GREEN control, RED mutant (exit 1)
-02-unknown-fields: GREEN control, RED mutant (exit 1)
-03-ssrf: GREEN control, RED mutant (exit 1)
-04-redirect: GREEN control, RED mutant (exit 1)
-05-signatures: GREEN control, RED mutant (exit 1)
-06-custody: GREEN control, RED mutant (exit 1)
-07-loopback: GREEN control, RED mutant (exit 1)
-7/7 single-site production mutants killed; originals untouched.

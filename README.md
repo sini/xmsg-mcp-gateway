@@ -57,7 +57,7 @@ rewrites a token audience to make an incompatible provider appear compatible.
 
 The repository includes no live provider configuration or credentials. Kanidm
 reuse is desirable but direct compatibility is unproved: the checked upstream
-source returns a client-ID audience. See [xmsg/REPORT.md](xmsg/REPORT.md) before registering a client.
+source returns a client-ID audience. See the phase 1 report in the design workspace before registering a client.
 A dedicated client, compatible resource audience and accessible OAuth endpoints
 must be verified first. Do not reuse another application's client registration.
 
@@ -126,7 +126,7 @@ Responses are bounded to 64 KiB. Requests are capped at 64 KiB, event bodies at
 
 No tunnel or endpoint has been created by this project.
 
-1. Resolve the authorization-provider compatibility question in [xmsg/REPORT.md](xmsg/REPORT.md). Configure
+1. Resolve the authorization-provider compatibility question in the phase 1 report in the design workspace. Configure
    a dedicated OAuth client using the exact redirect URI shown by ChatGPT for this
    connection, with PKCE enabled, the two scopes, and only the owner account allowed.
    Configure the provider to issue tokens for the exact MCP resource URI.
@@ -187,5 +187,8 @@ References: [MCP Events](https://developers.openai.com/plugins/build/mcp-events)
 [OAuth](https://developers.openai.com/plugins/build/auth),
 [custom MCP setup](https://developers.openai.com/api/docs/guides/custom-mcp-server).
 
-Design, implementation reports, reviews and mutation evidence live under
-[`xmsg/`](xmsg/README.md).
+Design, implementation reports, reviews and recorded mutation evidence live in
+`../den-ag-design/xmsg/xmsg-mcp-gateway/` in the shared workspace. The
+[Hindsight access review gist](https://gist.github.com/sini/5ab8844bb2bef8cc6806c3db1eaf1308)
+is available for sharing. Fresh mutation runs write to the gitignored
+`.artifacts/mutations/` directory in this code repository.

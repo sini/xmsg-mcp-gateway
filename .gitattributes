@@ -1,3 +1,0 @@
-# Preserve verbatim pytest output and unified-diff context lines in review evidence.
-xmsg/evidence/** -whitespace
-xmsg/REPORT.md -whitespace

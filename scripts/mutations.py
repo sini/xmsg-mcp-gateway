@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-EVIDENCE = ROOT / "xmsg" / "evidence"
+EVIDENCE = ROOT / ".artifacts" / "mutations"
 MUTANTS = [
     ("01-auth", "phase1/app.py", "if not credential:", "if False:", "test_auth"),
     (
@@ -77,7 +77,7 @@ def run(directory, test):
 
 
 def main():
-    EVIDENCE.mkdir(exist_ok=True)
+    EVIDENCE.mkdir(parents=True, exist_ok=True)
     for name, filename, old, new, test in MUTANTS:
         with tempfile.TemporaryDirectory(prefix="dot-phase1-mutant-") as temp:
             root = Path(temp)
