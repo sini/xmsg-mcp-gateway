@@ -1,6 +1,6 @@
 # Phase 1 local build report
 
-Date: 2026-11-05. Owner-selected name: xmsg-mcp-gateway; local repository only, no remote.
+Date: 2026-11-05. Owner-selected name: xmsg-mcp-gateway; public source publication authorized.
 
 Status: local implementation and mutation evidence ready for independent review.
 The hosted feasibility gate is NOT passed. No OAuth client registration, tunnel,
@@ -37,7 +37,7 @@ uv run ruff format --check phase1 tests scripts
 uv run python scripts/mutations.py
 ```
 
-The final run is recorded in `evidence/final-tests.txt`, `final-lint.txt`,
+The final run is recorded in `xmsg/evidence/final-tests.txt`, `final-lint.txt`,
 `final-format.txt` and `final-mutations.txt`. There are 53 passing pytest cases.
 The initial missing-component run failed collection; it is not counted as a
 security oracle. Later targeted tests found and corrected callback-cache,
@@ -63,7 +63,7 @@ secrets; failure output avoids displaying generated credential arguments.
 | 7. Default bind | `test_default_bind` | Default bind changes from loopback to wildcard | ValidationError: non-loopback requires explicit fallback; default construction fails. |
 
 Exact patches and full RED output for all seven checks are appended below. Their
-GREEN controls are in the corresponding `evidence/*-green.txt` files.
+GREEN controls are in the corresponding `xmsg/evidence/*-green.txt` files.
 
 ## Measured versus inferred
 
@@ -142,7 +142,7 @@ or provider version follows from those declarations.
    S256. If it cannot, decide between provider support work and a separately
    reviewed OAuth authorization layer using Kanidm login. Neither was built here.
    Never relax audience validation to accept tokens minted for unrelated clients.
-2. The component name is xmsg-mcp-gateway. Choose repository visibility. Select
+2. The component name is xmsg-mcp-gateway and the repository is public. Select
    the test resource URI and dedicated owner subject/scopes. Provision only fresh
    test credentials into private files; keep the tunnel runtime credential separate.
 3. Follow README's private-tunnel steps: authorized tunnel, correct association and
@@ -262,7 +262,7 @@ FAILED tests/test_phase1.py::test_auth[tools/call] - assert 200 == 401
 FAILED tests/test_phase1.py::test_auth[events/list] - assert 200 == 401
 FAILED tests/test_phase1.py::test_auth[events/subscribe] - assert 200 == 401
 FAILED tests/test_phase1.py::test_auth[events/unsubscribe] - assert 200 == 401
-5 failed in 0.23s
+5 failed in 0.22s
 ```
 
 ### 02-unknown-fields
@@ -482,7 +482,7 @@ F                                                                        [100%]
 _______________________________ test_signatures ________________________________
 tests/test_phase1.py:243: in test_signatures
     Webhook(key).verify(challenge, challenge_headers)
-/home/sini/src/xmsg-mcp-gateway/.venv/lib/python3.12/site-packages/standardwebhooks/webhooks.py:86: in verify
+/home/sini/Documents/repos/sini/xmsg-mcp-gateway/.venv/lib/python3.12/site-packages/standardwebhooks/webhooks.py:86: in verify
     raise WebhookVerificationError("No matching signature found")
 E   standardwebhooks.webhooks.WebhookVerificationError: No matching signature found
 =========================== short test summary info ============================
@@ -513,13 +513,13 @@ _________________________________ test_custody _________________________________
 tests/test_phase1.py:274: in test_custody
     assert len(pending) == 1 and pending[0]["state"] == "pending"
 E   assert (1 == 1 and 'accepted' == 'pending'
-E    +  where 1 = len([{'sequence': 1, 'occurrence': 'crash-occurrence', 'event_id': 'xm_evt_fdd76a3878e25641bae1d7ac65189516', 'body': b'{"...6a3878e25641bae1d7ac65189516","name":"xmsg.message.received.v1","timestamp":"2026-11-05T20:59:45.324543+00:00"}', ...}])
+E    +  where 1 = len([{'sequence': 1, 'occurrence': 'crash-occurrence', 'event_id': 'xm_evt_26f041942453c5a42da7cc757762ece4', 'body': b'{"...41942453c5a42da7cc757762ece4","name":"xmsg.message.received.v1","timestamp":"2026-11-05T21:10:11.270487+00:00"}', ...}])
 E     
 E     - pending
 E     + accepted)
 =========================== short test summary info ============================
 FAILED tests/test_phase1.py::test_custody - assert (1 == 1 and 'accepted' == ...
-1 failed in 0.15s
+1 failed in 0.16s
 ```
 
 ### 07-loopback
@@ -546,7 +546,7 @@ tests/test_phase1.py:293: in test_default_bind
     assert Settings(state_dir=tmp_path).bind == "127.0.0.1"
            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 E   pydantic_core._pydantic_core.ValidationError: 1 validation error for Settings
-E     Value error, non-loopback bind requires explicit public-https exposure [type=value_error, input_value={'state_dir': PosixPath('...02/test_default_bind0')}, input_type=dict]
+E     Value error, non-loopback bind requires explicit public-https exposure [type=value_error, input_value={'state_dir': PosixPath('...15/test_default_bind0')}, input_type=dict]
 E       For further information visit https://errors.pydantic.dev/2.14/v/value_error
 =========================== short test summary info ============================
 FAILED tests/test_phase1.py::test_default_bind - pydantic_core._pydantic_core...

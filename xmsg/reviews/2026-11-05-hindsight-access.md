@@ -1,7 +1,7 @@
 # Hindsight access design and PR 186 review
 
 Reviewed 2026-11-05, with no live infrastructure/credential access or PR edits.
-No review was posted to GitHub or sent to another session.
+No PR comments were posted and no message was sent to another session.
 
 Design: [revision e7e4a5d](https://gist.github.com/sini/8eae0acffe268e6a07721169418d5cd0/e7e4a5d3504e6ee9939b236faa30fa9e405a2ac4),
 SHA256 `fdc83231ba87e4728c31fc164390f32cbe5c69827a8f03e55429800983cdeb79`.

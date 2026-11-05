@@ -1,7 +1,6 @@
 # xmsg-mcp-gateway
 
-An isolated synthetic MCP Events feasibility server. The owner selected the component name;
-repository visibility remains an owner decision. Nothing here connects to xmsg.
+An isolated synthetic MCP Events feasibility server. The owner selected the component name and public repository visibility. Nothing here connects to xmsg.
 
 The authenticated Streamable HTTP endpoint is `/mcp`. It offers one tool,
 `xmsg_identity`, and `events/list`, `events/subscribe`, `events/unsubscribe` for
@@ -58,7 +57,7 @@ rewrites a token audience to make an incompatible provider appear compatible.
 
 The repository includes no live provider configuration or credentials. Kanidm
 reuse is desirable but direct compatibility is unproved: the checked upstream
-source returns a client-ID audience. See REPORT.md before registering a client.
+source returns a client-ID audience. See [xmsg/REPORT.md](xmsg/REPORT.md) before registering a client.
 A dedicated client, compatible resource audience and accessible OAuth endpoints
 must be verified first. Do not reuse another application's client registration.
 
@@ -127,7 +126,7 @@ Responses are bounded to 64 KiB. Requests are capped at 64 KiB, event bodies at
 
 No tunnel or endpoint has been created by this project.
 
-1. Resolve the authorization-provider compatibility question in REPORT.md. Configure
+1. Resolve the authorization-provider compatibility question in [xmsg/REPORT.md](xmsg/REPORT.md). Configure
    a dedicated OAuth client using the exact redirect URI shown by ChatGPT for this
    connection, with PKCE enabled, the two scopes, and only the owner account allowed.
    Configure the provider to issue tokens for the exact MCP resource URI.
@@ -187,3 +186,6 @@ References: [MCP Events](https://developers.openai.com/plugins/build/mcp-events)
 [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels),
 [OAuth](https://developers.openai.com/plugins/build/auth),
 [custom MCP setup](https://developers.openai.com/api/docs/guides/custom-mcp-server).
+
+Design, implementation reports, reviews and mutation evidence live under
+[`xmsg/`](xmsg/README.md).

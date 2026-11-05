@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-EVIDENCE = ROOT / "evidence"
+EVIDENCE = ROOT / "xmsg" / "evidence"
 MUTANTS = [
     ("01-auth", "phase1/app.py", "if not credential:", "if False:", "test_auth"),
     (
