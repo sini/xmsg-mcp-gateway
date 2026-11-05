@@ -31,4 +31,4 @@ FAILED tests/test_phase1.py::test_auth[tools/call] - assert 200 == 401
 FAILED tests/test_phase1.py::test_auth[events/list] - assert 200 == 401
 FAILED tests/test_phase1.py::test_auth[events/subscribe] - assert 200 == 401
 FAILED tests/test_phase1.py::test_auth[events/unsubscribe] - assert 200 == 401
-5 failed in 0.21s
+5 failed in 0.23s

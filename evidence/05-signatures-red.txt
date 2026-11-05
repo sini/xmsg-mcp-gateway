@@ -3,7 +3,7 @@ F                                                                        [100%]
 _______________________________ test_signatures ________________________________
 tests/test_phase1.py:243: in test_signatures
     Webhook(key).verify(challenge, challenge_headers)
-/home/sini/src/dot-phase1-placeholder/.venv/lib/python3.12/site-packages/standardwebhooks/webhooks.py:86: in verify
+/home/sini/src/xmsg-mcp-gateway/.venv/lib/python3.12/site-packages/standardwebhooks/webhooks.py:86: in verify
     raise WebhookVerificationError("No matching signature found")
 E   standardwebhooks.webhooks.WebhookVerificationError: No matching signature found
 =========================== short test summary info ============================

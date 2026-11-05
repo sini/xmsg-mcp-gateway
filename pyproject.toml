@@ -1,5 +1,5 @@
 [project]
-name = "dot-phase1-placeholder"
+name = "xmsg-mcp-gateway"
 version = "0.1.0"
 description = "Isolated synthetic MCP Events feasibility server"
 requires-python = ">=3.12"

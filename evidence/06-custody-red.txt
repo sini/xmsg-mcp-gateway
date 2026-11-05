@@ -4,7 +4,7 @@ _________________________________ test_custody _________________________________
 tests/test_phase1.py:274: in test_custody
     assert len(pending) == 1 and pending[0]["state"] == "pending"
 E   assert (1 == 1 and 'accepted' == 'pending'
-E    +  where 1 = len([{'sequence': 1, 'occurrence': 'crash-occurrence', 'event_id': 'xm_evt_9a88a7fc42e3024374ee4ecb57f6a7c4', 'body': b'{"...a7fc42e3024374ee4ecb57f6a7c4","name":"xmsg.message.received.v1","timestamp":"2026-11-05T20:33:23.979528+00:00"}', ...}])
+E    +  where 1 = len([{'sequence': 1, 'occurrence': 'crash-occurrence', 'event_id': 'xm_evt_fdd76a3878e25641bae1d7ac65189516', 'body': b'{"...6a3878e25641bae1d7ac65189516","name":"xmsg.message.received.v1","timestamp":"2026-11-05T20:59:45.324543+00:00"}', ...}])
 E     
 E     - pending
 E     + accepted)

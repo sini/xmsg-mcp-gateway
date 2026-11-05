@@ -14,7 +14,7 @@ OAuth resource server with online introspection per request and before dispatch;
 local fixture mode uses high-entropy revocable hashed tokens, never hosted bearer
 setup. No OAuth authorization server, xmsg adapter, or remote endpoints are created.
 
-User decisions: use the existing Kanidm deployment if compatible; prefer Tunnel
+User decisions: name the project `xmsg-mcp-gateway`; use the existing Kanidm deployment if compatible; prefer Tunnel
 and mandatory OAuth; continue autonomously until an actual owner input is needed.
 
 ## Tasks

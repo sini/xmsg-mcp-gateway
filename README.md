@@ -1,7 +1,7 @@
-# Phase 1 placeholder
+# xmsg-mcp-gateway
 
-An isolated synthetic MCP Events feasibility server. The component name and
-repository visibility are owner decisions. Nothing here connects to xmsg.
+An isolated synthetic MCP Events feasibility server. The owner selected the component name;
+repository visibility remains an owner decision. Nothing here connects to xmsg.
 
 The authenticated Streamable HTTP endpoint is `/mcp`. It offers one tool,
 `xmsg_identity`, and `events/list`, `events/subscribe`, `events/unsubscribe` for

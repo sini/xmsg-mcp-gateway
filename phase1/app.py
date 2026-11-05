@@ -63,7 +63,7 @@ def create_app(settings, store=None, http=None, oauth=None, run_worker=False):
                         "protocolVersion": init.protocolVersion,
                         "capabilities": {"tools": {}, "events": {}},
                         "serverInfo": {
-                            "name": "phase1-placeholder",
+                            "name": "xmsg-mcp-gateway",
                             "version": "0.1.0",
                         },
                     }
