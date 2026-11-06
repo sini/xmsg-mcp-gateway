@@ -39,6 +39,8 @@ with a nonzero exit and no success output. An enabled-binding conflict has a
 specific diagnostic, distinct from an unavailable store. Missing or unrecognized state fails
 closed; initialization is explicit and never overwrites an existing store.
 
+The Rust token-verification boundary is described in [verified-token foundation](docs/verified-identity.md). It is a library unit; the Rust serving handler remains pending.
+
 ## Local setup
 
 Requires Linux, Python 3.12 or newer, and uv. This uses a fresh repository, not a

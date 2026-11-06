@@ -2,6 +2,7 @@ use std::fs::OpenOptions;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::auth::VerifiedIdentity;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::Deserialize;
 use serde_json::Value;
@@ -152,18 +153,17 @@ impl Store {
         Ok(next)
     }
 
-    // This accepts only an already-verified identity; token verification is a separate boundary.
-    pub fn authorize(&self, binding: &Binding) -> Result<Authorization, Error> {
+    pub fn authorize(&self, binding: &VerifiedIdentity) -> Result<Authorization, Error> {
         self.connection
             .query_row(
                 "SELECT id, revision FROM grants WHERE service = ?1 AND issuer = ?2
              AND resource = ?3 AND subject = ?4 AND hosted_client = ?5 AND enabled = 1",
                 params![
-                    binding.service,
-                    binding.issuer,
-                    binding.resource,
-                    binding.subject,
-                    binding.hosted_client
+                    binding.service(),
+                    binding.issuer(),
+                    binding.resource(),
+                    binding.subject(),
+                    binding.hosted_client()
                 ],
                 |r| {
                     Ok(Authorization {

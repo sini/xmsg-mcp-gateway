@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/ui/authorize_binding.rs:2:74
+  |
+2 | fn authorize(store: &Store, binding: &Binding) { let _ = store.authorize(binding); }
+  |                                                                --------- ^^^^^^^ expected `&VerifiedIdentity`, found `&Binding`
+  |                                                                |
+  |                                                                arguments to this method are incorrect
+  |
+  = note: expected reference `&VerifiedIdentity`
+             found reference `&Binding`
+note: method defined here
+ --> src/grants.rs
+  |
+  |     pub fn authorize(&self, binding: &VerifiedIdentity) -> Result<Authorization, Error> {
+  |            ^^^^^^^^^

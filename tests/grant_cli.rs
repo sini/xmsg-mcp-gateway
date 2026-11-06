@@ -1,3 +1,6 @@
+#[path = "common/provider.rs"]
+mod provider;
+
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -33,21 +36,25 @@ fn local_owner_commands_preserve_disabled_enrollment_and_revisions() {
         .status
         .success());
     assert!(matches!(
-        Store::open(&state).unwrap().authorize(&binding()),
+        Store::open(&state)
+            .unwrap()
+            .authorize(&provider::verified(&binding())),
         Err(Error::Denied)
     ));
     assert!(run(&state, &["enable", "grant", "1"]).status.success());
     assert_eq!(
         Store::open(&state)
             .unwrap()
-            .authorize(&binding())
+            .authorize(&provider::verified(&binding()))
             .unwrap()
             .revision,
         2
     );
     assert!(run(&state, &["disable", "grant", "2"]).status.success());
     assert!(matches!(
-        Store::open(&state).unwrap().authorize(&binding()),
+        Store::open(&state)
+            .unwrap()
+            .authorize(&provider::verified(&binding())),
         Err(Error::Denied)
     ));
 }
@@ -66,13 +73,22 @@ fn unknown_stale_and_unchanged_ids_exit_nonzero_and_change_nothing() {
         let result = run(&state, &args);
         assert!(!result.status.success());
         assert!(result.stdout.is_empty());
-        assert!(matches!(store.authorize(&binding()), Err(Error::Denied)));
+        assert!(matches!(
+            store.authorize(&provider::verified(&binding())),
+            Err(Error::Denied)
+        ));
     }
     assert_eq!(store.set_enabled("grant", 1, true).unwrap(), 2);
     let result = run(&state, &["disable", "grant", "1"]);
     assert!(!result.status.success());
     assert!(result.stdout.is_empty());
-    assert_eq!(store.authorize(&binding()).unwrap().revision, 2);
+    assert_eq!(
+        store
+            .authorize(&provider::verified(&binding()))
+            .unwrap()
+            .revision,
+        2
+    );
 }
 
 #[test]
@@ -99,8 +115,17 @@ fn enabling_a_second_binding_reports_a_conflict_without_changes() {
     assert!(String::from_utf8(result.stderr)
         .unwrap()
         .contains("another binding is already enabled"));
-    assert_eq!(store.authorize(&binding()).unwrap().revision, 2);
-    assert!(matches!(store.authorize(&other), Err(Error::Denied)));
+    assert_eq!(
+        store
+            .authorize(&provider::verified(&binding()))
+            .unwrap()
+            .revision,
+        2
+    );
+    assert!(matches!(
+        store.authorize(&provider::verified(&other)),
+        Err(Error::Denied)
+    ));
     store.set_enabled("first", 2, false).unwrap();
     assert_eq!(store.set_enabled("second", 1, true).unwrap(), 2);
 }

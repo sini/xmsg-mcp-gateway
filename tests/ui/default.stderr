@@ -1,0 +1,5 @@
+error[E0277]: the trait bound `VerifiedIdentity: Default` is not satisfied
+ --> tests/ui/default.rs:2:39
+  |
+2 | fn main() { let _: VerifiedIdentity = Default::default(); }
+  |                                       ^^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `VerifiedIdentity`

@@ -1,0 +1,7 @@
+error[E0277]: the trait bound `VerifiedIdentity: From<Binding>` is not satisfied
+ --> tests/ui/from_binding.rs:2:60
+  |
+2 | fn convert(binding: Binding) -> VerifiedIdentity { binding.into() }
+  |                                                            ^^^^ the trait `From<Binding>` is not implemented for `VerifiedIdentity`
+  |
+  = note: required for `Binding` to implement `Into<VerifiedIdentity>`
