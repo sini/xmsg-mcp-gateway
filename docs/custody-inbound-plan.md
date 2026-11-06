@@ -12,9 +12,10 @@ A delivery is keyed by the configured bus-instance identity and upstream message
 ID. Its original grant ID/revision, mailbox owner, attested origin, correlation,
 stored body and event identity survive restart. A matching redelivery returns
 the stored event; a changed origin/body/correlation is durably quarantined before
-ACK. An oversized delivery or exhausted queue persists a content-free refusal
-before returning without ACK. Failure to persist custody, quarantine or refusal
-must never ACK.
+ACK. A deterministic refusal (including oversized input) persists a content-free
+record carrying actual bounded byte size before ACK. Transient admission-capacity
+and store/rollback failures remain unacknowledged. Failure to persist custody,
+quarantine or refusal must never ACK.
 
 All accepted work remains held in this unit. In particular, legacy unbound work
 and work accepted before first enable cannot select a first-subscription policy.
@@ -29,8 +30,9 @@ Acceptance oracles use isolated real-node fixtures, not fleet services:
 - Conflicting duplicates commit quarantine before ACK; repeated conflicts cannot
   exhaust the node's 100-slot service queue.
 - After ACK, restart the daemon again and prove zero redelivery (transport P3).
-- Oversized/full acceptance refuses without ACK, and a content-free refusal
-  survives restart and upstream expiry.
+- About 150 oversized messages produce 150 content-free refusal records and
+  leave no pending upstream slots; a following valid message is delivered.
+  Transient full admission or store failure remains unacknowledged.
 - Refusal/quarantine metadata has configurable age and count bounds, expiry
   counters and a visible failure when a new required record cannot be stored.
 - Known outstanding message age, rather than downtime alone, drives possible-loss

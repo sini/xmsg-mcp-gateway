@@ -4,7 +4,8 @@ use xmsg::client::{Delivery, RegisteredService};
 
 use crate::grants::{Error as GrantError, Store};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Scope {
     pub bus_instance: String,
     pub grant_id: String,
@@ -38,10 +39,16 @@ pub enum Acceptance {
     Duplicate { event_id: String },
     Quarantined,
     Refused,
+    Deferred,
 }
 impl Acceptance {
     fn can_ack(&self) -> bool {
-        !matches!(self, Self::Refused)
+        match self {
+            Self::Stored { .. } | Self::Duplicate { .. } | Self::Quarantined | Self::Refused => {
+                true
+            }
+            Self::Deferred => false,
+        }
     }
 }
 
@@ -53,8 +60,6 @@ pub enum Error {
     MigrationRequired,
     #[error("custody metadata capacity exhausted; delivery was not acknowledged")]
     MetadataFull,
-    #[error("custody mailbox does not match the configured grant")]
-    Mailbox,
     #[error(transparent)]
     Authority(#[from] GrantError),
     #[error("custody state unavailable")]
@@ -68,7 +73,7 @@ pub enum Error {
 pub(crate) fn validate_schema(connection: &Connection) -> Result<(), GrantError> {
     connection.prepare("SELECT bus, upstream_id, event_id, grant_id, grant_revision, mailbox, owner, origin, text, envelope, in_reply_to, fingerprint, received_at, expires_at, held FROM custody_items LIMIT 0")?;
     connection.prepare("SELECT event_id, state FROM custody_outbox LIMIT 0")?;
-    connection.prepare("SELECT bus, upstream_id, fingerprint, origin, reason, first_seen, expires_at FROM custody_metadata LIMIT 0")?;
+    connection.prepare("SELECT bus, upstream_id, fingerprint, origin, size, reason, first_seen, expires_at FROM custody_metadata LIMIT 0")?;
     connection.prepare("SELECT name, value FROM custody_counters LIMIT 0")?;
     Ok(())
 }
@@ -130,7 +135,7 @@ impl Store {
                 state TEXT NOT NULL CHECK(state IN ('held', 'expired')));
              CREATE TABLE custody_metadata (
                 bus TEXT NOT NULL, upstream_id TEXT NOT NULL, fingerprint TEXT NOT NULL,
-                origin TEXT NOT NULL, reason TEXT NOT NULL, first_seen INTEGER NOT NULL,
+                origin TEXT NOT NULL, size INTEGER NOT NULL CHECK(size >= 0), reason TEXT NOT NULL, first_seen INTEGER NOT NULL,
                 expires_at INTEGER NOT NULL, PRIMARY KEY(bus, upstream_id, fingerprint, reason)
              );
              CREATE TABLE custody_counters (name TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL);
@@ -144,7 +149,7 @@ impl Store {
     pub fn accept_delivery(
         &mut self,
         scope: &Scope,
-        mailbox: &str,
+        service: &RegisteredService,
         delivery: &Delivery,
         limits: &Limits,
         now: i64,
@@ -175,32 +180,23 @@ impl Store {
             return Err(Error::MigrationRequired);
         }
         expire(&tx, limits, now)?;
-        let (service, owner, revision): (String, String, i64) = tx
+        let mailbox = service
+            .address()
+            .ok_or(xmsg::client::ClientError::Disconnected)?;
+        let (owner, revision): (String, i64) = tx
             .query_row(
-                "SELECT service, subject, revision FROM grants WHERE id = ?1",
+                "SELECT subject, revision FROM grants WHERE id = ?1",
                 [&scope.grant_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?
             .ok_or(GrantError::Denied)?;
-        if mailbox
-            .split_once('@')
-            .map(|(name, node)| name == service && !node.is_empty())
-            != Some(true)
-        {
-            return Err(Error::Mailbox);
-        }
         let origin = serde_json::to_string(&serde_json::json!({
             "id": delivery.origin().id, "service": delivery.origin().service,
             "node": delivery.origin().node,
         }))?;
         let correlation = serde_json::to_string(&delivery.in_reply_to())?;
-        let hash = fingerprint(&[
-            &origin,
-            delivery.text(),
-            delivery.envelope(),
-            &correlation,
-        ]);
+        let hash = fingerprint(&[&origin, delivery.text(), delivery.envelope(), &correlation]);
         let existing: Option<(String, String)> = tx.query_row(
             "SELECT event_id, fingerprint FROM custody_items WHERE bus = ?1 AND upstream_id = ?2",
             params![scope.bus_instance, delivery.message_id()], |row| Ok((row.get(0)?, row.get(1)?)),
@@ -223,11 +219,18 @@ impl Store {
             .saturating_add(origin.len())
             .saturating_add(delivery.in_reply_to().map_or(0, str::len));
         let (count, bytes): (i64, i64) = tx.query_row("SELECT COUNT(*), COALESCE(SUM(length(CAST(text AS BLOB)) + length(CAST(envelope AS BLOB)) + length(CAST(origin AS BLOB)) + COALESCE(length(CAST(in_reply_to AS BLOB)), 0)), 0) FROM custody_items", [], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        let refused = size as u128 > limits.max_item_bytes as u128
+        let oversized = size as u128 > limits.max_item_bytes as u128;
+        let refused = oversized
             || count >= limits.max_items
             || size as u128 + bytes as u128 > limits.max_bytes as u128;
         if conflict || refused {
-            let reason = if conflict { "conflict" } else { "capacity" };
+            let reason = if conflict {
+                "conflict"
+            } else if oversized {
+                "oversized"
+            } else {
+                "capacity"
+            };
             let known: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM custody_metadata WHERE bus=?1 AND upstream_id=?2 AND fingerprint=?3 AND reason=?4)", params![scope.bus_instance, delivery.message_id(), hash, reason], |row| row.get(0))?;
             let records: i64 =
                 tx.query_row("SELECT COUNT(*) FROM custody_metadata", [], |row| {
@@ -236,12 +239,15 @@ impl Store {
             if !known && records >= limits.max_metadata {
                 return Err(Error::MetadataFull);
             }
-            tx.execute("INSERT OR IGNORE INTO custody_metadata (bus, upstream_id, fingerprint, origin, reason, first_seen, expires_at) VALUES (?1,?2,?3,?4,?5,?6,?7)", params![scope.bus_instance, delivery.message_id(), hash, origin, reason, now, now + limits.metadata_retention_secs])?;
+            let bounded_size = i64::try_from(size).map_err(|_| Error::Configuration)?;
+            tx.execute("INSERT OR IGNORE INTO custody_metadata (bus, upstream_id, fingerprint, origin, size, reason, first_seen, expires_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)", params![scope.bus_instance, delivery.message_id(), hash, origin, bounded_size, reason, now, now + limits.metadata_retention_secs])?;
             tx.commit()?;
             return Ok(if conflict {
                 Acceptance::Quarantined
-            } else {
+            } else if oversized {
                 Acceptance::Refused
+            } else {
+                Acceptance::Deferred
             });
         }
         let event_id = format!(
@@ -268,10 +274,7 @@ pub async fn receive_one(
     let Some(delivery) = service.poll(0).await? else {
         return Ok(None);
     };
-    let mailbox = service
-        .address()
-        .ok_or(xmsg::client::ClientError::Disconnected)?;
-    let accepted = store.accept_delivery(scope, mailbox, &delivery, limits, now)?;
+    let accepted = store.accept_delivery(scope, service, &delivery, limits, now)?;
     if accepted.can_ack() {
         service.ack(delivery.message_id()).await?;
     }

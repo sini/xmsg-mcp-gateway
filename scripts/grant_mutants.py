@@ -116,7 +116,7 @@ CASES = [
 ]
 
 
-def run(root, target, test, changed_source, *, test_timeout=30):
+def run(root, target, test, changed_source, *, test_timeout=30, test_args=()):
     env = {**os.environ, "CARGO_TARGET_DIR": str(ROOT / "target/grant-mutants-build")}
     built = subprocess.run(
         [
@@ -167,7 +167,7 @@ def run(root, target, test, changed_source, *, test_timeout=30):
         "changed library or application binary was cached"
     )
     return subprocess.run(
-        [executables[0]["executable"], test, "--exact"],
+        [executables[0]["executable"], test, "--exact", *test_args],
         cwd=root,
         env=env,
         capture_output=True,
