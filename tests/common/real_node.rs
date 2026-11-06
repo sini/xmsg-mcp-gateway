@@ -11,6 +11,8 @@ pub struct Node {
     pub config: XmsgConfig,
     child: Child,
     _temp: tempfile::TempDir,
+    federated: bool,
+    port: u16,
 }
 
 impl Drop for Node {
@@ -33,11 +35,20 @@ fn private_file(file: &Path, body: &[u8]) {
 
 pub fn pinned_binary() -> PathBuf {
     let pin = include_str!("../../ci/xmsg-pin.toml");
-    let revision = pin
+    let revisions: Vec<_> = pin
         .lines()
-        .find_map(|line| line.strip_prefix("revision = "))
-        .expect("fixture revision missing")
-        .trim_matches('"');
+        .filter_map(|line| {
+            line.strip_prefix("revision = ")
+                .or_else(|| line.strip_prefix("baseline_revision = "))
+        })
+        .map(|line| line.trim_matches('"'))
+        .collect();
+    let revision =
+        std::env::var("XMSG_GATEWAY_REVISION").unwrap_or_else(|_| revisions[0].to_owned());
+    assert!(
+        revisions.contains(&revision.as_str()),
+        "unapproved xmsg fixture revision"
+    );
     let binary = PathBuf::from(
         std::env::var_os("XMSG_GATEWAY_BIN").expect("required pinned xmsg binary missing"),
     );
@@ -52,12 +63,35 @@ pub fn pinned_binary() -> PathBuf {
     binary
 }
 
-impl Node {
-    pub async fn start(binary: &Path) -> Self {
-        Self::start_with_service(binary, "gateway").await
+pub struct Authority {
+    params: rcgen::CertificateParams,
+    key: rcgen::KeyPair,
+    pem: String,
+}
+impl Authority {
+    pub fn generate() -> Self {
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let mut params = rcgen::CertificateParams::default();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::CrlSign,
+            rcgen::KeyUsagePurpose::DigitalSignature,
+        ];
+        let pem = params.self_signed(&key).unwrap().pem();
+        Self { params, key, pem }
     }
+}
 
-    pub async fn start_with_service(binary: &Path, service: &str) -> Self {
+pub struct Prepared {
+    pub config: XmsgConfig,
+    pub port: u16,
+    pub uri: String,
+    temp: tempfile::TempDir,
+    federated: bool,
+}
+impl Prepared {
+    pub fn create(service: &str, user: &str, authority: Option<&Authority>) -> Self {
         let temp = tempfile::tempdir().unwrap();
         fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let run = temp.path().join("run");
@@ -67,78 +101,158 @@ impl Node {
             fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
         }
         let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let uri = format!("spiffe://example.test/host/fixture/user/{user}");
         let mut params = rcgen::CertificateParams::default();
-        params.subject_alt_names = vec![rcgen::SanType::URI(
-            "spiffe://example.test/host/fixture/user/gateway"
-                .try_into()
-                .unwrap(),
-        )];
+        params.subject_alt_names = vec![rcgen::SanType::URI(uri.clone().try_into().unwrap())];
         params.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature];
         params.extended_key_usages = vec![
             rcgen::ExtendedKeyUsagePurpose::ClientAuth,
             rcgen::ExtendedKeyUsagePurpose::ServerAuth,
         ];
-        let certificate = params.self_signed(&key).unwrap();
-        let cert_file = temp.path().join("node.pem");
-        let key_file = temp.path().join("node-key.pem");
-        private_file(&cert_file, certificate.pem().as_bytes());
-        private_file(&key_file, key.serialize_pem().as_bytes());
+        let certificate = match authority {
+            Some(ca) => params
+                .signed_by(&key, &rcgen::Issuer::from_params(&ca.params, &ca.key))
+                .unwrap(),
+            None => params.self_signed(&key).unwrap(),
+        };
+        private_file(&temp.path().join("node.pem"), certificate.pem().as_bytes());
+        private_file(
+            &temp.path().join("node-key.pem"),
+            key.serialize_pem().as_bytes(),
+        );
+        if let Some(ca) = authority {
+            private_file(&temp.path().join("ca.pem"), ca.pem.as_bytes());
+        }
         let config = XmsgConfig {
             service: service.into(),
-            expected_node: "gateway.fixture".into(),
+            expected_node: format!("{user}.fixture"),
             daemon_uid: xmsg::client::current_uid(),
             register_socket: run.join("register.sock"),
             agent_socket: run.join("agent.sock"),
             max_frame_bytes: 1_048_576,
             operation_timeout_ms: 5000,
         };
-        let child = Command::new(binary)
-            .env_clear()
-            .env("HOME", temp.path())
-            .env("XDG_RUNTIME_DIR", &run)
-            .env("RUST_LOG", "warn")
-            .arg("serve")
-            .arg("--db-path")
-            .arg(temp.path().join("node.db"))
-            .arg("--sessions-dir")
-            .arg(sessions)
-            .arg("--http-sock")
-            .arg(run.join("http.sock"))
-            .arg("--register-sock")
-            .arg(&config.register_socket)
-            .arg("--agent-sock")
-            .arg(&config.agent_socket)
-            .arg("--fed-cert")
-            .arg(cert_file)
-            .arg("--fed-key")
-            .arg(key_file)
-            .arg("--svc-exe")
-            .arg(format!(
-                "{service}={}",
-                std::env::current_exe().unwrap().display()
-            ))
-            .stdout(Stdio::null())
-            .stderr(Stdio::from(
-                OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(0o600)
-                    .open(temp.path().join("daemon.log"))
-                    .unwrap(),
-            ))
-            .spawn()
-            .unwrap();
-        let mut node = Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        Self {
             config,
-            child,
-            _temp: temp,
+            port,
+            uri,
+            temp,
+            federated: authority.is_some(),
+        }
+    }
+    pub fn peer(&self, other: &Self, grants: serde_json::Value) {
+        let mut peer = serde_json::json!({"address":format!("127.0.0.1:{}",other.port),
+            "ca":self.temp.path().join("ca.pem"), "identities":[other.uri],
+            "allow":["list","send","reply"], "principals":[other.config.service],
+            "targets":[self.config.service], "from":["127.0.0.1/32"]});
+        for (key, value) in grants.as_object().unwrap() {
+            peer[key] = value.clone();
+        }
+        let peers = serde_json::json!({"peers":{other.config.expected_node.clone():peer}});
+        private_file(
+            &self.temp.path().join("peers.json"),
+            peers.to_string().as_bytes(),
+        );
+    }
+    pub async fn launch(self, binary: &Path) -> Node {
+        let mut launch = command(binary, self.temp.path(), self.federated, self.port);
+        launch.arg("--svc-exe").arg(format!(
+            "{}={}",
+            self.config.service,
+            std::env::current_exe().unwrap().display()
+        ));
+        let mut node = Node {
+            config: self.config,
+            child: launch.spawn().unwrap(),
+            _temp: self.temp,
+            federated: self.federated,
+            port: self.port,
         };
+        node.ready().await;
+        node
+    }
+}
+
+fn command(binary: &Path, directory: &Path, federated: bool, port: u16) -> Command {
+    let run = directory.join("run");
+    let mut command = Command::new(binary);
+    command
+        .env_clear()
+        .env("HOME", directory)
+        .env("XDG_RUNTIME_DIR", &run)
+        .env("RUST_LOG", "warn")
+        .arg("serve")
+        .arg("--db-path")
+        .arg(directory.join("node.db"))
+        .arg("--sessions-dir")
+        .arg(directory.join("sessions"))
+        .arg("--http-sock")
+        .arg(run.join("http.sock"))
+        .arg("--register-sock")
+        .arg(run.join("register.sock"))
+        .arg("--agent-sock")
+        .arg(run.join("agent.sock"))
+        .arg("--fed-cert")
+        .arg(directory.join("node.pem"))
+        .arg("--fed-key")
+        .arg(directory.join("node-key.pem"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(0o600)
+                .open(directory.join("daemon.log"))
+                .unwrap(),
+        ));
+    if federated {
+        command
+            .arg("--peers-file")
+            .arg(directory.join("peers.json"))
+            .arg("--fed-listen")
+            .arg(format!("127.0.0.1:{port}"));
+    }
+    command
+}
+
+impl Node {
+    pub async fn start(binary: &Path) -> Self {
+        Self::start_with_service(binary, "gateway").await
+    }
+
+    pub async fn start_with_service(binary: &Path, service: &str) -> Self {
+        Prepared::create(service, "gateway", None)
+            .launch(binary)
+            .await
+    }
+    pub async fn restart(&mut self, binary: &Path) {
+        self.child.kill().unwrap();
+        self.child.wait().unwrap();
+        for name in ["register.sock", "agent.sock", "http.sock"] {
+            let socket = self._temp.path().join("run").join(name);
+            if socket.exists() {
+                fs::remove_file(socket).unwrap();
+            }
+        }
+        let mut launch = command(binary, self._temp.path(), self.federated, self.port);
+        launch.arg("--svc-exe").arg(format!(
+            "{}={}",
+            self.config.service,
+            std::env::current_exe().unwrap().display()
+        ));
+        self.child = launch.spawn().unwrap();
+        self.ready().await;
+    }
+    async fn ready(&mut self) {
         let deadline = Instant::now() + Duration::from_secs(15);
-        while !node.config.register_socket.exists() || !node.config.agent_socket.exists() {
+        while !self.config.register_socket.exists() || !self.config.agent_socket.exists() {
             assert!(
-                node.child.try_wait().unwrap().is_none(),
+                self.child.try_wait().unwrap().is_none(),
                 "fixture daemon exited: {}",
-                fs::read_to_string(node._temp.path().join("daemon.log")).unwrap()
+                fs::read_to_string(self._temp.path().join("daemon.log")).unwrap()
             );
             assert!(
                 Instant::now() < deadline,
@@ -146,6 +260,5 @@ impl Node {
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        node
     }
 }

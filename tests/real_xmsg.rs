@@ -69,3 +69,95 @@ async fn pinned_node_refuses_a_different_configured_identity() {
     assert!(matches!(config.register().await, Err(ClientError::Peer)));
     println!("gateway-real-node-complete:wrong-node");
 }
+
+async fn federation_cell(field: &str, denied: serde_json::Value) {
+    let binary = real_node::pinned_binary();
+    for negative in [false, true] {
+        let ca = real_node::Authority::generate();
+        let sender = real_node::Prepared::create("gateway", "gateway", Some(&ca));
+        let receiver = real_node::Prepared::create("receiver", "receiver", Some(&ca));
+        sender.peer(&receiver, serde_json::json!({}));
+        let grants = if negative {
+            serde_json::json!({field:denied})
+        } else {
+            serde_json::json!({})
+        };
+        receiver.peer(&sender, grants);
+        let sender = sender.launch(&binary).await;
+        let receiver = receiver.launch(&binary).await;
+        let from = sender.config.register().await.unwrap();
+        let mut to = receiver.config.register().await.unwrap();
+        let destination = to.address().unwrap().to_owned();
+        let sent = from
+            .send(
+                &destination,
+                "federation fixture body",
+                Some("federation-key"),
+            )
+            .await;
+        if negative {
+            assert!(sent.is_err(), "federation {field} refusal was bypassed");
+            assert!(
+                to.poll(0).await.unwrap().is_none(),
+                "federation {field} refusal delivered a message"
+            );
+        } else {
+            let receipt = sent.unwrap();
+            let delivery = to.poll(1).await.unwrap().unwrap();
+            assert_eq!(delivery.message_id(), receipt.message_id);
+            assert_eq!(delivery.origin().node, "gateway.fixture");
+            assert_eq!(delivery.origin().service.as_deref(), Some("gateway"));
+            assert_eq!(delivery.text(), "federation fixture body");
+            to.ack(delivery.message_id()).await.unwrap();
+        }
+    }
+    println!("gateway-real-node-complete:federation-{field}");
+}
+
+#[tokio::test]
+#[ignore = "mandatory pinned private-node compatibility profile"]
+async fn federation_requires_peer_send_permission() {
+    federation_cell("allow", serde_json::json!(["list"])).await;
+}
+#[tokio::test]
+#[ignore = "mandatory pinned private-node compatibility profile"]
+async fn federation_requires_the_approved_service_principal() {
+    federation_cell("principals", serde_json::json!(["different-service"])).await;
+}
+#[tokio::test]
+#[ignore = "mandatory pinned private-node compatibility profile"]
+async fn federation_requires_the_approved_target() {
+    federation_cell("targets", serde_json::json!(["different-target"])).await;
+}
+#[tokio::test]
+#[ignore = "mandatory pinned private-node compatibility profile"]
+async fn federation_requires_the_observed_source_address() {
+    federation_cell("from", serde_json::json!(["127.0.0.2/32"])).await;
+}
+
+#[tokio::test]
+#[ignore = "mandatory pinned private-node compatibility profile"]
+async fn unacked_delivery_retains_identity_across_daemon_restart() {
+    let binary = real_node::pinned_binary();
+    let mut node = real_node::Node::start(&binary).await;
+    let mut service = node.config.register().await.unwrap();
+    let sent = service
+        .send(
+            service.address().unwrap(),
+            "unacked fixture body",
+            Some("restart-key"),
+        )
+        .await
+        .unwrap();
+    let delivery = service.poll(1).await.unwrap().unwrap();
+    assert_eq!(delivery.message_id(), sent.message_id);
+    drop(service);
+    node.restart(&binary).await;
+    let mut service = node.config.register().await.unwrap();
+    let delivery = service.poll(1).await.unwrap().unwrap();
+    assert_eq!(delivery.message_id(), sent.message_id);
+    assert_eq!(delivery.text(), "unacked fixture body");
+    service.ack(delivery.message_id()).await.unwrap();
+    assert!(service.poll(0).await.unwrap().is_none());
+    println!("gateway-real-node-complete:restart-redelivery");
+}

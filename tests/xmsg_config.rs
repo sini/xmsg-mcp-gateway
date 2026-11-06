@@ -3,7 +3,7 @@
 use std::os::unix::fs::PermissionsExt;
 
 use serde_json::json;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use xmsg::client::ClientError;
 use xmsg_mcp_gateway::xmsg_config::XmsgConfig;
@@ -79,6 +79,8 @@ async fn registration_requires_the_configured_node_and_real_address() {
             assert_eq!(request["harness"], "svc");
             assert_eq!(request["name"], "gateway");
             stream.get_mut().write_all(b"{\"status\":\"ok\",\"node\":\"gateway.fixture\",\"address\":\"gateway@gateway.fixture\"}\n").await.unwrap();
+            let mut closed = [0];
+            assert_eq!(stream.read(&mut closed).await.unwrap(), 0);
         });
         let result = config.register().await;
         if accepted {
@@ -86,7 +88,11 @@ async fn registration_requires_the_configured_node_and_real_address() {
             assert_eq!(service.node(), Some("gateway.fixture"));
             assert_eq!(service.address(), Some("gateway@gateway.fixture"));
         } else {
-            assert!(matches!(result, Err(ClientError::Peer)));
+            assert!(
+                matches!(&result, Err(ClientError::Peer)),
+                "unexpected registration error: {:?}",
+                result.err()
+            );
         }
         server.await.unwrap();
     }
