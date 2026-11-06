@@ -32,6 +32,8 @@ pub enum Error {
     Denied,
     #[error("no grant changed: unknown id, stale revision or unchanged state")]
     NoChange,
+    #[error("another binding is already enabled for this service")]
+    Conflict,
     #[error("invalid empty grant binding")]
     InvalidBinding,
     #[error("unrecognized authority store")]
@@ -133,7 +135,13 @@ impl Store {
             "UPDATE grants SET enabled = ?1, revision = revision + 1
              WHERE id = ?2 AND revision = ?3 AND enabled != ?1",
             params![enabled, id, revision],
-        )?;
+        ).map_err(|error| {
+            if matches!(&error, rusqlite::Error::SqliteFailure(code, _) if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE) {
+                Error::Conflict
+            } else {
+                Error::Database(error)
+            }
+        })?;
         if changed != 1 {
             return Err(Error::NoChange);
         }

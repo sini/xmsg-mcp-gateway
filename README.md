@@ -10,8 +10,8 @@ The authenticated Streamable HTTP endpoint is `/mcp`. It offers one tool,
 
 The Rust library and local owner CLI persist disabled enrollment, exact service /
 issuer / resource / subject / hosted-client bindings, and revision-checked enable
-and disable operations. Runtime ceilings, audit/replay, and guarded HTTP/xmsg dispatch are
-pending. The Python reference uses its separate state store.
+and disable operations. Runtime ceilings, rebind, audit/replay, guarded HTTP/xmsg dispatch, the
+per-service operation guard and 401/403/503 mapping are pending. The Python reference uses its separate state store.
 
 Build with the toolchain in `rust-toolchain.toml` and the committed Cargo lockfile:
 
@@ -35,7 +35,8 @@ The owner supplies `binding.json` with exactly these fields:
 The subject and hosted client refer to the intended verified token recipient,
 separate from any introspection caller. Enrollment starts disabled at revision 1;
 each state change advances the revision. Unknown, stale and unchanged IDs fail
-with a nonzero exit and no success output. Missing or unrecognized state fails
+with a nonzero exit and no success output. An enabled-binding conflict has a
+specific diagnostic, distinct from an unavailable store. Missing or unrecognized state fails
 closed; initialization is explicit and never overwrites an existing store.
 
 ## Local setup

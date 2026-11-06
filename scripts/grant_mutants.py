@@ -10,6 +10,38 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CASES = [
     (
+        "cli-input-redaction",
+        "src/main.rs",
+        '#[error("invalid enrollment binding document")]',
+        '#[error("invalid enrollment binding document: {0}")]',
+        "grant_cli",
+        "invalid_enrollment_document_does_not_echo_input",
+    ),
+    (
+        "empty-binding",
+        "src/grants.rs",
+        ".any(|s| s.trim().is_empty())",
+        ".any(|_s| false)",
+        "grant_core",
+        "empty_and_whitespace_binding_fields_never_write_rows",
+    ),
+    (
+        "stale-revision",
+        "src/grants.rs",
+        "AND revision = ?3",
+        "AND ?3 IS NOT NULL",
+        "grant_core",
+        "unknown_stale_and_noop_mutations_fail_without_changes",
+    ),
+    (
+        "conflict-kind",
+        "src/grants.rs",
+        "Error::Conflict",
+        "Error::Database(error)",
+        "grant_core",
+        "one_enabled_binding_per_service",
+    ),
+    (
         "disabled-enrollment",
         "src/grants.rs",
         "VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, 0)",

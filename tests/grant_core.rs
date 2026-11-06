@@ -99,7 +99,10 @@ fn one_enabled_binding_per_service() {
     other.hosted_client = "other-client".into();
     store.enroll("second", &other).unwrap();
     store.set_enabled("first", 1, true).unwrap();
-    assert!(store.set_enabled("second", 1, true).is_err());
+    assert!(matches!(
+        store.set_enabled("second", 1, true),
+        Err(Error::Conflict)
+    ));
     assert!(matches!(store.authorize(&other), Err(Error::Denied)));
     store.set_enabled("first", 2, false).unwrap();
     assert_eq!(store.set_enabled("second", 1, true).unwrap(), 2);
@@ -147,4 +150,37 @@ fn foreign_store_metadata_is_refused_without_reinitialization() {
             .unwrap();
         assert_eq!(remaining, original + 1);
     }
+}
+
+#[test]
+fn empty_and_whitespace_binding_fields_never_write_rows() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("grants.db");
+    let mut store = Store::initialize(&db).unwrap();
+    store.enroll("known", &binding()).unwrap();
+    for blank in ["", " \t\n"] {
+        for field in 0..6 {
+            let mut invalid = binding();
+            let id = if field == 0 { blank } else { "candidate" };
+            match field {
+                0 => {}
+                1 => invalid.service = blank.into(),
+                2 => invalid.issuer = blank.into(),
+                3 => invalid.resource = blank.into(),
+                4 => invalid.subject = blank.into(),
+                _ => invalid.hosted_client = blank.into(),
+            }
+            assert!(matches!(
+                store.enroll(id, &invalid),
+                Err(Error::InvalidBinding)
+            ));
+            let rows: i64 = rusqlite::Connection::open(&db)
+                .unwrap()
+                .query_row("SELECT count(*) FROM grants", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(rows, 1);
+        }
+    }
+    assert_eq!(store.set_enabled("known", 1, true).unwrap(), 2);
+    assert_eq!(store.authorize(&binding()).unwrap().revision, 2);
 }

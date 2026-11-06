@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use xmsg_mcp_gateway::grants::{Binding, Store};
+use xmsg_mcp_gateway::grants::{Binding, Error as GrantError, Store};
 
 #[derive(Parser)]
 #[command(version, about = "Manage the gateway's local service grants")]
@@ -20,14 +20,26 @@ enum Command {
     Disable { id: String, revision: i64 },
 }
 
-fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+#[derive(Debug, thiserror::Error)]
+enum CommandError {
+    #[error(transparent)]
+    Grant(#[from] GrantError),
+    #[error("cannot read enrollment binding document")]
+    ReadBinding(#[source] std::io::Error),
+    #[error("invalid enrollment binding document")]
+    InvalidDocument(#[source] serde_json::Error),
+}
+
+fn run(cli: Cli) -> Result<(), CommandError> {
     match cli.command {
         Command::Init => {
             Store::initialize(&cli.state)?;
             println!("authority store initialized");
         }
         Command::Enroll { id, binding } => {
-            let binding: Binding = serde_json::from_slice(&std::fs::read(binding)?)?;
+            let document = std::fs::read(binding).map_err(CommandError::ReadBinding)?;
+            let binding: Binding =
+                serde_json::from_slice(&document).map_err(CommandError::InvalidDocument)?;
             Store::open(&cli.state)?.enroll(&id, &binding)?;
             println!("grant enrolled disabled at revision 1");
         }
@@ -44,8 +56,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn main() {
-    if run(Cli::parse()).is_err() {
-        eprintln!("grant command failed; no success recorded");
+    if let Err(error) = run(Cli::parse()) {
+        eprintln!("grant command failed: {error}");
         std::process::exit(1);
     }
 }

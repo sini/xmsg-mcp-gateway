@@ -82,3 +82,40 @@ fn missing_state_is_not_initialized_by_enable() {
     assert!(!run(&state, &["enable", "grant", "1"]).status.success());
     assert!(!state.exists());
 }
+
+#[test]
+fn enabling_a_second_binding_reports_a_conflict_without_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("grants.db");
+    let mut store = Store::initialize(&db).unwrap();
+    store.enroll("first", &binding()).unwrap();
+    let mut other = binding();
+    other.hosted_client = "another-client".into();
+    store.enroll("second", &other).unwrap();
+    store.set_enabled("first", 1, true).unwrap();
+    let result = run(&db, &["enable", "second", "1"]);
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+    assert!(String::from_utf8(result.stderr)
+        .unwrap()
+        .contains("another binding is already enabled"));
+    assert_eq!(store.authorize(&binding()).unwrap().revision, 2);
+    assert!(matches!(store.authorize(&other), Err(Error::Denied)));
+    store.set_enabled("first", 2, false).unwrap();
+    assert_eq!(store.set_enabled("second", 1, true).unwrap(), 2);
+}
+
+#[test]
+fn invalid_enrollment_document_does_not_echo_input() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("grants.db");
+    drop(Store::initialize(&db).unwrap());
+    let file = temp.path().join("binding.json");
+    std::fs::write(&file, r#"{"private-input-sentinel":"value"}"#).unwrap();
+    let result = run(&db, &["enroll", "candidate", file.to_str().unwrap()]);
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+    let error = String::from_utf8(result.stderr).unwrap();
+    assert!(error.contains("invalid enrollment binding document"));
+    assert!(!error.contains("private-input-sentinel"));
+}
