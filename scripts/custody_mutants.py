@@ -185,13 +185,22 @@ CASES += [
         "reconnected handle was not recorded",
     ),
 ]
+CASES += [
+    (
+        "explicit-migration",
+        "    store.require_custody_ready()?;",
+        "",
+        "failed_transaction_never_acknowledges_or_retains_partial_custody",
+        "legacy custody did not refuse before polling",
+    ),
+]
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", choices=[case[0] for case in CASES])
     args = parser.parse_args()
-    assert len(CASES) == 23, "custody mutant inventory drift"
+    assert len(CASES) == 24, "custody mutant inventory drift"
     evidence = ROOT / ".artifacts/custody-mutants"
     evidence.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="gateway-custody-mutants-") as directory:
@@ -239,7 +248,7 @@ def main():
                 print(f"{name}: GREEN baseline / RED intended", flush=True)
             finally:
                 file.write_text(SOURCE)
-        assert completed == (1 if args.case else 23)
+        assert completed == (1 if args.case else 24)
     print(f"custody-mutants-complete:{completed}", flush=True)
 
 

@@ -177,6 +177,16 @@ fn expire(tx: &rusqlite::Transaction<'_>, limits: &Limits, now: i64) -> Result<(
 }
 
 impl Store {
+    fn require_custody_ready(&self) -> Result<(), Error> {
+        let version: i64 = self
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version != crate::grants::MAX_SUPPORTED_SCHEMA_VERSION {
+            return Err(Error::MigrationRequired);
+        }
+        Ok(())
+    }
+
     pub fn record_custody_link(
         &mut self,
         scope: &Scope,
@@ -441,6 +451,7 @@ pub async fn receive_one(
     limits: &Limits,
     now: i64,
 ) -> Result<Option<Acceptance>, Error> {
+    store.require_custody_ready()?;
     let polled = match service.poll(0).await {
         Ok(delivery) => {
             store.record_custody_link(scope, true, limits, now)?;

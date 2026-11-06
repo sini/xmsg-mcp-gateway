@@ -189,14 +189,22 @@ fn foreign_store_metadata_is_refused_without_reinitialization() {
         let original: i64 = connection
             .pragma_query_value(None, pragma, |row| row.get(0))
             .unwrap();
-        connection
-            .pragma_update(None, pragma, original + 1)
-            .unwrap();
-        assert!(matches!(Store::open(&db), Err(Error::InvalidStore)));
-        let remaining: i64 = connection
-            .pragma_query_value(None, pragma, |row| row.get(0))
-            .unwrap();
-        assert_eq!(remaining, original + 1);
+        let invalid_versions = if pragma == "user_version" {
+            vec![
+                xmsg_mcp_gateway::grants::MAX_SUPPORTED_SCHEMA_VERSION + 1,
+                -1,
+            ]
+        } else {
+            vec![original + 1]
+        };
+        for invalid in invalid_versions {
+            connection.pragma_update(None, pragma, invalid).unwrap();
+            assert!(matches!(Store::open(&db), Err(Error::InvalidStore)));
+            let remaining: i64 = connection
+                .pragma_query_value(None, pragma, |row| row.get(0))
+                .unwrap();
+            assert_eq!(remaining, invalid);
+        }
     }
 }
 

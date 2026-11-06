@@ -248,10 +248,6 @@ async fn failed_transaction_never_acknowledges_or_retains_partial_custody() {
     let temp = tempfile::tempdir().unwrap();
     let db = temp.path().join("authority.db");
     let mut store = authority(&db);
-    store.migrate_custody().unwrap();
-    let injected = rusqlite::Connection::open(&db).unwrap();
-    injected.execute_batch("CREATE TRIGGER reject_outbox BEFORE INSERT ON custody_outbox BEGIN SELECT RAISE(ABORT, 'fixture disk failure'); END;").unwrap();
-    drop(injected);
     let scope = Scope {
         bus_instance: "isolated-node-db-1".into(),
         grant_id: "grant".into(),
@@ -265,15 +261,40 @@ async fn failed_transaction_never_acknowledges_or_retains_partial_custody() {
         )
         .await
         .unwrap();
-    assert!(xmsg_mcp_gateway::custody::receive_one(
-        &mut store,
-        &mut service,
-        &scope,
-        &Limits::default(),
-        100
-    )
-    .await
-    .is_err());
+    assert!(
+        matches!(
+            xmsg_mcp_gateway::custody::receive_one(
+                &mut store,
+                &mut service,
+                &scope,
+                &Limits::default(),
+                100
+            )
+            .await,
+            Err(xmsg_mcp_gateway::custody::Error::MigrationRequired)
+        ),
+        "legacy custody did not refuse before polling"
+    );
+    let injected = rusqlite::Connection::open(&db).unwrap();
+    let version: i64 = injected
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 1, "custody entry silently migrated state");
+    store.migrate_custody().unwrap();
+    injected.execute_batch("CREATE TRIGGER reject_outbox BEFORE INSERT ON custody_outbox BEGIN SELECT RAISE(ABORT, 'fixture disk failure'); END;").unwrap();
+    drop(injected);
+    assert!(
+        xmsg_mcp_gateway::custody::receive_one(
+            &mut store,
+            &mut service,
+            &scope,
+            &Limits::default(),
+            100
+        )
+        .await
+        .is_err(),
+        "failed custody transaction was not attempted after explicit migration"
+    );
     drop(service);
     node.restart(&binary).await;
     let mut service = node.config.register().await.unwrap();

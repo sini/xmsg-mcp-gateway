@@ -10,6 +10,7 @@ use thiserror::Error;
 
 const APPLICATION_ID: i64 = 0x584d4757;
 const SCHEMA_VERSION: i64 = 1;
+pub const MAX_SUPPORTED_SCHEMA_VERSION: i64 = 2;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -97,11 +98,13 @@ impl Store {
         let application: i64 =
             connection.pragma_query_value(None, "application_id", |r| r.get(0))?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if application != APPLICATION_ID || (version != SCHEMA_VERSION && version != 2) {
+        if application != APPLICATION_ID
+            || (version != SCHEMA_VERSION && version != MAX_SUPPORTED_SCHEMA_VERSION)
+        {
             return Err(Error::InvalidStore);
         }
         connection.prepare("SELECT id, service, issuer, resource, subject, hosted_client, revision, enabled FROM grants LIMIT 0")?;
-        if version == 2 {
+        if version == MAX_SUPPORTED_SCHEMA_VERSION {
             crate::custody::validate_schema(&connection)?;
         }
         Ok(Self { connection })

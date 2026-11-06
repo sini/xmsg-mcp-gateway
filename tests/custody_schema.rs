@@ -25,7 +25,17 @@ fn migration_is_explicit_and_preserves_disabled_authority() {
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
     assert_eq!(before, 1, "opening silently migrated state");
-    store.migrate_custody().unwrap();
+    let migrated = std::process::Command::new(env!("CARGO_BIN_EXE_xmsg-mcp-gateway"))
+        .arg("--state")
+        .arg(&db)
+        .arg("migrate-custody")
+        .output()
+        .unwrap();
+    assert!(migrated.status.success(), "owner migration command failed");
+    assert_eq!(
+        String::from_utf8(migrated.stdout).unwrap(),
+        "custody schema migrated; startup remains unavailable\n"
+    );
     let after: i64 = inspect
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();

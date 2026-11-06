@@ -97,4 +97,4 @@ jobs:
           revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')
           export XMSG_GATEWAY_BIN="$PWD/.artifacts/transport/$revision/xmsg"
           python3 scripts/custody_mutants.py | tee custody-mutants.log
-          grep -Fx 'custody-mutants-complete:23' custody-mutants.log
+          grep -Fx 'custody-mutants-complete:24' custody-mutants.log

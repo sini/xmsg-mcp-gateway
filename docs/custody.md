@@ -10,7 +10,12 @@ an existing authority database from schema 1 to 2. Migration is explicit and
 transactional; opening a database never creates missing state or silently
 migrates it. Existing subjects, grant revisions and disabled enrollment survive.
 An unchanged migration exits nonzero. Missing custody tables in schema 2 fail
-closed. The existing grant Store and its FULL-synchronous SQLite connection are
+closed. `receive_one` checks readiness before polling and returns
+`MigrationRequired` for v1 without consuming or acknowledging a message.
+There is no NixOS custody startup hook in this foundation: deployment must run
+the separate owner migration command explicitly before a future worker can start.
+The existing `serve` command still exposes only the earlier identity surface.
+The existing grant Store and its FULL-synchronous SQLite connection are
 reused; there is no second storage implementation.
 
 The configured bus-instance namespace and upstream ID identify a message. Set
@@ -73,4 +78,4 @@ ACK after a further daemon restart. Other cases drive 150 permanent refusals,
 retention, transient failures and mailbox selection. No fleet endpoints or
 credentials are used. Missing-binary and source-edited early-return controls must
 refuse. The source-mutant job rejects compile failures, cached library artifacts,
-timeouts and failures outside the named assertion; all 23 mutants must be killed.
+timeouts and failures outside the named assertion; all 24 mutants must be killed.
