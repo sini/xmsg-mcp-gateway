@@ -6,8 +6,9 @@ custody, wire types, frame bounds, deadlines, registration, list, keyed send,
 reply, poll and ACK remain in xmsg's client library. There is no gateway wire
 implementation or federation HTTP client.
 
-The library revision, actual daemon source revision and baseline are recorded in
-`ci/xmsg-pin.toml` and checked against Cargo.toml and Cargo.lock. The fixture
+The library revision and baseline daemon revision are recorded in
+`ci/xmsg-pin.toml`. The library revision is checked against Cargo.toml and
+Cargo.lock; both daemon revisions must be full commit IDs. The fixture
 builder checks the checked-out Git revision before making its sole baseline
 source change: embedding that revision in the CLI version. It builds both private
 daemons from source. The client-only normal dependency graph excludes daemon
@@ -30,7 +31,10 @@ The source-IP case uses an observed loopback address outside the admitted range;
 pinned node's enforcement code must each make the corresponding negative cell
 fail after its positive control passes. Build errors and timeouts are failures
 of the mutation run, never accepted kills. Fixtures use no fleet credentials or
-network endpoints. Service names remain plain parser-valid names.
+network endpoints. Until XR4, the gateway uses the configured plain service name
+without a complete validity check. From XR4 onward, service-name validity will be
+enforced through xmsg's shared validator; the follow-up gateway unit must re-pin
+to that export and call it at configuration load, before transport.
 
 This unit exposes no MCP messaging, subscriptions or custody. It does not wire
 transport settings into the serving configuration. Discovery filtering and
