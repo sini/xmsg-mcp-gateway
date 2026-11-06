@@ -1,16 +1,23 @@
 # Owner-provisioned authorization service; all names here are placeholders.
 auth_mode = "oauth"
+service_id = "xmsg"
+approved_hosted_oauth_client_id = "replace-with-approved-hosted-client"
 state_dir = ".state"
 exposure = "private"
 issuer = "https://auth.example/"
 resource = "https://mcp.example/mcp"
 subject = "replace-with-the-owner-subject"
 introspection_url = "https://auth.example/introspect"
-client_id = "replace-with-dedicated-introspection-client"
-client_secret_file = ".state/introspection-client-secret"
+introspection_auth_method = "client_secret_basic"
+introspection_client_id = "replace-with-dedicated-introspection-client"
+introspection_client_secret_file = ".state/introspection-client-secret"
 
 # Explicit public-HTTPS fallback (owner configures a TLS reverse proxy):
 # exposure = "public-https"
 # public_url = "https://mcp.example/mcp"
 # Keep the default loopback listener when a local reverse proxy can reach it.
 # A wildcard bind is permitted only with public-https and OAuth configured.
+
+# If provider discovery explicitly supports unauthenticated introspection:
+# introspection_auth_method = "none"
+# Omit both introspection client credential fields in that case.

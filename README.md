@@ -196,3 +196,44 @@ Design, implementation reports, reviews and recorded mutation evidence live in
 [Hindsight access review gist](https://gist.github.com/sini/5ab8844bb2bef8cc6806c3db1eaf1308)
 is available for sharing. Fresh mutation runs write to the gitignored
 `.artifacts/mutations/` directory in this code repository.
+
+## Reference implementation: service grants
+
+The Python implementation is the executable reference for the Rust gateway.
+Its provider and resource values are configurable; Nix and Kanidm are optional.
+Use the committed lockfile (`uv sync --locked`) and `config.oauth.example.toml`.
+Use a distinct state directory per service. `approved_hosted_oauth_client_id`
+identifies the token's client; the `introspection_client_*` fields authenticate
+provider lookup and do not authorize that client.
+
+Enrollment starts disabled. After reviewing the configured issuer, owner,
+resource, hosted client and scope ceiling, run:
+
+```sh
+uv run phase1 --config config.oauth.toml grant-enroll
+uv run phase1 --config config.oauth.toml grant-enable <grant-id>
+uv run phase1 --config config.oauth.toml grant-disable <grant-id>
+```
+
+Disable waits for a bounded submission already holding the operation guard.
+Once disable commits, later submissions are refused. It cannot recall packets
+already sent or cancel accepted upstream work. New access tokens cannot undo it.
+Re-enable preserves held old events. To replay one explicitly reviewed event:
+
+```sh
+uv run phase1 --config config.oauth.toml grant-replay <event-id> \
+  --operator <local-operator> --reason <reviewed-replay-reason>
+```
+
+Replay keeps the event ID, body and original acceptance snapshot and appends an
+audit record for the new dispatch snapshot. Subscription refresh does not replay
+held work. Migration holds legacy OAuth custody for review. Keep the encryption
+key with the state database; missing keys or unavailable policy fail closed.
+Invalid credentials return 401, missing/disabled grants 403, and unavailable
+authorization dependencies 503. `status` includes explicit held queue states.
+
+The private MCP listener can use Secure MCP Tunnel without a public gateway URL.
+Its metadata defines the canonical resource independently of the tunnel ID and
+local target. The OAuth broker still needs browser reachability. Copy the actual
+hosted UI callback into the broker's downstream client configuration; configure
+the broker's fixed callback separately in the upstream identity provider.

@@ -264,7 +264,10 @@ def test_custody(env):
             sys.executable,
             "-c",
             "import os,sys; from phase1.store import Store; "
-            'Store(sys.argv[1]).emit("crash-occurrence"); os._exit(73)',
+            "s=Store(sys.argv[1]); "
+            "from phase1.config import Settings; "
+            's.configure(Settings(auth_mode="local-test")); '
+            's.emit("crash-occurrence"); os._exit(73)',
             str(store.root),
         ],
         capture_output=True,
@@ -387,6 +390,7 @@ def test_oauth_claims_and_revocation(tmp_path):
         subject="owner-subject",
         introspection_url="https://issuer.example/introspect",
         client_id="fixture",
+        approved_hosted_oauth_client_id="hosted-H",
         client_secret_file=tmp_path / "secret",
     )
     settings.client_secret_file.write_text(secrets.token_urlsafe(32))
@@ -397,6 +401,7 @@ def test_oauth_claims_and_revocation(tmp_path):
             "iss": settings.issuer,
             "aud": settings.resource,
             "sub": settings.subject,
+            "client_id": "hosted-H",
             "scope": "identity:read events:subscribe",
             "exp": time.time() + 300,
         }
@@ -505,6 +510,7 @@ def test_oauth_http_and_delivery_revocation(tmp_path):
         subject="owner-subject",
         introspection_url="https://issuer.example/introspect",
         client_id="fixture",
+        approved_hosted_oauth_client_id="hosted-H",
         client_secret_file=key_file,
     )
     token = secrets.token_urlsafe(48)
@@ -522,6 +528,7 @@ def test_oauth_http_and_delivery_revocation(tmp_path):
                     "iss": settings.issuer,
                     "aud": settings.resource,
                     "sub": settings.subject,
+                    "client_id": "hosted-H",
                     "scope": "identity:read events:subscribe",
                     "exp": time.time() + 60,
                 }
@@ -529,6 +536,8 @@ def test_oauth_http_and_delivery_revocation(tmp_path):
 
     issuer = Issuer()
     oauth = OAuth(settings, issuer)
+    grant = store.enroll_grant(settings, ["identity:read", "events:subscribe"])
+    store.set_grant_enabled(grant, True)
     callback = Callback()
     client = TestClient(
         create_app(settings, store, callback, oauth), base_url="http://localhost"
@@ -709,6 +718,7 @@ def test_oauth_subscription_not_beyond_token(env):
         subject="owner-subject",
         introspection_url="https://issuer.example/introspect",
         client_id="fixture",
+        approved_hosted_oauth_client_id="hosted-H",
         client_secret_file=key_file,
     )
     expiry = time.time() + 30
@@ -721,11 +731,14 @@ def test_oauth_subscription_not_beyond_token(env):
                     "iss": settings.issuer,
                     "aud": settings.resource,
                     "sub": settings.subject,
+                    "client_id": "hosted-H",
                     "scope": "identity:read events:subscribe",
                     "exp": expiry,
                 }
             ).encode()
 
+    grant = store.enroll_grant(settings, ["identity:read", "events:subscribe"])
+    store.set_grant_enabled(grant, True)
     client = TestClient(
         create_app(settings, store, callback, OAuth(settings, Issuer())),
         base_url="http://localhost",

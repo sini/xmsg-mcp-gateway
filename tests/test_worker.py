@@ -24,6 +24,7 @@ def worker_env(tmp_path):
         subject="fixture-owner",
         introspection_url="https://issuer.example/introspect",
         client_id="fixture",
+        approved_hosted_oauth_client_id="hosted-H",
         client_secret_file=key_file,
     )
 
@@ -36,6 +37,7 @@ def worker_env(tmp_path):
                 "iss": settings.issuer,
                 "aud": settings.resource,
                 "sub": settings.subject,
+                "client_id": "hosted-H",
                 "scope": " ".join(SCOPES),
                 "exp": time.time() + 3600,
             }
@@ -59,6 +61,8 @@ def worker_env(tmp_path):
 
     issuer, callback = Issuer(), Callback()
     oauth = OAuth(settings, issuer)
+    grant = store.enroll_grant(settings, ["identity:read", "events:subscribe"])
+    store.set_grant_enabled(grant, True)
     credential = store.authenticate(secrets.token_urlsafe(48), oauth)
     request = Subscribe.model_validate(
         {

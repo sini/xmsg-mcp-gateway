@@ -4,14 +4,17 @@ import json
 import os
 import secrets
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import quote
 
 from cryptography.fernet import Fernet
 
-from .auth import PRINCIPAL
+from . import grants
+from .auth import PRINCIPAL, SCOPES
 
 MAX_OUTBOX = 1000
 
@@ -29,10 +32,15 @@ def encode(data):
 class Store:
     def __init__(self, root):
         self.root = Path(root)
+        self._guard_local = threading.local()
+        self.settings = None
+        self.grant_enforcement = True
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.root, 0o700)
         with self.guard():
             key_file = self.root / "key"
+            if not key_file.exists() and (self.root / "state.sqlite3").exists():
+                raise ValueError("existing state is missing its encryption key")
             if not key_file.exists():
                 fd = os.open(key_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 with os.fdopen(fd, "wb") as stream:
@@ -59,18 +67,100 @@ class Store:
                   body BLOB NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
                   attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL DEFAULT 0,
                   last_error TEXT);
+                CREATE TABLE IF NOT EXISTS service_profile (
+                  singleton INTEGER PRIMARY KEY CHECK(singleton=1), service_id TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS service_grants (
+                  id TEXT PRIMARY KEY, service_id TEXT NOT NULL, issuer TEXT NOT NULL,
+                  subject TEXT NOT NULL, resource TEXT NOT NULL, hosted_client_id TEXT NOT NULL,
+                  scope_ceiling TEXT NOT NULL, revision INTEGER NOT NULL, enabled INTEGER NOT NULL,
+                  UNIQUE(service_id,issuer,subject,resource,hosted_client_id));
+                CREATE UNIQUE INDEX IF NOT EXISTS one_enabled_grant ON service_grants(service_id) WHERE enabled=1;
+                CREATE TABLE IF NOT EXISTS grant_replays (
+                  event_id TEXT NOT NULL,old_grant_id TEXT,old_revision INTEGER,
+                  new_grant_id TEXT NOT NULL,new_revision INTEGER NOT NULL,
+                  operator TEXT NOT NULL,reason TEXT NOT NULL,recorded_at REAL NOT NULL);
                 """)
+                migrating = "accepted_grant_id" not in {
+                    r["name"] for r in db.execute("PRAGMA table_info(outbox)")
+                }
+                for table, columns in {
+                    "credentials": {"grant_id": "TEXT", "grant_revision": "INTEGER"},
+                    "subscription": {"grant_id": "TEXT", "grant_revision": "INTEGER"},
+                    "outbox": {
+                        "accepted_grant_id": "TEXT",
+                        "accepted_grant_revision": "INTEGER",
+                        "dispatch_grant_id": "TEXT",
+                        "dispatch_grant_revision": "INTEGER",
+                    },
+                }.items():
+                    existing = {
+                        r["name"]
+                        for r in db.execute("PRAGMA table_info(" + table + ")")
+                    }
+                    for column, kind in columns.items():
+                        if column not in existing:
+                            db.execute(
+                                "ALTER TABLE "
+                                + table
+                                + " ADD COLUMN "
+                                + column
+                                + " "
+                                + kind
+                            )
+                if (
+                    migrating
+                    and not db.execute(
+                        "SELECT 1 FROM credentials WHERE mode='local-test'"
+                    ).fetchone()
+                ):
+                    db.execute(
+                        "UPDATE outbox SET state='held_replay_required' WHERE state='pending'"
+                    )
+
+    def configure(self, settings):
+        if self.settings is None:
+            with self.guard(), self.db() as db:
+                row = db.execute("SELECT service_id FROM service_profile").fetchone()
+                if row and row["service_id"] != settings.service_id:
+                    raise ValueError("state directory belongs to another service")
+                db.execute(
+                    "INSERT OR IGNORE INTO service_profile VALUES (1,?)",
+                    (settings.service_id,),
+                )
+        elif self.settings.service_id != settings.service_id:
+            raise ValueError("state directory belongs to another service")
+        self.settings = settings
+        self.grant_enforcement = settings.auth_mode != "local-test"
+
+    def enroll_grant(self, settings, scopes):
+        return grants.enroll(self, settings, scopes)
+
+    def set_grant_enabled(self, identifier, enabled):
+        return grants.set_enabled(self, identifier, enabled)
+
+    def replay_event(self, event_id, operator, reason):
+        return grants.replay(self, event_id, operator, reason)
 
     @contextmanager
     def guard(self):
+        if getattr(self._guard_local, "held", False):
+            yield
+            return
         fd = os.open(self.root / "operation.lock", os.O_CREAT | os.O_RDWR, 0o600)
         with os.fdopen(fd, "rb") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            yield
+            self._guard_local.held = True
+            try:
+                yield
+            finally:
+                self._guard_local.held = False
 
     @contextmanager
     def db(self):
-        connection = sqlite3.connect(self.root / "state.sqlite3", timeout=15)
+        database = quote(str((self.root / "state.sqlite3").resolve()), safe="/")
+        connection = sqlite3.connect(
+            "file:" + database + "?mode=rw", uri=True, timeout=15
+        )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA synchronous=FULL")
         try:
@@ -104,12 +194,22 @@ class Store:
         if row and row["revoked"]:
             return None
         if oauth:
-            if not oauth.validate(token):
+            self.configure(oauth.settings)
+            claims = oauth.validate(token)
+            if not claims:
                 return None
             with self.guard(), self.db() as db:
+                grant = grants.resolve(db, oauth.settings, claims, SCOPES)
                 db.execute(
-                    "INSERT OR IGNORE INTO credentials(id,mode,token) VALUES (?,?,?)",
-                    (credential, "oauth", self.cipher.encrypt(token.encode())),
+                    "INSERT INTO credentials(id,mode,token,grant_id,grant_revision) VALUES (?,?,?,?,?) "
+                    "ON CONFLICT(id) DO UPDATE SET grant_id=excluded.grant_id,grant_revision=excluded.grant_revision",
+                    (
+                        credential,
+                        "oauth",
+                        self.cipher.encrypt(token.encode()),
+                        grant["id"],
+                        grant["revision"],
+                    ),
                 )
                 row = db.execute(
                     "SELECT * FROM credentials WHERE id=?", (credential,)
@@ -128,8 +228,18 @@ class Store:
         if not row or row["revoked"]:
             return False
         if row["mode"] == "oauth":
-            return bool(
-                oauth and oauth.validate(self.cipher.decrypt(row["token"]).decode())
+            if not oauth:
+                return False
+            claims = oauth.validate(self.cipher.decrypt(row["token"]).decode())
+            if not claims:
+                return False
+            try:
+                grant = grants.resolve(db, oauth.settings, claims, SCOPES)
+            except grants.GrantDenied:
+                return False
+            return (
+                grant["id"] == row["grant_id"]
+                and grant["revision"] == row["grant_revision"]
             )
         return oauth is None and row["mode"] == "local-test"
 
@@ -163,9 +273,41 @@ class Store:
                 },
                 "cursor": None,
             }
+            grant = None
+            if self.grant_enforcement:
+                if self.settings:
+                    grant = db.execute(
+                        "SELECT * FROM service_grants WHERE service_id=? AND issuer=? AND subject=? "
+                        "AND resource=? AND hosted_client_id=?",
+                        (
+                            self.settings.service_id,
+                            self.settings.issuer,
+                            self.settings.subject,
+                            self.settings.resource,
+                            self.settings.approved_hosted_oauth_client_id,
+                        ),
+                    ).fetchone()
+            state = (
+                "pending"
+                if not self.grant_enforcement or (grant and grant["enabled"])
+                else "held_grant_disabled"
+                if grant
+                else "held_unbound"
+            )
+            gid, revision = (grant["id"], grant["revision"]) if grant else (None, None)
             db.execute(
-                "INSERT INTO outbox(occurrence,event_id,body) VALUES (?,?,?)",
-                (occurrence, event_id, encode(event)),
+                "INSERT INTO outbox(occurrence,event_id,body,state,accepted_grant_id,accepted_grant_revision,"
+                "dispatch_grant_id,dispatch_grant_revision) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    occurrence,
+                    event_id,
+                    encode(event),
+                    state,
+                    gid,
+                    revision,
+                    gid,
+                    revision,
+                ),
             )
             return event_id
 
@@ -188,7 +330,17 @@ class Store:
                 if row["expires"] <= time.time()
                 else "active"
             )
-            counts = {s: 0 for s in ("pending", "accepted", "dead")}
+            counts = {
+                s: 0
+                for s in (
+                    "pending",
+                    "accepted",
+                    "dead",
+                    "held_unbound",
+                    "held_grant_disabled",
+                    "held_replay_required",
+                )
+            }
             counts.update(
                 dict(db.execute("SELECT state,count(*) FROM outbox GROUP BY state"))
             )

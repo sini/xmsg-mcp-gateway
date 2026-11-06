@@ -1,5 +1,7 @@
+import sqlite3
 import time
 
+from .grants import AuthorizationUnavailable, snapshot_active
 from .transport import HTTPS, signed_post
 
 
@@ -8,8 +10,16 @@ class Worker:
         self.store = store
         self.http = http or HTTPS()
         self.oauth = oauth
+        if oauth:
+            store.configure(oauth.settings)
 
     def once(self):
+        try:
+            return self._once()
+        except (sqlite3.Error, AuthorizationUnavailable):
+            return False
+
+    def _once(self):
         with self.store.guard(), self.store.db() as db:
             event = db.execute(
                 "SELECT * FROM outbox WHERE state='pending' ORDER BY sequence LIMIT 1"
@@ -29,9 +39,29 @@ class Worker:
                     (event["event_id"],),
                 )
                 return True
-            if not self.store.credential_active(
-                db, subscription["credential"], self.oauth
-            ):
+            if self.oauth:
+                gid, revision = (
+                    event["dispatch_grant_id"],
+                    event["dispatch_grant_revision"],
+                )
+                if (
+                    not gid
+                    or not snapshot_active(db, gid, revision)
+                    or subscription["grant_id"] != gid
+                    or subscription["grant_revision"] != revision
+                ):
+                    db.execute(
+                        "UPDATE outbox SET state='held_replay_required',last_error='grant_revision_mismatch' WHERE event_id=?",
+                        (event["event_id"],),
+                    )
+                    return False
+            try:
+                active = self.store.credential_active(
+                    db, subscription["credential"], self.oauth
+                )
+            except AuthorizationUnavailable:
+                return False
+            if not active:
                 return False
             attempts = event["attempts"] + 1
             db.execute(

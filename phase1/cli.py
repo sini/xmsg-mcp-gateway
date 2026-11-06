@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import sqlite3
 import sys
 import tomllib
 from pathlib import Path
@@ -8,6 +9,7 @@ from pathlib import Path
 import uvicorn
 
 from .app import create_app
+from .auth import SCOPES
 from .config import Settings
 from .store import Store
 
@@ -27,6 +29,15 @@ def main():
     commands.add_parser("reset-binding")
     retry = commands.add_parser("retry-dead")
     retry.add_argument("event_id")
+    enroll = commands.add_parser("grant-enroll")
+    enroll.add_argument("--scope", action="append", choices=SCOPES)
+    for name in ("grant-enable", "grant-disable"):
+        command = commands.add_parser(name)
+        command.add_argument("grant_id")
+    replay = commands.add_parser("grant-replay")
+    replay.add_argument("event_id")
+    replay.add_argument("--operator", required=True)
+    replay.add_argument("--reason", required=True)
     commands.add_parser("serve")
     args = parser.parse_args()
     config = tomllib.loads(args.config.read_text()) if args.config else {}
@@ -34,7 +45,18 @@ def main():
         config["state_dir"] = args.state
     settings = Settings(**config)
     store = Store(settings.state_dir)
+    store.configure(settings)
     match args.command:
+        case "grant-enroll":
+            print(store.enroll_grant(settings, args.scope or SCOPES))
+        case "grant-enable" | "grant-disable":
+            store.set_grant_enabled(args.grant_id, args.command == "grant-enable")
+            print("Grant state updated.")
+        case "grant-replay":
+            store.replay_event(args.event_id, args.operator, args.reason)
+            print(
+                "Selected held event rearmed with original identity and replay audit."
+            )
         case "issue-local-test":
             token = store.issue()
             fd = os.open(args.output, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -65,9 +87,13 @@ def main():
             )
         case "reset-binding":
             with store.guard(), store.db() as db:
+                if settings.auth_mode != "local-test":
+                    db.execute(
+                        "UPDATE outbox SET state='held_replay_required' WHERE state='pending'"
+                    )
                 db.execute("DELETE FROM subscription")
             print(
-                "Binding cleared; pending custody retained for the next verified subscription."
+                "Binding cleared; custody retained. OAuth custody requires selected replay."
             )
         case "retry-dead":
             with store.guard(), store.db() as db:
@@ -89,7 +115,7 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (ValueError, OSError):
+    except (ValueError, OSError, sqlite3.Error):
         print(
             "Configuration or local state error; inspect settings locally.",
             file=sys.stderr,

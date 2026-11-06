@@ -88,7 +88,8 @@ def subscribe(store, credential, request, http, oauth):
                 old, rotation_until = previous["old_secret"], previous["rotation_until"]
         verified_until = previous["verified_until"] if cached else time.time() + 300
         db.execute(
-            "INSERT OR REPLACE INTO subscription VALUES (1,?,?,?,?,?,?,?,1,?)",
+            "INSERT OR REPLACE INTO subscription(singleton,id,url,secret,old_secret,rotation_until,"
+            "expires,credential,active,verified_until,grant_id,grant_revision) VALUES (1,?,?,?,?,?,?,?,1,?,?,?)",
             (
                 identifier,
                 url,
@@ -98,6 +99,12 @@ def subscribe(store, credential, request, http, oauth):
                 expires,
                 credential,
                 verified_until,
+                db.execute(
+                    "SELECT grant_id FROM credentials WHERE id=?", (credential,)
+                ).fetchone()[0],
+                db.execute(
+                    "SELECT grant_revision FROM credentials WHERE id=?", (credential,)
+                ).fetchone()[0],
             ),
         )
         return {

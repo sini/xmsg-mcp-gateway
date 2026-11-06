@@ -11,7 +11,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 EVIDENCE = ROOT / ".artifacts" / "mutations"
 MUTANTS = [
-    ("01-auth", "phase1/app.py", "if not credential:", "if False:", "test_auth"),
+    (
+        "01-auth",
+        "phase1/store.py",
+        'if row and row["mode"] == "local-test" and not row["revoked"]',
+        "if True",
+        "test_auth",
+    ),
     (
         "02-unknown-fields",
         "phase1/schemas.py",
@@ -43,8 +49,8 @@ MUTANTS = [
     (
         "06-custody",
         "phase1/store.py",
-        "INSERT INTO outbox(occurrence,event_id,body) VALUES (?,?,?)",
-        "INSERT INTO outbox(occurrence,event_id,body,state) VALUES (?,?,?,'accepted')",
+        "encode(event),\n                    state,",
+        'encode(event),\n                    "accepted",',
         "test_custody",
     ),
     (
@@ -54,7 +60,39 @@ MUTANTS = [
         'bind: str = "0.0.0.0"',
         "test_default_bind",
     ),
+    (
+        "08-hosted-client",
+        "phase1/auth.py",
+        'and claims.get("client_id")\n                == self.settings.approved_hosted_oauth_client_id',
+        "and True",
+        "tests/test_grants.py::test_token_client_is_independent_of_lookup_caller",
+    ),
+    (
+        "09-disabled-enrollment",
+        "phase1/grants.py",
+        "INSERT INTO service_grants VALUES (?,?,?,?,?,?,?,1,0)",
+        "INSERT INTO service_grants VALUES (?,?,?,?,?,?,?,1,1)",
+        "tests/test_grants.py::test_enrollment_is_disabled_and_tokens_cannot_enroll",
+    ),
+    (
+        "10-disable-guard",
+        "phase1/grants.py",
+        "def set_enabled(store, identifier, enabled):\n    with store.guard(), store.db() as db:",
+        "def set_enabled(store, identifier, enabled):\n    with store.db() as db:",
+        "tests/test_grants.py::test_disable_waits_for_real_network_submission_and_blocks_later_work",
+    ),
+    (
+        "11-item-revision",
+        "phase1/worker.py",
+        'event["dispatch_grant_id"],\n                    event["dispatch_grant_revision"],',
+        'subscription["grant_id"],\n                    subscription["grant_revision"],',
+        "tests/test_grants.py::test_worker_checks_the_items_snapshot_not_only_the_subscription",
+    ),
 ]
+
+
+def test_path(test):
+    return test if "::" in test else "tests/test_phase1.py::" + test
 
 
 def run(directory, test):
@@ -65,7 +103,7 @@ def run(directory, test):
             "pytest",
             "-q",
             "--tb=short",
-            "tests/test_phase1.py::" + test,
+            test_path(test),
         ],
         cwd=directory,
         env={**os.environ, "PYTHONPATH": str(directory)},
@@ -105,10 +143,7 @@ def main():
             for cache in root.rglob("__pycache__"):
                 shutil.rmtree(cache)
             red = run(root, test)
-            if (
-                red.returncode != 1
-                or "FAILED tests/test_phase1.py::" + test not in red.stdout
-            ):
+            if red.returncode != 1 or "FAILED " + test_path(test) not in red.stdout:
                 raise RuntimeError(
                     name + ": mutant was not killed by its intended test"
                 )
@@ -124,7 +159,9 @@ def main():
             (EVIDENCE / (name + "-green.txt")).write_text(green.stdout + green.stderr)
             (EVIDENCE / (name + "-red.txt")).write_text(red.stdout + red.stderr)
             print(name + ": GREEN control, RED mutant (exit 1)", flush=True)
-    print("7/7 single-site production mutants killed; originals untouched.")
+    print(
+        f"{len(MUTANTS)}/{len(MUTANTS)} single-site production mutants killed; originals untouched."
+    )
 
 
 if __name__ == "__main__":

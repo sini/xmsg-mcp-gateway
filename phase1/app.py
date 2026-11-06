@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
 
@@ -12,6 +13,7 @@ from starlette.routing import Route
 
 from .auth import PRINCIPAL, SCOPES, OAuth
 from .events import CallbackError, subscribe, unsubscribe
+from .grants import AuthorizationUnavailable, GrantDenied
 from .schemas import (
     EVENT,
     PAYLOAD,
@@ -39,6 +41,7 @@ def error(code, message, identifier=None, reason=None):
 
 def create_app(settings, store=None, http=None, oauth=None, run_worker=False):
     store = store or Store(settings.state_dir)
+    store.configure(settings)
     http = http or HTTPS()
     if settings.auth_mode == "oauth":
         oauth = oauth or OAuth(settings)
@@ -161,6 +164,13 @@ def create_app(settings, store=None, http=None, oauth=None, run_worker=False):
         except PermissionError:
             return error(-32001, "Access revoked", identifier)
 
+    def authorized_dispatch(body, token):
+        with store.guard():
+            credential = store.authenticate(token, oauth)
+            if not credential:
+                raise PermissionError("credential no longer active")
+            return dispatch(body, credential)
+
     async def endpoint(request: Request):
         try:
             host = urlsplit("//" + request.headers.get("host", "")).hostname
@@ -184,9 +194,16 @@ def create_app(settings, store=None, http=None, oauth=None, run_worker=False):
         token = (
             header[7:] if header.startswith("Bearer ") and len(header) <= 8192 else ""
         )
-        credential = (
-            await run_in_threadpool(store.authenticate, token, oauth) if token else None
-        )
+        try:
+            credential = (
+                await run_in_threadpool(store.authenticate, token, oauth)
+                if token
+                else None
+            )
+        except GrantDenied:
+            return Response(status_code=403)
+        except (AuthorizationUnavailable, sqlite3.Error):
+            return Response(status_code=503, headers={"Retry-After": "5"})
         if not credential:
             challenge = "Bearer"
             if settings.resource:
@@ -213,7 +230,13 @@ def create_app(settings, store=None, http=None, oauth=None, run_worker=False):
         except (ValueError, UnicodeDecodeError):
             return JSONResponse(error(-32700, "Parse error"))
         try:
-            response = await run_in_threadpool(dispatch, body, credential)
+            response = await run_in_threadpool(authorized_dispatch, body, token)
+        except GrantDenied:
+            return Response(status_code=403)
+        except PermissionError:
+            return Response(status_code=401)
+        except (AuthorizationUnavailable, sqlite3.Error):
+            return Response(status_code=503, headers={"Retry-After": "5"})
         except Exception:
             return JSONResponse(error(-32603, "Internal error"))
         if response is None or (isinstance(body, dict) and "id" not in body):

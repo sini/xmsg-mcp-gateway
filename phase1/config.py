@@ -1,12 +1,19 @@
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 
 class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     state_dir: Path = Path(".state")
+    service_id: str = Field(
+        default="xmsg", min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$"
+    )
+    approved_hosted_oauth_client_id: str | None = Field(default=None, min_length=1)
+    introspection_auth_method: Literal["client_secret_basic", "none"] = (
+        "client_secret_basic"
+    )
     auth_mode: Literal["oauth", "local-test"] = "oauth"
     exposure: Literal["private", "public-https"] = "private"
     bind: str = "127.0.0.1"
@@ -16,8 +23,16 @@ class Settings(BaseModel):
     resource: str | None = None
     subject: str | None = None
     introspection_url: str | None = None
-    client_id: str | None = None
-    client_secret_file: Path | None = None
+    client_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("introspection_client_id", "client_id"),
+    )
+    client_secret_file: Path | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "introspection_client_secret_file", "client_secret_file"
+        ),
+    )
 
     @model_validator(mode="after")
     def safe(self):
