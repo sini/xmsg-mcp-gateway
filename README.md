@@ -6,6 +6,38 @@ The authenticated Streamable HTTP endpoint is `/mcp`. It offers one tool,
 `xmsg_identity`, and `events/list`, `events/subscribe`, `events/unsubscribe` for
 `xmsg.message.received.v1`. There are no messaging or discovery tools.
 
+## Rust grant-store foundation
+
+The Rust library and local owner CLI persist disabled enrollment, exact service /
+issuer / resource / subject / hosted-client bindings, and revision-checked enable
+and disable operations. Runtime ceilings, audit/replay, and guarded HTTP/xmsg dispatch are
+pending. The Python reference uses its separate state store.
+
+Build with the toolchain in `rust-toolchain.toml` and the committed Cargo lockfile:
+
+```sh
+cargo test --locked -j 4
+cargo clippy --locked --all-targets -j 4 -- -D warnings
+python3 scripts/grant_mutants.py
+install -d -m 700 .state
+cargo run --locked -- --state .state/grants.db init
+cargo run --locked -- --state .state/grants.db enroll grant-id binding.json
+cargo run --locked -- --state .state/grants.db enable grant-id 1
+cargo run --locked -- --state .state/grants.db disable grant-id 2
+```
+
+The owner supplies `binding.json` with exactly these fields:
+
+```json
+{"service":"gateway","issuer":"https://issuer.example/","resource":"https://gateway.example/mcp","subject":"owner-subject","hosted_client":"approved-hosted-client"}
+```
+
+The subject and hosted client refer to the intended verified token recipient,
+separate from any introspection caller. Enrollment starts disabled at revision 1;
+each state change advances the revision. Unknown, stale and unchanged IDs fail
+with a nonzero exit and no success output. Missing or unrecognized state fails
+closed; initialization is explicit and never overwrites an existing store.
+
 ## Local setup
 
 Requires Linux, Python 3.12 or newer, and uv. This uses a fresh repository, not a

@@ -1,0 +1,42 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  python-reference:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - run: python3 -m pip install uv==0.13.5
+      - run: uv sync --locked --python 3.12 --link-mode copy
+      - run: uv run --locked pytest -q
+      - run: uv run --locked ruff check phase1 tests scripts
+      - run: uv run --locked python scripts/mutations.py
+  rust:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Install pinned Rust toolchain
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          rustup toolchain install "$version" --profile minimal --component rustfmt,clippy
+          rustup default "$version"
+      - run: cargo fmt --all -- --check
+      - run: cargo test --locked -j 4
+      - run: cargo clippy --locked --all-targets -j 4 -- -D warnings
+      - name: Grant source mutants
+        if: runner.os == 'Linux'
+        run: python3 scripts/grant_mutants.py
