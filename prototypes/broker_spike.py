@@ -105,6 +105,8 @@ async def run(
         upstream_client_secret=upstream_secret,
         token_verifier=KanidmVerifier(),
         base_url="https://broker.example",
+        issuer_url="https://broker.example/",
+        resource_base_url="https://resource.example",
         allowed_client_redirect_uris=["https://hosted.example/callback"],
         valid_scopes=["openid", "profile"],
         forward_resource=False,
@@ -138,8 +140,9 @@ async def run(
         Settings(
             state_dir=root / "gateway-state",
             auth_mode="oauth",
-            issuer="https://broker.example",
-            resource="https://broker.example/mcp",
+            issuer="https://broker.example/",
+            public_url="https://broker.example",
+            resource="https://resource.example/mcp",
         ),
         oauth=GrantIdentity(),
     )
@@ -186,7 +189,7 @@ async def run(
                 "state": secrets.token_urlsafe(32),
                 "code_challenge": challenge,
                 "code_challenge_method": "S256",
-                "resource": "https://broker.example/mcp",
+                "resource": "https://resource.example/mcp",
             }
             r = await browser.get("/authorize", params=params)
             if r.status_code != 302:
@@ -263,6 +266,22 @@ async def run(
             report["downstream_hosted_client_preserved"] = (
                 claims.get("client_id") == hosted_id
             )
+            report["issuer_and_resource_are_distinct"] = (
+                claims.get("iss") == "https://broker.example/"
+                and claims.get("aud") == "https://resource.example/mcp"
+            )
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=gateway), base_url="http://localhost"
+            ) as private:
+                resource_metadata = await private.get(
+                    "/.well-known/oauth-protected-resource/mcp"
+                )
+                metadata_body = resource_metadata.json()
+                report["resource_comes_from_private_gateway_metadata"] = (
+                    resource_metadata.status_code == 200
+                    and metadata_body["resource"] == claims["aud"]
+                    and metadata_body["authorization_servers"] == [claims["iss"]]
+                )
             validated = await proxy.load_access_token(issued["access_token"])
             report["verified_upstream_owner_available"] = (
                 validated is not None and validated.subject == expected_subject
@@ -324,7 +343,7 @@ async def run(
                 headers=bearer,
             ) as api:
                 async with streamable_http_client(
-                    "https://broker.example/mcp", http_client=api
+                    "https://resource.example/mcp", http_client=api
                 ) as streams:
                     async with ClientSession(streams[0], streams[1]) as session:
                         await session.initialize()
@@ -374,5 +393,7 @@ async def run(
                     },
                 )
             ).status_code == 401
-    assert all(report.values()), "a broker feasibility control failed"
+    assert all(report.values()), "failed controls: " + ", ".join(
+        k for k, v in report.items() if not v
+    )
     return report
