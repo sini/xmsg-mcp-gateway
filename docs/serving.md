@@ -71,8 +71,10 @@ listener. Origins must be explicitly listed when an Origin header is present.
 
 ## Request enforcement
 
-The handler bounds the request body at 64 KiB and the entire request at the
-configured deadline (1–60000 ms). After reading the body, each request obtains a
+The handler bounds the request body at 64 KiB and the handler, once headers are
+parsed, at the configured deadline (1–60000 ms). This covers body reading,
+verification, policy lookup and dispatch. It does not bound the HTTP header phase
+or idle keep-alive connections. After reading the body, each request obtains a
 fresh verified identity from the configured provider and reads the current grant
 from the store. SQL runs off the async reactor with tracing context preserved.
 Expiry is checked again after the policy read, so waiting on a store lock cannot
@@ -96,3 +98,44 @@ and success/one open for a valid credential with available state.
 This listener is an implementation unit, not evidence of hosted OAuth, tunnel or
 federation compatibility. The live provider/broker and deployment choices, queued
 custody, callbacks, and actual xmsg operations retain their separate gates.
+
+
+## Activation preconditions and next serving unit
+
+P1 and P5 block exposure beyond the current local loopback use, including exposure
+through a tunnel even when the listener still binds loopback. They must pass
+before such activation:
+
+- **P1 — connection admission and lifetime:** enforce a header-read deadline, an
+  idle keep-alive deadline and a connection cap. Real TCP oracles send partial
+  headers and park an idle keep-alive connection; both must close within their
+  configured bounds. Occupying the cap must prevent additional admitted work,
+  with zero additional provider requests, store opens or dispatches. A complete
+  authenticated request below the cap must succeed, and releasing a slot must
+  admit another request. Source mutants removing each timer or the cap must turn
+  its named oracle red.
+- **P5 — declared oversized bodies:** with headers declaring a Content-Length
+  above 64 KiB and no body bytes sent, return 413 promptly, before the handler
+  deadline, with zero provider requests, store opens or dispatches. A permitted
+  declared length and complete valid request must succeed. Removing the early
+  length check must fail the named oracle; waiting for the handler deadline is
+  not an acceptable 413.
+
+The next serving unit also carries these findings:
+
+- **P2:** advertise the RFC 9728 insertion form
+  `/.well-known/oauth-protected-resource{resource-path}` in WWW-Authenticate;
+  fetch the advertised URL and verify its resource matches the configured URI.
+- **P3:** enforce consistency between the configured resource path and the served
+  MCP endpoint. Test matching paths and refuse an unsupported mismatch at load
+  time; do not silently assume a path-rewriting tunnel.
+- **P4:** pin the intended serving mutation case count and completion. Removing a
+  case or returning before completion must fail CI.
+- **P6:** bound serving SQLite lock waits by the remaining handler budget, so a
+  503 cannot leave a 30-second blocking task behind. Hold a real store lock, let
+  the request deadline expire, and prove the worker exits within the budget;
+  unlocking the store must permit a subsequent valid request. A source mutant
+  restoring the longer wait must fail this oracle.
+
+The provider/broker, transport, custody and hosted feasibility gates above remain
+required independently of these connection and serving checks.
