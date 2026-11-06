@@ -99,11 +99,11 @@ CASES += [
         next(
             line
             for line in SOURCE.splitlines()
-            if 'tx.execute("UPDATE custody_links SET disconnected_at=' in line
+            if 'tx.execute("INSERT INTO custody_gaps' in line
         ),
         "",
-        "metadata_retention_and_status_survive_restart_without_fake_loss_ids",
-        "disconnect uncertainty was not durable",
+        "refusal_and_offline_uncertainty_outlive_real_upstream_expiry",
+        "durable offline gap missing",
     ),
     (
         "message-age-warning",
@@ -194,13 +194,52 @@ CASES += [
         "legacy custody did not refuse before polling",
     ),
 ]
+CASES += [
+    (
+        "transient-refusal-row",
+        "if !conflict && refused && !oversized {",
+        "if false {",
+        "transient_capacity_and_failed_refusal_persistence_keep_redelivery",
+        "transient deferral became a refusal",
+    ),
+    (
+        "refusal-write",
+        metadata_write,
+        "",
+        "permanent_refusals_do_not_starve_valid_traffic",
+        "permanent refusal audit missing",
+    ),
+    (
+        "gap-ttl",
+        "(gap_end-gap_start)>=?3",
+        "(gap_end-gap_start)>=0",
+        "refusal_and_offline_uncertainty_outlive_real_upstream_expiry",
+        "sub-TTL restart reported an offline gap",
+    ),
+]
+CASES += [
+    (
+        "gap-retention",
+        "DELETE FROM custody_gaps WHERE expires_at<=?1",
+        "DELETE FROM custody_gaps WHERE 0 AND expires_at<=?1",
+        "idle_poll_enforces_retention_and_observes_connection_changes",
+        "expired gaps latched uncertainty",
+    ),
+    (
+        "gap-count",
+        "if count >= limits.max_gap_intervals {",
+        "if false {",
+        "idle_poll_enforces_retention_and_observes_connection_changes",
+        "gap interval budget was not bounded",
+    ),
+]
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", choices=[case[0] for case in CASES])
     args = parser.parse_args()
-    assert len(CASES) == 24, "custody mutant inventory drift"
+    assert len(CASES) == 29, "custody mutant inventory drift"
     evidence = ROOT / ".artifacts/custody-mutants"
     evidence.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="gateway-custody-mutants-") as directory:
@@ -248,7 +287,7 @@ def main():
                 print(f"{name}: GREEN baseline / RED intended", flush=True)
             finally:
                 file.write_text(SOURCE)
-        assert completed == (1 if args.case else 24)
+        assert completed == (1 if args.case else 29)
     print(f"custody-mutants-complete:{completed}", flush=True)
 
 

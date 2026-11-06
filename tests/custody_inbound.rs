@@ -911,6 +911,39 @@ async fn transient_capacity_and_failed_refusal_persistence_keep_redelivery() {
         redelivered.contains(&second.message_id) && redelivered.contains(&third.message_id),
         "storage failure ACKed a pending delivery"
     );
+    drop(service);
+    node.restart(&binary).await;
+    let mut service = node.config.register().await.unwrap();
+    let expanded = Limits {
+        max_items: 3,
+        max_metadata: 3,
+        ..Limits::default()
+    };
+    for _ in 0..2 {
+        assert!(matches!(
+            xmsg_mcp_gateway::custody::receive_one(
+                &mut store,
+                &mut service,
+                &scope,
+                &expanded,
+                103
+            )
+            .await
+            .unwrap(),
+            Some(Acceptance::Stored { .. })
+        ));
+    }
+    let status = store
+        .custody_status(&scope, &expanded, 104, 604800)
+        .unwrap();
+    assert_eq!(status.refusals, 0, "transient deferral became a refusal");
+    let inspect = rusqlite::Connection::open(&db).unwrap();
+    let records: i64 = inspect
+        .query_row("SELECT COUNT(*) FROM custody_metadata", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(records, 0, "transient deferral consumed refusal budget");
     println!("gateway-custody-complete:transient-capacity");
 }
 
@@ -1084,76 +1117,90 @@ async fn refusal_metadata_is_bounded_and_failed_audit_never_acks() {
 #[tokio::test]
 #[ignore = "mandatory private-node custody profile"]
 async fn refusal_and_offline_uncertainty_outlive_real_upstream_expiry() {
-    let binary = real_node::pinned_binary();
-    let mut node = real_node::Node::start_with_reply_ttl(&binary, 1).await;
-    let temp = tempfile::tempdir().unwrap();
-    let db = temp.path().join("authority.db");
-    let mut store = authority(&db);
-    store.migrate_custody().unwrap();
-    let scope = Scope {
-        bus_instance: "isolated-node-db-1".into(),
-        grant_id: "grant".into(),
-    };
-    let limits = Limits {
-        max_item_bytes: 1,
-        ..Limits::default()
-    };
-    let mut service = node.config.register().await.unwrap();
-    let sent = service
-        .send(
-            service.address().unwrap(),
-            "expires upstream",
-            Some("upstream-expiry"),
-        )
-        .await
-        .unwrap();
-    xmsg_mcp_gateway::custody::receive_one(&mut store, &mut service, &scope, &limits, 100)
-        .await
-        .unwrap();
-    store
-        .record_custody_link(&scope, false, &limits, 101)
-        .unwrap();
-    drop(service);
-    drop(store);
-    tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
-    node.restart(&binary).await;
-    let mut service = node.config.register().await.unwrap();
-    assert!(service.poll(0).await.unwrap().is_none());
-    let node_db = node
-        .config
-        .register_socket
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("node.db");
-    let upstream = rusqlite::Connection::open(&node_db).unwrap();
-    let expired: i64 = upstream
-        .query_row(
-            "SELECT COUNT(*) FROM svc_pending_messages WHERE id=?1",
-            [&sent.message_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        expired, 0,
-        "shortened real upstream TTL did not expire the row"
-    );
-    let mut store = Store::open(&db).unwrap();
-    store
-        .record_custody_link(&scope, true, &limits, 104)
-        .unwrap();
-    let status = store.custody_status(&scope, &limits, 104, 1).unwrap();
-    assert_eq!(
-        status.refusals, 1,
-        "durable refusal vanished with upstream expiry"
-    );
-    assert!(status.offline_uncertainty, "durable offline gap missing");
-    assert!(
-        !status.possible_known_loss,
-        "outage fabricated a known expired message"
-    );
-    assert_eq!(status.held_items, 0);
+    for reply_ttl in [1, 100] {
+        let binary = real_node::pinned_binary();
+        let mut node = real_node::Node::start_with_reply_ttl(&binary, reply_ttl).await;
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("authority.db");
+        let mut store = authority(&db);
+        store.migrate_custody().unwrap();
+        let scope = Scope {
+            bus_instance: "isolated-node-db-1".into(),
+            grant_id: "grant".into(),
+        };
+        let limits = Limits {
+            max_item_bytes: 1,
+            ..Limits::default()
+        };
+        let mut service = node.config.register().await.unwrap();
+        let sent = service
+            .send(
+                service.address().unwrap(),
+                "expires upstream",
+                Some("upstream-expiry"),
+            )
+            .await
+            .unwrap();
+        xmsg_mcp_gateway::custody::receive_one(&mut store, &mut service, &scope, &limits, 100)
+            .await
+            .unwrap();
+        drop(service);
+        drop(store);
+        if reply_ttl == 1 {
+            tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+        }
+        node.restart(&binary).await;
+        let mut service = node.config.register().await.unwrap();
+        assert!(service.poll(0).await.unwrap().is_none());
+        let node_db = node
+            .config
+            .register_socket
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("node.db");
+        let upstream = rusqlite::Connection::open(&node_db).unwrap();
+        let expired: i64 = upstream
+            .query_row(
+                "SELECT COUNT(*) FROM svc_pending_messages WHERE id=?1",
+                [&sent.message_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            expired,
+            if reply_ttl == 1 { 0 } else { 1 },
+            "shortened real upstream TTL did not expire the row"
+        );
+        let mut store = Store::open(&db).unwrap();
+        assert_eq!(
+            xmsg_mcp_gateway::custody::receive_one(&mut store, &mut service, &scope, &limits, 104)
+                .await
+                .unwrap(),
+            None
+        );
+        let status = store
+            .custody_status(&scope, &limits, 104, reply_ttl as i64)
+            .unwrap();
+        assert_eq!(
+            status.refusals, 1,
+            "durable refusal vanished with upstream expiry"
+        );
+        if reply_ttl == 1 {
+            assert!(status.offline_uncertainty, "durable offline gap missing");
+        } else {
+            assert!(
+                !status.offline_uncertainty,
+                "sub-TTL restart reported an offline gap"
+            );
+        }
+        assert!(
+            !status.possible_known_loss,
+            "outage fabricated a known expired message"
+        );
+        assert_eq!(status.held_items, 0);
+    }
     println!("gateway-custody-complete:real-upstream-expiry");
 }
 
@@ -1298,7 +1345,7 @@ async fn idle_poll_enforces_retention_and_observes_connection_changes() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(disconnected, Some(104), "disconnect was not recorded");
+    assert_eq!(disconnected, Some(102), "disconnect was not recorded");
     drop(service);
     let mut service = node.config.register().await.unwrap();
     assert_eq!(
@@ -1316,5 +1363,26 @@ async fn idle_poll_enforces_retention_and_observes_connection_changes() {
         .unwrap();
     assert!(connected, "reconnected handle was not recorded");
     assert_eq!(reconnected, Some(105));
+    xmsg_mcp_gateway::custody::receive_one(&mut store, &mut service, &scope, &limits, 106)
+        .await
+        .unwrap();
+    xmsg_mcp_gateway::custody::receive_one(&mut store, &mut service, &scope, &limits, 108)
+        .await
+        .unwrap();
+    let status = store.custody_status(&scope, &limits, 108, 3).unwrap();
+    assert!(
+        !status.offline_uncertainty,
+        "expired gaps latched uncertainty"
+    );
+    let bounded = Limits {
+        max_gap_intervals: 1,
+        ..limits.clone()
+    };
+    assert!(
+        xmsg_mcp_gateway::custody::receive_one(&mut store, &mut service, &scope, &bounded, 109)
+            .await
+            .is_err(),
+        "gap interval budget was not bounded"
+    );
     println!("gateway-custody-complete:idle-maintenance");
 }

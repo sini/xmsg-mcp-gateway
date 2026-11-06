@@ -23,6 +23,7 @@ cargo clippy --locked --all-targets -j 4 -- -D warnings
 python3 scripts/grant_mutants.py
 install -d -m 700 .state
 cargo run --locked -- --state .state/grants.db init
+cargo run --locked -- --state .state/grants.db migrate-custody
 cargo run --locked -- --state .state/grants.db enroll grant-id binding.json
 cargo run --locked -- --state .state/grants.db enable grant-id 1
 cargo run --locked -- --state .state/grants.db disable grant-id 2

@@ -33,6 +33,10 @@ attested origin, text, stored envelope and exact optional correlation. Display
 labels provide no authority. Conflicts never replace original content: a durable,
 content-free quarantine record precedes their ACK.
 
+Only oversized input is a deterministic refusal in this unit. Malformed frames
+currently surface as transport failures; malformed, wrong-origin and policy
+refusal handling needs the later serving/policy unit and its acceptance cells.
+
 Permanent oversized refusals commit a content-free record and then ACK. A
 payload that cannot fit even an empty byte quota is also permanently oversized.
 Records contain ID, attested origin, actual byte size, reason and first-seen time,
@@ -50,15 +54,32 @@ window. Tombstones consume item slots until reclaimed, so their count is bounded
 Known pending IDs and per-bus link summaries each have a separate 1000-record
 bound using the metadata limit. Expiry counters retain content-free totals.
 Admission refuses when required durable metadata cannot be stored; it does not
-silently drop a required audit record to acknowledge a message.
+silently drop a required audit record to acknowledge a message. About 1000
+unique oversized sends within 7 days can therefore exhaust the refusal budget.
+Further permanent refusals then remain unacknowledged, filling the upstream queue
+and starving inbound traffic until records expire. This is the explicit cost of
+the bounded, mandatory durable refusal ledger. Transient capacity deferrals use
+only the separate pending ledger and consume no refusal budget.
 
-Acceptance, status queries and idle receive polls apply retention. Disconnect
-and reconnect observations are durable. Status distinguishes offline uncertainty
-from possible loss of a known outstanding message. Known age is a lower bound
-from first observation, not a fabricated upstream timestamp. When pending IDs
-expire, a bounded per-bus summary preserves uncertainty without inventing expired
-message records. A brief outage does not reset the age of an already old message;
-an outage without known messages does not invent known-message loss.
+Acceptance, status queries and idle receive polls apply retention. Every observed
+poll persists its per-bus timestamp, including when connection state is unchanged.
+Observed intervals form a bounded per-bus ledger. An older interval is removed
+when a later interval has at least its duration and expiry; that later interval
+preserves every TTL warning the older one could produce. Other intervals expire
+at the metadata-retention bound. The default global gap budget is 1000 intervals
+(`max_gap_intervals`); exhaustion fails visibly without ACK, independently of the
+refusal budget. Healthy equal-sized poll intervals replace one another instead
+of accumulating a record for every poll.
+A later first poll records process downtime without a synthetic disconnect call.
+Status compares recorded intervals and a currently unobserved/disconnected span
+against the effective reply TTL; an outage count alone never sets uncertainty.
+Sub-TTL gaps do not warn, and old intervals expire.
+
+Status distinguishes offline uncertainty from possible loss of a known outstanding
+message. Known age is a lower bound from first observation, not a fabricated
+upstream timestamp. When pending IDs expire, a bounded per-bus summary preserves
+uncertainty without inventing expired message records. A brief outage does not
+reset an already old message's age; unknown downtime does not create known IDs.
 
 The status library accepts an effective reply TTL for this comparison. No
 configuration or startup path exposes that input. Before worker activation, the
@@ -78,4 +99,4 @@ ACK after a further daemon restart. Other cases drive 150 permanent refusals,
 retention, transient failures and mailbox selection. No fleet endpoints or
 credentials are used. Missing-binary and source-edited early-return controls must
 refuse. The source-mutant job rejects compile failures, cached library artifacts,
-timeouts and failures outside the named assertion; all 24 mutants must be killed.
+timeouts and failures outside the named assertion; all 29 mutants must be killed.

@@ -2,7 +2,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
 use xmsg::client::{Delivery, RegisteredService};
 
-use crate::grants::{Error as GrantError, Store};
+use crate::grants::{Error as GrantError, Store, MAX_SUPPORTED_SCHEMA_VERSION};
 
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -19,6 +19,7 @@ pub struct Limits {
     pub content_retention_secs: i64,
     pub max_metadata: i64,
     pub metadata_retention_secs: i64,
+    pub max_gap_intervals: i64,
 }
 impl Default for Limits {
     fn default() -> Self {
@@ -29,6 +30,7 @@ impl Default for Limits {
             content_retention_secs: 604800,
             max_metadata: 1000,
             metadata_retention_secs: 604800,
+            max_gap_intervals: 1000,
         }
     }
 }
@@ -43,6 +45,7 @@ impl Limits {
                 self.content_retention_secs,
                 self.max_metadata,
                 self.metadata_retention_secs,
+                self.max_gap_intervals,
             ]
             .iter()
             .any(|value| *value <= 0)
@@ -115,7 +118,8 @@ pub(crate) fn validate_schema(connection: &Connection) -> Result<(), GrantError>
     connection.prepare("SELECT name, value FROM custody_counters LIMIT 0")?;
     connection
         .prepare("SELECT bus, upstream_id, first_seen, expires_at FROM custody_pending LIMIT 0")?;
-    connection.prepare("SELECT bus, connected, disconnected_at, reconnected_at, outages, expired_first_seen FROM custody_links LIMIT 0")?;
+    connection.prepare("SELECT bus, connected, disconnected_at, reconnected_at, outages, expired_first_seen, last_observed_at FROM custody_links LIMIT 0")?;
+    connection.prepare("SELECT bus, gap_start, gap_end, expires_at FROM custody_gaps LIMIT 0")?;
     Ok(())
 }
 
@@ -146,6 +150,7 @@ fn ensure_link(tx: &rusqlite::Transaction<'_>, bus: &str, limits: &Limits) -> Re
 }
 
 fn expire(tx: &rusqlite::Transaction<'_>, limits: &Limits, now: i64) -> Result<(), Error> {
+    tx.execute("DELETE FROM custody_gaps WHERE expires_at<=?1", [now])?;
     tx.execute("UPDATE custody_links SET expired_first_seen = (SELECT MIN(first_seen) FROM (SELECT expired_first_seen AS first_seen UNION ALL SELECT first_seen FROM custody_pending WHERE bus = custody_links.bus AND expires_at<=?1)) WHERE EXISTS(SELECT 1 FROM custody_pending WHERE bus=custody_links.bus AND expires_at<=?1)", [now])?;
     let pending = tx.execute("DELETE FROM custody_pending WHERE expires_at<=?1", [now])?;
     tx.execute(
@@ -203,10 +208,35 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         ensure_link(&tx, &scope.bus_instance, limits)?;
         expire(&tx, limits, now)?;
-        let was_connected: bool = tx.query_row(
-            "SELECT connected FROM custody_links WHERE bus=?1",
+        let (was_connected, last_observed, disconnected): (bool, Option<i64>, Option<i64>) = tx
+            .query_row(
+            "SELECT connected, last_observed_at, disconnected_at FROM custody_links WHERE bus=?1",
             [&scope.bus_instance],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let observed = now.max(last_observed.unwrap_or(now));
+        let start = if was_connected {
+            last_observed
+        } else {
+            disconnected.or(last_observed)
+        };
+        if let Some(start) = start {
+            if observed > start {
+                let expiry = observed
+                    .checked_add(limits.metadata_retention_secs)
+                    .ok_or(Error::Configuration)?;
+                tx.execute("DELETE FROM custody_gaps WHERE bus=?1 AND gap_end-gap_start<=?2 AND expires_at<=?3", params![scope.bus_instance, observed-start, expiry])?;
+                let count: i64 =
+                    tx.query_row("SELECT COUNT(*) FROM custody_gaps", [], |row| row.get(0))?;
+                if count >= limits.max_gap_intervals {
+                    return Err(Error::MetadataFull);
+                }
+                tx.execute("INSERT INTO custody_gaps(bus,gap_start,gap_end,expires_at) VALUES (?1,?2,?3,?4)", params![scope.bus_instance, start, observed, expiry])?;
+            }
+        }
+        tx.execute(
+            "UPDATE custody_links SET last_observed_at=?2 WHERE bus=?1",
+            params![scope.bus_instance, observed],
         )?;
         if was_connected == connected {
             tx.commit()?;
@@ -218,7 +248,7 @@ impl Store {
                 params![scope.bus_instance, now],
             )?;
         } else {
-            tx.execute("UPDATE custody_links SET disconnected_at=CASE WHEN connected=1 THEN ?2 ELSE disconnected_at END, outages=outages+connected, connected=0 WHERE bus=?1", params![scope.bus_instance, now])?;
+            tx.execute("UPDATE custody_links SET disconnected_at=CASE WHEN connected=1 THEN ?2 ELSE disconnected_at END, outages=outages+connected, connected=0 WHERE bus=?1", params![scope.bus_instance, last_observed.unwrap_or(observed)])?;
         }
         tx.commit()?;
         Ok(())
@@ -257,8 +287,8 @@ impl Store {
         let first_seen: Option<i64> = tx.query_row("SELECT MIN(first_seen) FROM (SELECT first_seen FROM custody_pending WHERE bus=?1 UNION ALL SELECT expired_first_seen FROM custody_links WHERE bus=?1)", [&scope.bus_instance], |row| row.get(0))?;
         let oldest_pending_age_secs = first_seen.map(|first| now.saturating_sub(first).max(0));
         let offline_uncertainty: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM custody_links WHERE bus=?1 AND outages>0)",
-            [&scope.bus_instance],
+            "SELECT EXISTS(SELECT 1 FROM custody_gaps WHERE bus=?1 AND (gap_end-gap_start)>=?3) OR EXISTS(SELECT 1 FROM custody_links WHERE bus=?1 AND (?2-CASE WHEN connected=0 THEN disconnected_at ELSE last_observed_at END)>=?3)",
+            params![scope.bus_instance, now, effective_reply_ttl_secs],
             |row| row.get(0),
         )?;
         let counter = |name: &str| -> Result<i64, rusqlite::Error> {
@@ -292,7 +322,7 @@ impl Store {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version != 1 {
+        if version != MAX_SUPPORTED_SCHEMA_VERSION - 1 {
             return Err(GrantError::NoChange.into());
         }
         tx.execute_batch(
@@ -317,10 +347,12 @@ impl Store {
                 first_seen INTEGER NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY(bus, upstream_id));
              CREATE TABLE custody_links (bus TEXT PRIMARY KEY NOT NULL, connected INTEGER NOT NULL,
                 disconnected_at INTEGER, reconnected_at INTEGER, outages INTEGER NOT NULL,
-                expired_first_seen INTEGER);
+                expired_first_seen INTEGER, last_observed_at INTEGER);
+             CREATE TABLE custody_gaps (bus TEXT NOT NULL, gap_start INTEGER NOT NULL,
+                gap_end INTEGER NOT NULL, expires_at INTEGER NOT NULL);
              INSERT INTO custody_counters VALUES ('expired_metadata', 0), ('expired_content', 0), ('expired_tombstones', 0), ('expired_pending', 0);",
         )?;
-        tx.pragma_update(None, "user_version", 2)?;
+        tx.pragma_update(None, "user_version", MAX_SUPPORTED_SCHEMA_VERSION)?;
         tx.commit()?;
         Ok(())
     }
@@ -341,7 +373,7 @@ impl Store {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version != 2 {
+        if version != MAX_SUPPORTED_SCHEMA_VERSION {
             return Err(Error::MigrationRequired);
         }
         expire(&tx, limits, now)?;
@@ -401,6 +433,10 @@ impl Store {
         let refused = oversized
             || count >= limits.max_items
             || size as u128 + bytes as u128 > limits.max_bytes as u128;
+        if !conflict && refused && !oversized {
+            tx.commit()?;
+            return Ok(Acceptance::Deferred);
+        }
         if conflict || refused {
             let reason = if conflict {
                 "conflict"
