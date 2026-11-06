@@ -116,7 +116,7 @@ CASES = [
 ]
 
 
-def run(root, target, test, changed_source):
+def run(root, target, test, changed_source, *, test_timeout=30):
     env = {**os.environ, "CARGO_TARGET_DIR": str(ROOT / "target/grant-mutants-build")}
     built = subprocess.run(
         [
@@ -172,7 +172,7 @@ def run(root, target, test, changed_source):
         env=env,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=test_timeout,
     )
 
 

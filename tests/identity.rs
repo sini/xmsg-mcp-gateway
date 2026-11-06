@@ -49,6 +49,15 @@ fn configuration_rejects_insecure_urls_and_unknown_fields() {
             "accepted config {field}"
         );
     }
+    let mut literal = raw.clone();
+    literal["introspection_url"] = serde_json::json!("https://127.0.0.2/token");
+    assert!(
+        matches!(
+            Verifier::from_config(serde_json::from_value(literal).unwrap()),
+            Err(Error::Configuration)
+        ),
+        "accepted out-of-list IP literal"
+    );
     let mut unknown = raw;
     unknown["verified"] = true.into();
     assert!(serde_json::from_value::<VerifierConfig>(unknown).is_err());
@@ -106,8 +115,50 @@ fn oversized_provider_body_is_unavailable() {
     let binding = binding();
     let mut claims = provider::claims(&binding);
     claims["padding"] = "x".repeat(65_537).into();
-    assert!(matches!(
-        provider::verify_response(&binding, claims, 200),
-        Err(Error::Unavailable)
-    ));
+    assert!(
+        matches!(
+            provider::verify_response(&binding, claims, 200),
+            Err(Error::Unavailable)
+        ),
+        "oversized provider body accepted"
+    );
+}
+
+#[test]
+fn redirects_never_reach_an_active_token_provider() {
+    let binding = binding();
+    let (result, target_requests, _) = provider::network_case(
+        &binding,
+        provider::claims(&binding),
+        302,
+        true,
+        std::time::Duration::ZERO,
+        2000,
+    );
+    assert_eq!(target_requests, 0, "redirect target received a request");
+    assert!(
+        matches!(result, Err(Error::Unavailable)),
+        "redirect was accepted"
+    );
+}
+
+#[test]
+fn stalled_provider_is_refused_before_its_response() {
+    let binding = binding();
+    let (result, _, elapsed) = provider::network_case(
+        &binding,
+        provider::claims(&binding),
+        200,
+        false,
+        std::time::Duration::from_millis(900),
+        250,
+    );
+    assert!(
+        matches!(result, Err(Error::Unavailable)),
+        "provider timeout refusal missing"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(750),
+        "provider timeout bound exceeded: {elapsed:?}"
+    );
 }

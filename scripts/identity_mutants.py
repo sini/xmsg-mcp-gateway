@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from grant_mutants import ROOT, run
@@ -117,6 +118,52 @@ for name, guard in RUNTIME:
         )
     )
 
+CASES += [
+    (
+        "provider-ip-literal",
+        "src/auth.rs",
+        "if !config.provider_addresses.contains(&ip)",
+        "if false",
+        "configuration_rejects_insecure_urls_and_unknown_fields",
+    ),
+    (
+        "provider-redirect",
+        "src/auth.rs",
+        "reqwest::redirect::Policy::none()",
+        "reqwest::redirect::Policy::limited(3)",
+        "redirects_never_reach_an_active_token_provider",
+    ),
+    (
+        "provider-timeout",
+        "src/auth.rs",
+        ".timeout(Duration::from_millis(config.timeout_ms))",
+        "",
+        "stalled_provider_is_refused_before_its_response",
+    ),
+]
+TYPE_TESTS = {case[4] for case in CASES[:5]}
+EXPECTED_RED = {
+    "response-bound": "oversized provider body accepted",
+    "provider-https": "accepted config introspection_url",
+    "provider-allowlist": "accepted config provider_addresses",
+    "provider-ip-literal": "accepted out-of-list IP literal",
+    "provider-redirect": "redirect target received a request",
+    "provider-timeout": "provider timeout refusal missing",
+    **{
+        name: f"accepted {field}"
+        for name, field in [
+            ("active", "active"),
+            ("issuer", "iss"),
+            ("audience", "aud"),
+            ("subject", "sub"),
+            ("hosted-client", "client_id"),
+            ("expired", "exp"),
+            ("not-before", "nbf"),
+            ("scope", "scope"),
+        ]
+    },
+}
+
 
 def main():
     assert os.environ.get("TRYBUILD") != "overwrite", (
@@ -137,21 +184,21 @@ def main():
             original = file.read_text()
             assert original.count(old) == 1, name
             file.touch()
-            target = (
-                "identity"
-                if name
-                in {row[0] for row in RUNTIME}
-                | {"response-bound", "provider-https", "provider-allowlist"}
-                else "identity_types"
+            target = "identity_types" if test in TYPE_TESTS else "identity"
+            test_timeout = 120 if target == "identity_types" else 30
+            started = time.monotonic()
+            green = run(root, target, test, filename, test_timeout=test_timeout)
+            print(
+                f"{name}: baseline completed in {time.monotonic() - started:.1f}s",
+                flush=True,
             )
-            green = run(root, target, test, filename)
             assert (
                 green.returncode == 0
                 and "1 passed; 0 failed; 0 ignored" in green.stdout
             ), (name, "invalid baseline", green.stdout, green.stderr)
             try:
                 file.write_text(original.replace(old, new, 1))
-                red = run(root, target, test, filename)
+                red = run(root, target, test, filename, test_timeout=test_timeout)
                 assert (
                     red.returncode == 101 and f"test {test} ... FAILED" in red.stdout
                 ), (name, "wrong red", red.stdout, red.stderr)
@@ -161,10 +208,7 @@ def main():
                         in red.stderr
                     ), (name, "unrelated snapshot failure", red.stderr)
                 else:
-                    assert (
-                        "accepted " in red.stdout
-                        or "oversized_provider_body_is_unavailable" in red.stdout
-                    ), (
+                    assert EXPECTED_RED[name] in red.stdout, (
                         name,
                         "unrelated runtime failure",
                         red.stdout,

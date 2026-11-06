@@ -38,14 +38,16 @@ introspection-shaped body, and non-approved-client tokens) and the R1
 `handler identity boundary: mint identity from request metadata` mutant ship with
 the real serving handler. No substitute handler is introduced just for tests.
 Current-token/current-grant revalidation before every dispatch, 401/403/503 mapping,
-provider redirect target-connection oracles (R3), live provider compatibility, and
+out-of-allowlist/IP redirect variants (R3), live provider compatibility, and
 the owner's provider/broker choice remain pending in their respective units.
+
+The serving unit must load verifier settings only from the owner configuration file, never request arguments or metadata (A5).
 
 ## Unit validation
 
-On stable Rust 1.95, the local run executes 23 tests with zero ignored or filtered,
-passes Clippy, and kills 16 identity source mutants (five type arms, eight claim
-checks, provider HTTPS/allowlist guards and response size). The 13 existing grant
+On stable Rust 1.95, the local run executes 25 tests with zero ignored or filtered,
+passes Clippy, and kills 19 identity source mutants (five type arms, eight claim
+checks, provider HTTPS/allowlist/IP-literal guards, redirect refusal, timeout and response size). The 13 existing grant
 mutants also remain killed after the migration. CI repeats the test count guard on
 Linux and macOS and both mutation suites on Linux. A completed Actions run and an
 independent landing gate are required before this unit reaches main.
@@ -56,3 +58,5 @@ cargo clippy --locked --all-targets -j 4 -- -D warnings
 python3 scripts/grant_mutants.py
 python3 scripts/identity_mutants.py
 ```
+
+Compile-driven trybuild mutation cases have a bounded 120-second execution budget for their nested cold Cargo build; ordinary runtime cases retain 30 seconds. Baseline timing is logged. A timeout or compilation failure still fails the driver and never counts as a kill. CI runs both operating systems with matrix fail-fast disabled.
