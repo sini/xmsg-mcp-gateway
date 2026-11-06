@@ -856,3 +856,32 @@ def test_metadata_not_part_of_subscription_identity(env):
     second = sub(client, token, key, _meta={"progressToken": "two"}).json()["result"]
     assert first["id"] == second["id"]
     assert len(callback.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "requested,negotiated",
+    [
+        ("2025-03-26", "2025-03-26"),
+        ("2025-06-18", "2025-06-18"),
+        ("2025-11-25", "2025-11-25"),
+        ("2026-07-28", "2025-11-25"),
+    ],
+)
+def test_initialize_negotiates_supported_protocol_versions(env, requested, negotiated):
+    _, token, _, client = env
+    response = rpc(
+        client,
+        token,
+        "initialize",
+        {
+            "protocolVersion": requested,
+            "capabilities": {},
+            "clientInfo": {"name": "newer-client-control", "version": "1"},
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["result"]["protocolVersion"] == negotiated
+    result = rpc(
+        client, token, "tools/call", {"name": "xmsg_identity", "arguments": {}}
+    )
+    assert result.json()["result"]["isError"] is False
