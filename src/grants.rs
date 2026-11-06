@@ -39,6 +39,8 @@ pub enum Error {
     InvalidBinding,
     #[error("unrecognized authority store")]
     InvalidStore,
+    #[error("authority store belongs to a different service, resource or owner profile")]
+    ProfileMismatch,
     #[error("authority store I/O failed")]
     Io(#[from] std::io::Error),
     #[error("authority store unavailable")]
@@ -90,6 +92,7 @@ impl Store {
     }
 
     pub fn open(file: &Path) -> Result<Self, Error> {
+        tracing::debug!(target: "gateway_policy_store", "open");
         let connection = Self::connect(file)?;
         let application: i64 =
             connection.pragma_query_value(None, "application_id", |r| r.get(0))?;
@@ -151,6 +154,18 @@ impl Store {
         })?;
         tx.commit()?;
         Ok(next)
+    }
+
+    pub fn validate_profile(&self, binding: &Binding) -> Result<(), Error> {
+        let (total, foreign): (i64, i64) = self.connection.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(service != ?1 OR issuer != ?2 OR resource != ?3 OR subject != ?4), 0) FROM grants",
+            params![binding.service, binding.issuer, binding.resource, binding.subject],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if total == 0 || foreign != 0 {
+            return Err(Error::ProfileMismatch);
+        }
+        Ok(())
     }
 
     pub fn authorize(&self, binding: &VerifiedIdentity) -> Result<Authorization, Error> {

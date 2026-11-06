@@ -20,7 +20,7 @@ The provider must report an active token, exact issuer and resource audience
 satisfied `nbf`, and all configured scopes. The introspection caller is never
 substituted for the hosted client. Invalid claims return `InvalidToken`; transport,
 non-200 and malformed provider responses return `Unavailable`. HTTP status mapping
-belongs to the serving handler, which is not implemented by this unit.
+belongs to the [identity listener](serving.md).
 
 Tests use a generated, disposable TLS provider selected through this same config.
 They record the submitted token and distinct lookup credentials. Existing grant
@@ -32,12 +32,12 @@ forbidden program compiled; an unrelated diagnostic is not a kill.
 
 ## Pending acceptance
 
-This foundation does not complete R1 or enable a hosted gateway. The R1 runtime
+This foundation does not complete R1 or enable a hosted gateway. The [identity listener](serving.md) implements the R1 runtime
 spoof cells (identity fields in arguments and `_meta`, `verified`, an
-introspection-shaped body, and non-approved-client tokens) and the R1
-`handler identity boundary: mint identity from request metadata` mutant ship with
-the real serving handler. No substitute handler is introduced just for tests.
-Current-token/current-grant revalidation before every dispatch, 401/403/503 mapping,
+introspection-shaped body, and non-approved-client tokens) through the real serving handler. A sixth compile-fail handler-mint arm and runtime
+fail-open, reuse, precedence and order mutants replace the unrepresentable
+crate-visible-constructor mutant. The real module boundary stays private.
+The listener adds current-token/current-grant revalidation for identity reads and 401/403/503 mapping;
 out-of-allowlist/IP redirect variants (R3), live provider compatibility, and
 the owner's provider/broker choice remain pending in their respective units.
 

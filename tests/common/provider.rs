@@ -10,6 +10,50 @@ use rustls::pki_types::PrivatePkcs8KeyDer;
 use xmsg_mcp_gateway::auth::{VerifiedIdentity, Verifier, VerifierConfig};
 use xmsg_mcp_gateway::grants::Binding;
 
+pub struct TlsFixture {
+    pub _directory: tempfile::TempDir,
+    pub roots: std::path::PathBuf,
+    pub secret: std::path::PathBuf,
+    pub tls: Arc<rustls::ServerConfig>,
+}
+
+impl TlsFixture {
+    pub fn new() -> Self {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let temp = tempfile::tempdir().unwrap();
+        let certificate = generate_simple_self_signed(vec!["provider.test".into()]).unwrap();
+        let roots = temp.path().join("root.pem");
+        std::fs::write(&roots, certificate.cert.pem()).unwrap();
+        let secret = temp.path().join("secret");
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options
+            .open(&secret)
+            .unwrap()
+            .write_all(b"fixture-secret")
+            .unwrap();
+        let tls = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![certificate.cert.der().clone()],
+                PrivatePkcs8KeyDer::from(certificate.signing_key.serialize_der()).into(),
+            )
+            .unwrap();
+        let tls = Arc::new(tls);
+        TlsFixture {
+            _directory: temp,
+            roots,
+            secret,
+            tls,
+        }
+    }
+}
+
 pub fn claims(binding: &Binding) -> serde_json::Value {
     serde_json::json!({"active": true, "iss": binding.issuer, "aud": binding.resource,
         "sub": binding.subject, "client_id": binding.hosted_client,
@@ -37,32 +81,10 @@ pub fn network_case(
     usize,
     Duration,
 ) {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let temp = tempfile::tempdir().unwrap();
-    let certificate = generate_simple_self_signed(vec!["provider.test".into()]).unwrap();
-    let roots = temp.path().join("root.pem");
-    std::fs::write(&roots, certificate.cert.pem()).unwrap();
-    let secret = temp.path().join("secret");
-    let mut options = std::fs::OpenOptions::new();
-    options.create_new(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options
-        .open(&secret)
-        .unwrap()
-        .write_all(b"fixture-secret")
-        .unwrap();
-    let tls = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![certificate.cert.der().clone()],
-            PrivatePkcs8KeyDer::from(certificate.signing_key.serialize_der()).into(),
-        )
-        .unwrap();
-    let tls = Arc::new(tls);
+    let fixture = TlsFixture::new();
+    let roots = fixture.roots.clone();
+    let secret = fixture.secret.clone();
+    let tls = fixture.tls.clone();
     let target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let target_port = target.local_addr().unwrap().port();
     target.set_nonblocking(true).unwrap();
@@ -159,6 +181,27 @@ fn serve(
     stall: Duration,
     strict_request: bool,
 ) {
+    let (mut tls, request) = read_request(socket, tls, strict_request);
+    if strict_request {
+        assert_eq!(request, "token=fixture-token&token_type_hint=access_token");
+    }
+    thread::sleep(stall);
+    let location = location
+        .map(|value| format!("Location: {value}\r\n"))
+        .unwrap_or_default();
+    let written = write!(tls, "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\n{location}Connection: close\r\nContent-Type: application/json\r\n\r\n{body}", body.len()).and_then(|_| tls.flush());
+    if stall.is_zero() {
+        written.unwrap();
+    }
+}
+
+pub type TlsStream = rustls::StreamOwned<rustls::ServerConnection, TcpStream>;
+
+pub fn read_request(
+    socket: TcpStream,
+    tls: Arc<rustls::ServerConfig>,
+    strict_request: bool,
+) -> (TlsStream, String) {
     // Accepted sockets inherit the listener's nonblocking flag on macOS.
     socket.set_nonblocking(false).unwrap();
     socket
@@ -198,18 +241,7 @@ fn serve(
     reader.read_exact(&mut request).unwrap();
     if strict_request {
         assert!(lookup_auth);
-        assert_eq!(
-            String::from_utf8(request).unwrap(),
-            "token=fixture-token&token_type_hint=access_token"
-        );
     }
     drop(reader);
-    thread::sleep(stall);
-    let location = location
-        .map(|value| format!("Location: {value}\r\n"))
-        .unwrap_or_default();
-    let written = write!(tls, "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\n{location}Connection: close\r\nContent-Type: application/json\r\n\r\n{body}", body.len()).and_then(|_| tls.flush());
-    if stall.is_zero() {
-        written.unwrap();
-    }
+    (tls, String::from_utf8(request).unwrap())
 }

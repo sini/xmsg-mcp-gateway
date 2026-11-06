@@ -1,17 +1,19 @@
 # xmsg-mcp-gateway
 
-A synthetic MCP Events reference server for the planned Rust gateway. This phase does not connect to xmsg; the finished gateway is intended to use its own dedicated xmsg node and federated service identity.
+The Rust gateway currently serves OAuth-protected MCP identity reads and durable local grants. The Python reference provides synthetic Events. Federated messaging is being integrated through the gateway’s dedicated xmsg node and service identity.
 
-The authenticated Streamable HTTP endpoint is `/mcp`. It offers one tool,
+The Python reference’s authenticated Streamable HTTP endpoint is `/mcp`. It offers one tool,
 `xmsg_identity`, and `events/list`, `events/subscribe`, `events/unsubscribe` for
 `xmsg.message.received.v1`. There are no messaging or discovery tools.
+
+The Rust [identity listener](docs/serving.md) runs with `cargo run --locked -- serve --config FILE`. Its owner file supplies provider credentials and profile settings; messaging and Events remain unavailable in Rust until their acceptance gates pass.
 
 ## Rust grant-store foundation
 
 The Rust library and local owner CLI persist disabled enrollment, exact service /
 issuer / resource / subject / hosted-client bindings, and revision-checked enable
 and disable operations. Runtime ceilings, rebind, audit/replay, guarded HTTP/xmsg dispatch, the
-per-service operation guard and 401/403/503 mapping are pending. The Python reference uses its separate state store.
+per-service operation guard are pending. The identity listener provides 401/403/503 mapping. The Python reference uses its separate state store.
 
 Build with the toolchain in `rust-toolchain.toml` and the committed Cargo lockfile:
 
@@ -39,7 +41,7 @@ with a nonzero exit and no success output. An enabled-binding conflict has a
 specific diagnostic, distinct from an unavailable store. Missing or unrecognized state fails
 closed; initialization is explicit and never overwrites an existing store.
 
-The Rust token-verification boundary is described in [verified-token foundation](docs/verified-identity.md). It is a library unit; the Rust serving handler remains pending.
+The Rust token-verification boundary is described in [verified-token foundation](docs/verified-identity.md). The identity listener consumes this boundary.
 
 ## Local setup
 

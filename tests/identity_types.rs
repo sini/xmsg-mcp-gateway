@@ -16,7 +16,9 @@ fn identity_has_no_default() {
 }
 #[test]
 fn identity_fields_are_private() {
-    trybuild::TestCases::new().compile_fail("tests/ui/struct_literal.rs");
+    let cases = trybuild::TestCases::new();
+    cases.compile_fail("tests/ui/struct_literal.rs");
+    cases.compile_fail("tests/ui/handler_mint.rs");
 }
 #[test]
 fn enrollment_binding_cannot_authorize() {

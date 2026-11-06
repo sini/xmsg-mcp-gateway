@@ -47,8 +47,8 @@ jobs:
           assert summaries, "no Rust test summaries"
           counts = [tuple(map(int, row)) for row in summaries]
           assert all(not any(row[1:]) for row in counts), "failed, ignored or filtered Rust tests"
-          assert sum(row[0] for row in counts) == 25, "expected 25 executed Rust tests"
-          print("Rust test completion guard: 25 passed, zero ignored/filtered")
+          assert sum(row[0] for row in counts) == 46, "expected 46 executed Rust tests"
+          print("Rust test completion guard: 46 passed, zero ignored/filtered")
           PY
       - run: cargo clippy --locked --all-targets -j 4 -- -D warnings
       - name: Grant source mutants
@@ -57,3 +57,6 @@ jobs:
       - name: Identity boundary source mutants
         if: runner.os == 'Linux'
         run: python3 scripts/identity_mutants.py
+      - name: Serving misuse source mutants
+        if: runner.os == 'Linux'
+        run: python3 scripts/serving_mutants.py

@@ -18,12 +18,9 @@ identity = source[start:end]
 grants = GRANTS.read_text()
 start = grants.index("    pub fn authorize(")
 authorize = grants[start : grants.rindex("\n}")]
-unsafe_authorize = authorize.replace("&VerifiedIdentity", "&Binding")
-for field in ("service", "issuer", "resource", "subject", "hosted_client"):
-    unsafe_authorize = unsafe_authorize.replace(
-        f"binding.{field}()", f"binding.{field}"
-    )
-unsafe_authorize = unsafe_authorize.replace("use crate::auth::VerifiedIdentity;", "")
+unsafe_authorize = """    pub fn authorize<T>(&self, _binding: &T) -> Result<Authorization, Error> {
+        Ok(Authorization { grant_id: "unverified".into(), revision: 1 })
+    }"""
 CASES = [
     (
         "deserialize",
@@ -207,6 +204,21 @@ def main():
                         "Expected test case to fail to compile, but it succeeded."
                         in red.stderr
                     ), (name, "unrelated snapshot failure", red.stderr)
+                    if name == "public-fields":
+                        assert (
+                            "tests/ui/handler_mint.rs" in red.stderr
+                            and "tests/ui/struct_literal.rs" in red.stderr
+                        ), (name, "missing privacy arm", red.stderr)
+                        assert (
+                            red.stderr.count(
+                                "Expected test case to fail to compile, but it succeeded."
+                            )
+                            == 2
+                        ), (
+                            name,
+                            "both privacy arms must accept the mutant",
+                            red.stderr,
+                        )
                 else:
                     assert EXPECTED_RED[name] in red.stdout, (
                         name,

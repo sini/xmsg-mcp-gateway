@@ -1,0 +1,11 @@
+error[E0451]: fields `service`, `issuer`, `resource`, `subject`, `hosted_client` and `expires_at` of struct `auth::VerifiedIdentity` are private
+  --> tests/ui/handler_mint.rs:10:13
+   |
+ 9 |         let _ = super::auth::VerifiedIdentity {
+   |                 ----------------------------- in this type
+10 |             service: "gateway".into(), issuer: "https://issuer.example/".into(),
+   |             ^^^^^^^ private field      ^^^^^^ private field
+11 |             resource: "https://gateway.example/mcp".into(), subject: "owner".into(),
+   |             ^^^^^^^^ private field                          ^^^^^^^ private field
+12 |             hosted_client: "hosted-client".into(), expires_at: u64::MAX,
+   |             ^^^^^^^^^^^^^ private field            ^^^^^^^^^^ private field
