@@ -1927,6 +1927,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "xmsg"
+version = "0.1.0"
+source = "git+https://github.com/sini/xmsg?rev=4f4a4df9b98f5f74f436a5ebc408e917f857669f#4f4a4df9b98f5f74f436a5ebc408e917f857669f"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "xmsg-mcp-gateway"
 version = "0.2.0"
 dependencies = [
@@ -1945,6 +1957,7 @@ dependencies = [
  "tower",
  "tracing",
  "trybuild",
+ "xmsg",
 ]
 
 [[package]]
