@@ -137,7 +137,7 @@ Responses are bounded to 64 KiB. Requests are capped at 64 KiB, event bodies at
 
 No tunnel or endpoint has been created by this project.
 
-1. Resolve the authorization-provider compatibility question in the phase 1 report in the design workspace. Configure
+1. Resolve the authorization-provider compatibility checks in the [provider setup guide](docs/provider-setup.md). Configure
    a dedicated OAuth client using the exact redirect URI shown by ChatGPT for this
    connection, with PKCE enabled, the two scopes, and only the owner account allowed.
    Configure the provider to issue tokens for the exact MCP resource URI.
