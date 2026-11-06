@@ -5,10 +5,13 @@ import hashlib
 import logging
 import secrets
 import ssl
+import sys
 import time
 from html.parser import HTMLParser
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+import anyio
 import httpx
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 from fastmcp import FastMCP
@@ -37,6 +40,13 @@ class Inputs(HTMLParser):
 async def run(
     upstream, req, upstream_id, upstream_secret, root, metadata, expected_subject
 ):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from grant_lifecycle import Grants
+
+    from phase1.app import create_app
+    from phase1.config import Settings
+
+    grants = Grants(root / "PROTOTYPE-grants.sqlite")
     report = {}
     ca = ssl.create_default_context(cafile=str(root / "chain.pem"))
 
@@ -105,12 +115,44 @@ async def run(
     )
     server = FastMCP("THROWAWAY OAuth feasibility", auth=proxy)
 
-    @server.tool
-    def synthetic_identity():
-        return {"synthetic": True}
+    broker_app = server.http_app(path="/mcp")
 
-    app = server.http_app(path="/mcp")
-    async with app.router.lifespan_context(app):
+    class GrantIdentity:
+        def validate(self, token):
+            return anyio.from_thread.run(self.lookup, token)
+
+        async def lookup(self, token):
+            validated = await proxy.load_access_token(token)
+            if validated is None:
+                return None
+            payload = proxy.jwt_issuer.verify_token(token)
+            binding = (
+                validated.claims["iss"],
+                validated.subject,
+                payload["aud"],
+                payload["client_id"],
+            )
+            return grants.resolve("xmsg", binding)
+
+    gateway = create_app(
+        Settings(
+            state_dir=root / "gateway-state",
+            auth_mode="oauth",
+            issuer="https://broker.example",
+            resource="https://broker.example/mcp",
+        ),
+        oauth=GrantIdentity(),
+    )
+
+    async def app(scope, receive, send):
+        target = (
+            gateway
+            if scope["type"] == "http" and scope["path"] == "/mcp"
+            else broker_app
+        )
+        await target(scope, receive, send)
+
+    async with broker_app.router.lifespan_context(broker_app):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
             base_url="https://broker.example",
@@ -263,18 +305,57 @@ async def run(
                 report["same_key_foreign_audience_rejected"] = False
             except JoseError:
                 report["same_key_foreign_audience_rejected"] = True
+            probe_request = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "xmsg_identity", "arguments": {}},
+            }
+            bearer = {"Authorization": "Bearer " + renewed["access_token"]}
+            unbound = await browser.post("/mcp", json=probe_request, headers=bearer)
+            report["gateway_rejects_unenrolled_identity"] = unbound.status_code == 401
+            grants.owner_provision(
+                "xmsg",
+                (metadata["issuer"], expected_subject, params["resource"], hosted_id),
+            )
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app),
                 base_url="https://broker.example",
-                headers={"Authorization": "Bearer " + renewed["access_token"]},
+                headers=bearer,
             ) as api:
                 async with streamable_http_client(
                     "https://broker.example/mcp", http_client=api
                 ) as streams:
                     async with ClientSession(streams[0], streams[1]) as session:
                         await session.initialize()
-                        result = await session.call_tool("synthetic_identity", {})
-                        report["authenticated_synthetic_mcp_call"] = not result.is_error
+                        result = await session.call_tool("xmsg_identity", {})
+                        report[
+                            "authenticated_synthetic_gateway_call"
+                        ] = not result.is_error
+            grants.owner_set_enabled("xmsg", False)
+            refused = await browser.post("/mcp", json=probe_request, headers=bearer)
+            report["gateway_rejects_disabled_grant"] = refused.status_code == 401
+            refreshed_again = await browser.post(
+                "/token",
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": renewed["refresh_token"],
+                    "client_id": hosted_id,
+                    "resource": params["resource"],
+                },
+            )
+            if refreshed_again.status_code != 200:
+                raise RuntimeError("disabled-grant token refresh control failed")
+            blocked = await browser.post(
+                "/mcp",
+                json=probe_request,
+                headers={
+                    "Authorization": "Bearer " + refreshed_again.json()["access_token"]
+                },
+            )
+            report["gateway_refresh_cannot_revive_disabled_grant"] = (
+                blocked.status_code == 401
+            )
             wrong_resource = await browser.get(
                 "/authorize", params={**params, "resource": "https://other.example/mcp"}
             )
