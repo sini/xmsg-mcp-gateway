@@ -21,6 +21,7 @@ enum Command {
         config: PathBuf,
     },
     Init,
+    MigrateCustody,
     Enroll {
         id: String,
         binding: PathBuf,
@@ -47,6 +48,8 @@ enum CommandError {
     Serve(#[source] std::io::Error),
     #[error(transparent)]
     Grant(#[from] GrantError),
+    #[error(transparent)]
+    Custody(#[from] xmsg_mcp_gateway::custody::Error),
     #[error("cannot read enrollment binding document")]
     ReadBinding(#[source] std::io::Error),
     #[error("invalid enrollment binding document")]
@@ -67,6 +70,10 @@ async fn run(cli: Cli) -> Result<(), CommandError> {
         (Some(state), Command::Init) => {
             Store::initialize(&state)?;
             println!("authority store initialized");
+        }
+        (Some(state), Command::MigrateCustody) => {
+            Store::open(&state)?.migrate_custody()?;
+            println!("custody schema migrated; startup remains unavailable");
         }
         (Some(state), Command::Enroll { id, binding }) => {
             let document = std::fs::read(binding).map_err(CommandError::ReadBinding)?;

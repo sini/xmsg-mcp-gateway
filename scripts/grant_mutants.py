@@ -76,7 +76,7 @@ CASES = [
     (
         "foreign-store",
         "src/grants.rs",
-        "if application != APPLICATION_ID || version != SCHEMA_VERSION {",
+        "if application != APPLICATION_ID || (version != SCHEMA_VERSION && version != 2) {",
         "if false {",
         "grant_core",
         "foreign_store_metadata_is_refused_without_reinitialization",

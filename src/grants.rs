@@ -56,7 +56,7 @@ pub fn exact_audience(value: &Value, resource: &str) -> bool {
 }
 
 pub struct Store {
-    connection: Connection,
+    pub(crate) connection: Connection,
 }
 
 impl Store {
@@ -97,10 +97,13 @@ impl Store {
         let application: i64 =
             connection.pragma_query_value(None, "application_id", |r| r.get(0))?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if application != APPLICATION_ID || version != SCHEMA_VERSION {
+        if application != APPLICATION_ID || (version != SCHEMA_VERSION && version != 2) {
             return Err(Error::InvalidStore);
         }
         connection.prepare("SELECT id, service, issuer, resource, subject, hosted_client, revision, enabled FROM grants LIMIT 0")?;
+        if version == 2 {
+            crate::custody::validate_schema(&connection)?;
+        }
         Ok(Self { connection })
     }
 
