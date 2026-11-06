@@ -13,6 +13,7 @@ pub struct Node {
     _temp: tempfile::TempDir,
     federated: bool,
     port: u16,
+    reply_ttl_secs: u64,
 }
 
 impl Drop for Node {
@@ -89,6 +90,7 @@ pub struct Prepared {
     pub uri: String,
     temp: tempfile::TempDir,
     federated: bool,
+    reply_ttl_secs: u64,
 }
 impl Prepared {
     pub fn create(service: &str, user: &str, authority: Option<&Authority>) -> Self {
@@ -141,6 +143,7 @@ impl Prepared {
             uri,
             temp,
             federated: authority.is_some(),
+            reply_ttl_secs: 604800,
         }
     }
     pub fn peer(&self, other: &Self, grants: serde_json::Value) {
@@ -158,7 +161,13 @@ impl Prepared {
         );
     }
     pub async fn launch(self, binary: &Path) -> Node {
-        let mut launch = command(binary, self.temp.path(), self.federated, self.port);
+        let mut launch = command(
+            binary,
+            self.temp.path(),
+            self.federated,
+            self.port,
+            self.reply_ttl_secs,
+        );
         launch.arg("--svc-exe").arg(format!(
             "{}={}",
             self.config.service,
@@ -170,13 +179,20 @@ impl Prepared {
             _temp: self.temp,
             federated: self.federated,
             port: self.port,
+            reply_ttl_secs: self.reply_ttl_secs,
         };
         node.ready().await;
         node
     }
 }
 
-fn command(binary: &Path, directory: &Path, federated: bool, port: u16) -> Command {
+fn command(
+    binary: &Path,
+    directory: &Path,
+    federated: bool,
+    port: u16,
+    reply_ttl_secs: u64,
+) -> Command {
     let run = directory.join("run");
     let mut command = Command::new(binary);
     command
@@ -185,6 +201,8 @@ fn command(binary: &Path, directory: &Path, federated: bool, port: u16) -> Comma
         .env("XDG_RUNTIME_DIR", &run)
         .env("RUST_LOG", "warn")
         .arg("serve")
+        .arg("--reply-ttl")
+        .arg(reply_ttl_secs.to_string())
         .arg("--db-path")
         .arg(directory.join("node.db"))
         .arg("--sessions-dir")
@@ -228,6 +246,12 @@ impl Node {
             .launch(binary)
             .await
     }
+    #[allow(dead_code)]
+    pub async fn start_with_reply_ttl(binary: &Path, reply_ttl_secs: u64) -> Self {
+        let mut prepared = Prepared::create("gateway", "gateway", None);
+        prepared.reply_ttl_secs = reply_ttl_secs;
+        prepared.launch(binary).await
+    }
     pub async fn restart(&mut self, binary: &Path) {
         self.child.kill().unwrap();
         self.child.wait().unwrap();
@@ -237,7 +261,13 @@ impl Node {
                 fs::remove_file(socket).unwrap();
             }
         }
-        let mut launch = command(binary, self._temp.path(), self.federated, self.port);
+        let mut launch = command(
+            binary,
+            self._temp.path(),
+            self.federated,
+            self.port,
+            self.reply_ttl_secs,
+        );
         launch.arg("--svc-exe").arg(format!(
             "{}={}",
             self.config.service,

@@ -33,6 +33,44 @@ impl Default for Limits {
     }
 }
 
+impl Limits {
+    fn validate(&self, now: i64) -> Result<(), Error> {
+        if now < 0
+            || [
+                self.max_items,
+                self.max_bytes,
+                self.max_item_bytes,
+                self.content_retention_secs,
+                self.max_metadata,
+                self.metadata_retention_secs,
+            ]
+            .iter()
+            .any(|value| *value <= 0)
+            || now.checked_add(self.content_retention_secs).is_none()
+            || now.checked_add(self.metadata_retention_secs).is_none()
+        {
+            return Err(Error::Configuration);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct Status {
+    pub held_items: i64,
+    pub expired_items: i64,
+    pub refusals: i64,
+    pub quarantines: i64,
+    pub pending: i64,
+    pub oldest_pending_age_secs: Option<i64>,
+    pub possible_known_loss: bool,
+    pub offline_uncertainty: bool,
+    pub expired_metadata: i64,
+    pub expired_content: i64,
+    pub expired_tombstones: i64,
+    pub expired_pending: i64,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Acceptance {
     Stored { event_id: String },
@@ -75,6 +113,9 @@ pub(crate) fn validate_schema(connection: &Connection) -> Result<(), GrantError>
     connection.prepare("SELECT event_id, state FROM custody_outbox LIMIT 0")?;
     connection.prepare("SELECT bus, upstream_id, fingerprint, origin, size, reason, first_seen, expires_at FROM custody_metadata LIMIT 0")?;
     connection.prepare("SELECT name, value FROM custody_counters LIMIT 0")?;
+    connection
+        .prepare("SELECT bus, upstream_id, first_seen, expires_at FROM custody_pending LIMIT 0")?;
+    connection.prepare("SELECT bus, connected, disconnected_at, reconnected_at, outages, expired_first_seen FROM custody_links LIMIT 0")?;
     Ok(())
 }
 
@@ -87,7 +128,30 @@ fn fingerprint(parts: &[&str]) -> String {
     format!("{:x}", digest.finalize())
 }
 
+fn ensure_link(tx: &rusqlite::Transaction<'_>, bus: &str, limits: &Limits) -> Result<(), Error> {
+    let known: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM custody_links WHERE bus=?1)",
+        [bus],
+        |row| row.get(0),
+    )?;
+    let count: i64 = tx.query_row("SELECT COUNT(*) FROM custody_links", [], |row| row.get(0))?;
+    if !known && count >= limits.max_metadata {
+        return Err(Error::MetadataFull);
+    }
+    tx.execute(
+        "INSERT OR IGNORE INTO custody_links(bus,connected,outages) VALUES (?1,1,0)",
+        [bus],
+    )?;
+    Ok(())
+}
+
 fn expire(tx: &rusqlite::Transaction<'_>, limits: &Limits, now: i64) -> Result<(), Error> {
+    tx.execute("UPDATE custody_links SET expired_first_seen = (SELECT MIN(first_seen) FROM (SELECT expired_first_seen AS first_seen UNION ALL SELECT first_seen FROM custody_pending WHERE bus = custody_links.bus AND expires_at<=?1)) WHERE EXISTS(SELECT 1 FROM custody_pending WHERE bus=custody_links.bus AND expires_at<=?1)", [now])?;
+    let pending = tx.execute("DELETE FROM custody_pending WHERE expires_at<=?1", [now])?;
+    tx.execute(
+        "UPDATE custody_counters SET value=value+?1 WHERE name='expired_pending'",
+        [pending as i64],
+    )?;
     let expired = tx.execute("DELETE FROM custody_metadata WHERE expires_at <= ?1", [now])?;
     tx.execute(
         "UPDATE custody_counters SET value=value+?1 WHERE name='expired_metadata'",
@@ -113,6 +177,106 @@ fn expire(tx: &rusqlite::Transaction<'_>, limits: &Limits, now: i64) -> Result<(
 }
 
 impl Store {
+    pub fn record_custody_link(
+        &mut self,
+        scope: &Scope,
+        connected: bool,
+        limits: &Limits,
+        now: i64,
+    ) -> Result<(), Error> {
+        limits.validate(now)?;
+        if scope.bus_instance.trim().is_empty() {
+            return Err(Error::Configuration);
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_link(&tx, &scope.bus_instance, limits)?;
+        expire(&tx, limits, now)?;
+        let was_connected: bool = tx.query_row(
+            "SELECT connected FROM custody_links WHERE bus=?1",
+            [&scope.bus_instance],
+            |row| row.get(0),
+        )?;
+        if was_connected == connected {
+            tx.commit()?;
+            return Ok(());
+        }
+        if connected {
+            tx.execute(
+                "UPDATE custody_links SET connected=1, reconnected_at=?2 WHERE bus=?1",
+                params![scope.bus_instance, now],
+            )?;
+        } else {
+            tx.execute("UPDATE custody_links SET disconnected_at=CASE WHEN connected=1 THEN ?2 ELSE disconnected_at END, outages=outages+connected, connected=0 WHERE bus=?1", params![scope.bus_instance, now])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn record_custody_ack(&mut self, scope: &Scope, upstream_id: &str) -> Result<(), Error> {
+        self.connection.execute(
+            "DELETE FROM custody_pending WHERE bus=?1 AND upstream_id=?2",
+            params![scope.bus_instance, upstream_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn custody_status(
+        &mut self,
+        scope: &Scope,
+        limits: &Limits,
+        now: i64,
+        effective_reply_ttl_secs: i64,
+    ) -> Result<Status, Error> {
+        limits.validate(now)?;
+        if effective_reply_ttl_secs <= 0 {
+            return Err(Error::Configuration);
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        expire(&tx, limits, now)?;
+        let (held_items, expired_items): (i64, i64) = tx.query_row("SELECT COALESCE(SUM(text IS NOT NULL),0), COALESCE(SUM(text IS NULL),0) FROM custody_items WHERE bus=?1", [&scope.bus_instance], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let (refusals, quarantines): (i64, i64) = tx.query_row("SELECT COALESCE(SUM(reason!='conflict'),0), COALESCE(SUM(reason='conflict'),0) FROM custody_metadata WHERE bus=?1", [&scope.bus_instance], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let pending: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM custody_pending WHERE bus=?1",
+            [&scope.bus_instance],
+            |row| row.get(0),
+        )?;
+        let first_seen: Option<i64> = tx.query_row("SELECT MIN(first_seen) FROM (SELECT first_seen FROM custody_pending WHERE bus=?1 UNION ALL SELECT expired_first_seen FROM custody_links WHERE bus=?1)", [&scope.bus_instance], |row| row.get(0))?;
+        let oldest_pending_age_secs = first_seen.map(|first| now.saturating_sub(first).max(0));
+        let offline_uncertainty: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM custody_links WHERE bus=?1 AND outages>0)",
+            [&scope.bus_instance],
+            |row| row.get(0),
+        )?;
+        let counter = |name: &str| -> Result<i64, rusqlite::Error> {
+            tx.query_row(
+                "SELECT value FROM custody_counters WHERE name=?1",
+                [name],
+                |row| row.get(0),
+            )
+        };
+        let status = Status {
+            held_items,
+            expired_items,
+            refusals,
+            quarantines,
+            pending,
+            possible_known_loss: oldest_pending_age_secs
+                .is_some_and(|age| age >= effective_reply_ttl_secs),
+            oldest_pending_age_secs,
+            offline_uncertainty,
+            expired_metadata: counter("expired_metadata")?,
+            expired_content: counter("expired_content")?,
+            expired_tombstones: counter("expired_tombstones")?,
+            expired_pending: counter("expired_pending")?,
+        };
+        tx.commit()?;
+        Ok(status)
+    }
+
     pub fn migrate_custody(&mut self) -> Result<(), Error> {
         let tx = self
             .connection
@@ -139,7 +303,12 @@ impl Store {
                 expires_at INTEGER NOT NULL, PRIMARY KEY(bus, upstream_id, fingerprint, reason)
              );
              CREATE TABLE custody_counters (name TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL);
-             INSERT INTO custody_counters VALUES ('expired_metadata', 0), ('expired_content', 0), ('expired_tombstones', 0);",
+             CREATE TABLE custody_pending (bus TEXT NOT NULL, upstream_id TEXT NOT NULL,
+                first_seen INTEGER NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY(bus, upstream_id));
+             CREATE TABLE custody_links (bus TEXT PRIMARY KEY NOT NULL, connected INTEGER NOT NULL,
+                disconnected_at INTEGER, reconnected_at INTEGER, outages INTEGER NOT NULL,
+                expired_first_seen INTEGER);
+             INSERT INTO custody_counters VALUES ('expired_metadata', 0), ('expired_content', 0), ('expired_tombstones', 0), ('expired_pending', 0);",
         )?;
         tx.pragma_update(None, "user_version", 2)?;
         tx.commit()?;
@@ -154,22 +323,8 @@ impl Store {
         limits: &Limits,
         now: i64,
     ) -> Result<Acceptance, Error> {
-        if scope.bus_instance.trim().is_empty()
-            || scope.grant_id.trim().is_empty()
-            || now < 0
-            || [
-                limits.max_items,
-                limits.max_bytes,
-                limits.max_item_bytes,
-                limits.content_retention_secs,
-                limits.max_metadata,
-                limits.metadata_retention_secs,
-            ]
-            .iter()
-            .any(|value| *value <= 0)
-            || now.checked_add(limits.content_retention_secs).is_none()
-            || now.checked_add(limits.metadata_retention_secs).is_none()
-        {
+        limits.validate(now)?;
+        if scope.bus_instance.trim().is_empty() || scope.grant_id.trim().is_empty() {
             return Err(Error::Configuration);
         }
         let tx = self
@@ -180,6 +335,18 @@ impl Store {
             return Err(Error::MigrationRequired);
         }
         expire(&tx, limits, now)?;
+        ensure_link(&tx, &scope.bus_instance, limits)?;
+        let known_pending: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM custody_pending WHERE bus=?1 AND upstream_id=?2)",
+            params![scope.bus_instance, delivery.message_id()],
+            |row| row.get(0),
+        )?;
+        let pending_count: i64 =
+            tx.query_row("SELECT COUNT(*) FROM custody_pending", [], |row| row.get(0))?;
+        if !known_pending && pending_count >= limits.max_metadata {
+            return Err(Error::MetadataFull);
+        }
+        tx.execute("INSERT OR IGNORE INTO custody_pending(bus,upstream_id,first_seen,expires_at) VALUES (?1,?2,?3,?4)", params![scope.bus_instance, delivery.message_id(), now, now + limits.metadata_retention_secs])?;
         let mailbox = service
             .address()
             .ok_or(xmsg::client::ClientError::Disconnected)?;
@@ -219,7 +386,8 @@ impl Store {
             .saturating_add(origin.len())
             .saturating_add(delivery.in_reply_to().map_or(0, str::len));
         let (count, bytes): (i64, i64) = tx.query_row("SELECT COUNT(*), COALESCE(SUM(length(CAST(text AS BLOB)) + length(CAST(envelope AS BLOB)) + length(CAST(origin AS BLOB)) + COALESCE(length(CAST(in_reply_to AS BLOB)), 0)), 0) FROM custody_items", [], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        let oversized = size as u128 > limits.max_item_bytes as u128;
+        let oversized =
+            size as u128 > limits.max_item_bytes as u128 || size as u128 > limits.max_bytes as u128;
         let refused = oversized
             || count >= limits.max_items
             || size as u128 + bytes as u128 > limits.max_bytes as u128;
@@ -259,7 +427,9 @@ impl Store {
             "INSERT INTO custody_outbox (event_id,state) VALUES (?1,'held')",
             [&event_id],
         )?;
+        tracing::debug!(target: "gateway_custody_before_commit", "accept");
         tx.commit()?;
+        tracing::debug!(target: "gateway_custody_after_commit", "accept");
         Ok(Acceptance::Stored { event_id })
     }
 }
@@ -271,12 +441,23 @@ pub async fn receive_one(
     limits: &Limits,
     now: i64,
 ) -> Result<Option<Acceptance>, Error> {
-    let Some(delivery) = service.poll(0).await? else {
+    let polled = match service.poll(0).await {
+        Ok(delivery) => {
+            store.record_custody_link(scope, true, limits, now)?;
+            delivery
+        }
+        Err(error) => {
+            store.record_custody_link(scope, false, limits, now)?;
+            return Err(error.into());
+        }
+    };
+    let Some(delivery) = polled else {
         return Ok(None);
     };
     let accepted = store.accept_delivery(scope, service, &delivery, limits, now)?;
     if accepted.can_ack() {
         service.ack(delivery.message_id()).await?;
+        store.record_custody_ack(scope, delivery.message_id())?;
     }
     Ok(Some(accepted))
 }

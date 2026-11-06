@@ -119,14 +119,14 @@ def build(source, target, revision, output):
     return output
 
 
-def build_test(root=ROOT):
+def build_test(root=ROOT, *, target="real_xmsg", target_dir=None):
     log = command(
         [
             "cargo",
             "test",
             "--locked",
             "--test",
-            "real_xmsg",
+            target,
             "--no-run",
             "-j",
             "4",
@@ -136,7 +136,8 @@ def build_test(root=ROOT):
         env={
             **os.environ,
             "CARGO_TARGET_DIR": str(
-                ROOT / ("target" if root == ROOT else "target/transport-controls")
+                target_dir
+                or ROOT / ("target" if root == ROOT else "target/transport-controls")
             ),
         },
     )
@@ -145,7 +146,7 @@ def build_test(root=ROOT):
         item["executable"]
         for item in records
         if item.get("reason") == "compiler-artifact"
-        and item.get("target", {}).get("name") == "real_xmsg"
+        and item.get("target", {}).get("name") == target
         and item.get("profile", {}).get("test")
         and item.get("executable")
     ]
