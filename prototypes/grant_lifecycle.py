@@ -37,7 +37,7 @@ class Grants:
     def owner_provision(self, service, binding):
         with self.db:
             self.db.execute(
-                "INSERT INTO grants VALUES (?, ?, ?, ?, ?, ?, 1, 1)",
+                "INSERT INTO grants VALUES (?, ?, ?, ?, ?, ?, 1, 0)",
                 (str(uuid4()), service, *binding),
             )
 
@@ -141,6 +141,10 @@ def main():
         assert grants.resolve("xmsg", xmsg) is None
         grants.owner_provision("xmsg", xmsg)
         grants.owner_provision("hindsight", hindsight)
+        assert grants.resolve("xmsg", xmsg) is None
+        assert grants.resolve("hindsight", hindsight) is None
+        grants.owner_set_enabled("xmsg", True)
+        grants.owner_set_enabled("hindsight", True)
         a, b = (
             grants.accept("hindsight", hindsight),
             grants.accept("hindsight", hindsight),
@@ -161,8 +165,8 @@ def main():
         row = grants.db.execute("SELECT * FROM work WHERE id=?", (a,)).fetchone()
         assert (
             row["id"] == a
-            and row["accepted_revision"] == 1
-            and row["dispatch_revision"] == 3
+            and row["accepted_revision"] == 2
+            and row["dispatch_revision"] == 4
         )
         audit = grants.db.execute("SELECT * FROM replay_audit").fetchall()
         assert len(audit) == 1 and audit[0]["work_id"] == a
@@ -176,6 +180,7 @@ def main():
         json.dumps(
             {
                 "no_token_enrollment": True,
+                "enrollment_starts_disabled": True,
                 "service_and_client_isolation": True,
                 "disabled_binding_rejects_refreshed_identity": True,
                 "reenable_holds_old_work": True,

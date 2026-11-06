@@ -337,6 +337,9 @@ async def run(
                 "xmsg",
                 (metadata["issuer"], expected_subject, params["resource"], hosted_id),
             )
+            enrolled = await browser.post("/mcp", json=probe_request, headers=bearer)
+            report["enrollment_requires_explicit_enable"] = enrolled.status_code == 401
+            grants.owner_set_enabled("xmsg", True)
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app),
                 base_url="https://broker.example",
