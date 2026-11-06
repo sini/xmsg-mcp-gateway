@@ -273,18 +273,20 @@ def test_custody(env):
     pending = store.entries()
     assert len(pending) == 1 and pending[0]["state"] == "pending"
     expected = pending[0]["event_id"]
+    stored_body = pending[0]["body"]
     restarted = Store(store.root)
     assert restarted.emit("crash-occurrence") == expected
     assert len(restarted.entries()) == 1
     callback.status = 503
     Worker(restarted, callback).once()
     first_body = callback.calls[-1][1]
+    assert first_body == stored_body
     assert restarted.entries()[0]["attempts"] == 1
     with restarted.db() as db:
         db.execute("UPDATE outbox SET next_attempt=0")
     callback.status = 200
     Worker(Store(store.root), callback).once()
-    assert callback.calls[-1][1] == first_body
+    assert callback.calls[-1][1] == stored_body
     assert json.loads(first_body)["eventId"] == expected
     assert restarted.health()["accepted"] == 1
 

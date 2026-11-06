@@ -9,7 +9,7 @@ import uvicorn
 
 from .app import create_app
 from .config import Settings
-from .store import Store
+from .store import OAuthCredentialRevocationError, Store
 
 
 def main():
@@ -71,10 +71,12 @@ def main():
             )
         case "retry-dead":
             with store.guard(), store.db() as db:
-                db.execute(
+                changed = db.execute(
                     "UPDATE outbox SET state='pending',attempts=0,next_attempt=0 WHERE event_id=? AND state='dead'",
                     (args.event_id,),
-                )
+                ).rowcount
+                if changed != 1:
+                    raise ValueError("unknown event or event is not a dead letter")
             print("Selected dead letter rearmed with original event ID.")
         case "serve":
             uvicorn.run(
@@ -89,6 +91,12 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except OAuthCredentialRevocationError:
+        print(
+            "OAuth credentials cannot be revoked by digest; revoke their authorization at the provider.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     except (ValueError, OSError):
         print(
             "Configuration or local state error; inspect settings locally.",

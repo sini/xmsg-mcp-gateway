@@ -15,7 +15,15 @@ class DestinationError(ValueError):
 
 TRANSITION = tuple(
     ipaddress.ip_network(n)
-    for n in ("64:ff9b::/96", "64:ff9b:1::/48", "2002::/16", "2001::/32")
+    for n in (
+        "::/96",
+        "::ffff:0:0/96",
+        "fec0::/10",
+        "64:ff9b::/96",
+        "64:ff9b:1::/48",
+        "2002::/16",
+        "2001::/32",
+    )
 )
 DNS_TIMEOUT = 3
 REQUEST_TIMEOUT = 10

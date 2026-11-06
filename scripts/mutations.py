@@ -54,7 +54,53 @@ MUTANTS = [
         'bind: str = "0.0.0.0"',
         "test_default_bind",
     ),
+    (
+        "08-oauth-revoke",
+        "phase1/store.py",
+        'if row and row["mode"] == "oauth":',
+        "if False:",
+        "tests/test_review_fixes.py::test_oauth_digest_revoke_is_explicitly_refused",
+    ),
+    (
+        "09-shared-audience",
+        "phase1/auth.py",
+        "return value == resource or value == [resource]",
+        "return value == resource",
+        "tests/test_review_fixes.py::test_provider_probe_and_server_agree_on_audiences",
+    ),
+    (
+        "10-ipv6-transition",
+        "phase1/transport.py",
+        "and not any(ip.version == net.version and ip in net for net in TRANSITION)",
+        "and True",
+        "tests/test_review_fixes.py::test_unsafe_ipv6_callback_address_is_refused",
+    ),
+    (
+        "11-unknown-revoke",
+        "phase1/store.py",
+        'raise ValueError("unknown credential")',
+        "return",
+        "tests/test_review_fixes.py::test_unknown_revoke_id_exits_nonzero",
+    ),
+    (
+        "12-unknown-retry",
+        "phase1/cli.py",
+        "if changed != 1:",
+        "if False:",
+        "tests/test_review_fixes.py::test_unknown_or_non_dead_retry_id_exits_nonzero",
+    ),
+    (
+        "13-stored-body",
+        "phase1/worker.py",
+        'event["body"],',
+        'event["body"].replace(b"Synthetic phase 1 event.", b"Changed synthetic preview"),',
+        "test_custody",
+    ),
 ]
+
+
+def test_path(test):
+    return test if "::" in test else "tests/test_phase1.py::" + test
 
 
 def run(directory, test):
@@ -65,7 +111,7 @@ def run(directory, test):
             "pytest",
             "-q",
             "--tb=short",
-            "tests/test_phase1.py::" + test,
+            test_path(test),
         ],
         cwd=directory,
         env={**os.environ, "PYTHONPATH": str(directory)},
@@ -105,10 +151,7 @@ def main():
             for cache in root.rglob("__pycache__"):
                 shutil.rmtree(cache)
             red = run(root, test)
-            if (
-                red.returncode != 1
-                or "FAILED tests/test_phase1.py::" + test not in red.stdout
-            ):
+            if red.returncode != 1 or "FAILED " + test_path(test) not in red.stdout:
                 raise RuntimeError(
                     name + ": mutant was not killed by its intended test"
                 )
@@ -124,7 +167,9 @@ def main():
             (EVIDENCE / (name + "-green.txt")).write_text(green.stdout + green.stderr)
             (EVIDENCE / (name + "-red.txt")).write_text(red.stdout + red.stderr)
             print(name + ": GREEN control, RED mutant (exit 1)", flush=True)
-    print("7/7 single-site production mutants killed; originals untouched.")
+    print(
+        f"{len(MUTANTS)}/{len(MUTANTS)} single-site production mutants killed; originals untouched."
+    )
 
 
 if __name__ == "__main__":

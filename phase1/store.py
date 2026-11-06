@@ -26,6 +26,10 @@ def encode(data):
     ).encode()
 
 
+class OAuthCredentialRevocationError(ValueError):
+    pass
+
+
 class Store:
     def __init__(self, root):
         self.root = Path(root)
@@ -93,7 +97,18 @@ class Store:
 
     def revoke_id(self, credential):
         with self.guard(), self.db() as db:
-            db.execute("UPDATE credentials SET revoked=1 WHERE id=?", (credential,))
+            row = db.execute(
+                "SELECT mode FROM credentials WHERE id=?", (credential,)
+            ).fetchone()
+            if row and row["mode"] == "oauth":
+                raise OAuthCredentialRevocationError(
+                    "OAuth digest revocation is refused"
+                )
+            changed = db.execute(
+                "UPDATE credentials SET revoked=1 WHERE id=?", (credential,)
+            ).rowcount
+            if changed != 1:
+                raise ValueError("unknown credential")
 
     def authenticate(self, token, oauth=None):
         credential = digest(token)

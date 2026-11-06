@@ -10,6 +10,10 @@ SCOPES = ["identity:read", "events:subscribe"]
 PRINCIPAL = "dot@phase1-synthetic"
 
 
+def exact_audience(value, resource):
+    return value == resource or value == [resource]
+
+
 class OAuth:
     def __init__(self, settings, http=None):
         self.settings = settings
@@ -53,7 +57,7 @@ class OAuth:
                 status == 200
                 and claims.get("active") is True
                 and claims.get("iss") == self.settings.issuer
-                and claims.get("aud") == self.settings.resource
+                and exact_audience(claims.get("aud"), self.settings.resource)
                 and claims.get("sub") == self.settings.subject
                 and isinstance(exp, (int, float))
                 and not isinstance(exp, bool)
@@ -64,6 +68,6 @@ class OAuth:
                 and isinstance(claims.get("scope"), str)
                 and set(SCOPES).issubset(claims["scope"].split())
             )
-            return claims if valid else None
+            return {**claims, "aud": self.settings.resource} if valid else None
         except (OSError, ValueError, TypeError, AttributeError):
             return None

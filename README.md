@@ -1,6 +1,6 @@
 # xmsg-mcp-gateway
 
-An isolated synthetic MCP Events feasibility server. The owner selected the component name and public repository visibility. Nothing here connects to xmsg.
+A synthetic MCP Events reference server for the planned Rust gateway. This phase does not connect to xmsg; the finished gateway is intended to use its own dedicated xmsg node and federated service identity.
 
 The authenticated Streamable HTTP endpoint is `/mcp`. It offers one tool,
 `xmsg_identity`, and `events/list`, `events/subscribe`, `events/unsubscribe` for
@@ -32,8 +32,8 @@ The server returns JSON Streamable HTTP responses and advertises Events during
 2025-11-25. It does not implement MCP 2.0 `server/discover`, SSE subscriptions, or
 MCP batch requests. An authenticated GET receives 405; notifications receive 202.
 Standard `params._meta` is accepted separately from strict tool arguments and
-subscription filters. Progress tokens are validated but do not require progress
-notifications from this server. Idle/backoff worker ticks do not introspect tokens;
+subscription filters. Progress token types are validated, but metadata is otherwise unused and no
+progress notifications are emitted. Idle/backoff worker ticks do not introspect tokens;
 a due delivery rechecks authorization before reserving its attempt and sending.
 
 ## Configuration and OAuth
@@ -61,7 +61,7 @@ rewrites a token audience to make an incompatible provider appear compatible.
 
 The repository includes no live provider configuration or credentials. Kanidm
 reuse is desirable but direct compatibility is unproved: the checked upstream
-source returns a client-ID audience. See the phase 1 report in the design workspace before registering a client.
+source returns a client-ID audience. Read the [provider setup guide](docs/provider-setup.md) before registering a client.
 A dedicated client, compatible resource audience and accessible OAuth endpoints
 must be verified first. Do not reuse another application's client registration.
 
@@ -85,10 +85,17 @@ uv run phase1 --state .state retry-dead '<event-id>'
 uv run phase1 --state .state reset-binding
 ```
 
-The verifier ID is the SHA-256 digest of a fixture token or OAuth access token;
-inspect only IDs locally if manual revocation is needed. Upstream OAuth revocation
-also stops dispatch through per-attempt introspection. An already initiated
-request cannot be recalled; local revocation serializes with dispatch.
+The verifier ID identifies a local-test fixture credential. `revoke` explicitly
+refuses OAuth credentials: revoking one access-token digest cannot disable a
+refreshed token. Revoke OAuth authorization at the provider; durable local service
+grant disablement belongs to the next implementation phase. Unknown revoke or
+retry IDs exit nonzero. An already initiated request cannot be recalled.
+
+The worker holds the operation lock across online introspection and callback
+submission. Each network operation has a bounded resolver/request budget, so
+local administration may wait roughly 26 seconds for those two operations. This
+orders local revocation after an already started submission; it does not make
+remote provider revocation instantaneous.
 
 SQLite uses full synchronous commits. A committed outbox occurrence survives
 process exit before its callback. Attempts are reserved durably before sending.
@@ -191,8 +198,6 @@ References: [MCP Events](https://developers.openai.com/plugins/build/mcp-events)
 [OAuth](https://developers.openai.com/plugins/build/auth),
 [custom MCP setup](https://developers.openai.com/api/docs/guides/custom-mcp-server).
 
-Design, implementation reports, reviews and recorded mutation evidence live in
-`../den-ag-design/xmsg/xmsg-mcp-gateway/` in the shared workspace. The
-[Hindsight access review gist](https://gist.github.com/sini/5ab8844bb2bef8cc6806c3db1eaf1308)
-is available for sharing. Fresh mutation runs write to the gitignored
-`.artifacts/mutations/` directory in this code repository.
+Public operational setup is documented above and in [provider setup](docs/provider-setup.md).
+Run the tests and mutation command from a fresh checkout to reproduce local checks;
+fresh mutation output is written to the gitignored `.artifacts/mutations/` directory.

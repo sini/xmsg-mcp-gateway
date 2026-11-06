@@ -13,6 +13,7 @@ from urllib.parse import urlencode, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from .auth import exact_audience
 from .transport import HTTPS
 
 
@@ -109,8 +110,7 @@ def check_provider(config, token, http=None):
         "expected_owner_subject": claims.get("sub") == config.expected_subject,
         "approved_hosted_client": claims.get("client_id")
         == config.approved_hosted_oauth_client_id,
-        "exact_resource_audience": audience == config.resource
-        or audience == [config.resource],
+        "exact_resource_audience": exact_audience(audience, config.resource),
         "unexpired": finite_number(exp) and exp > now,
         "not_before": finite_number(nbf) and nbf <= now,
         "required_scopes": isinstance(claims.get("scope"), str)
