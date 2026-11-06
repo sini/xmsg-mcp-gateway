@@ -53,14 +53,14 @@ def create_app(settings, store=None, http=None, oauth=None, run_worker=False):
             match request.method:
                 case "initialize":
                     init = Initialize.model_validate(request.params)
-                    if init.protocolVersion not in (
-                        "2025-03-26",
-                        "2025-06-18",
-                        "2025-11-25",
-                    ):
-                        raise ValueError("unsupported protocol version")
+                    version = (
+                        init.protocolVersion
+                        if init.protocolVersion
+                        in ("2025-03-26", "2025-06-18", "2025-11-25")
+                        else "2025-11-25"
+                    )
                     result = {
-                        "protocolVersion": init.protocolVersion,
+                        "protocolVersion": version,
                         "capabilities": {"tools": {}, "events": {}},
                         "serverInfo": {
                             "name": "xmsg-mcp-gateway",
