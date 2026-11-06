@@ -1,0 +1,10 @@
+# Copy into .state/provider-test.toml, mode 0600. Use only freshly generated test credentials.
+issuer = "https://auth.example/oauth2/openid/hosted-test"
+resource = "https://mcp.example/mcp"
+expected_subject = "replace-with-the-verified-owner-subject"
+approved_hosted_oauth_client_id = "hosted-test-client-H"
+introspection_client_id = "introspection-test-client-I"
+introspection_url = "https://auth.example/oauth2/token/introspect"
+# Relative to the private configuration file's directory.
+introspection_client_secret_file = "introspection-secret"
+required_scopes = ["identity:read", "events:subscribe"]
