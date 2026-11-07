@@ -711,13 +711,13 @@ async fn handler_deadline_reports_pending_without_cancelling_accepted_work() {
         .unwrap()
         .unwrap();
     let status = response.status();
-    let body: serde_json::Value =
-        serde_json::from_slice(&to_bytes(response.into_body(), 100_000).await.unwrap()).unwrap();
     assert_eq!(
         status,
         StatusCode::OK,
         "handler deadline hid its pending request"
     );
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 100_000).await.unwrap()).unwrap();
     assert_eq!(
         body["result"]["structuredContent"]["state"], "pending",
         "handler deadline hid its pending request"
