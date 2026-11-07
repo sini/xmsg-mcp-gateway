@@ -702,6 +702,47 @@ async fn dispatch_does_not_change_the_callers_custody_busy_wait() {
     );
     writer.join().unwrap();
     result.expect("dispatch disabled the caller Store's custody busy wait");
+    let target = service.address().unwrap().to_owned();
+    store
+        .set_outbound_policy(
+            "grant",
+            2,
+            &Policy {
+                send: Some(Permission {
+                    targets: [target.clone()].into(),
+                    required_scope: "send:write".into(),
+                }),
+                reply: None,
+            },
+        )
+        .unwrap();
+    let file = fixture.store_file.clone();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let heartbeat = std::thread::spawn(move || {
+        let sql = rusqlite::Connection::open(file).unwrap();
+        sql.execute_batch("BEGIN IMMEDIATE; UPDATE custody_counters SET value=value WHERE name='expired_metadata'").unwrap();
+        ready_tx.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        sql.execute_batch("COMMIT").unwrap();
+    });
+    ready_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    let sent = dispatch(
+        &mut store,
+        &endpoint,
+        &verifier,
+        "good-token",
+        "private-bus",
+        &request("heartbeat-overlap", &target, "short heartbeat contention"),
+        &limits(),
+    )
+    .await;
+    heartbeat.join().unwrap();
+    assert!(
+        matches!(sent, Ok(Outcome::Confirmed(_))),
+        "short heartbeat write refused a send: {sent:?}"
+    );
     println!("gateway-outbound-complete:isolated-connection");
 }
 

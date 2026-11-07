@@ -47,6 +47,9 @@ messaging tools and refuses messaging calls.
 
 The handler budget must cover initial verification, the store's actual SQLite
 busy wait and the submission deadline, within the existing 60-second ceiling.
+The dispatcher uses a dedicated connection with a 250 ms SQLite busy wait for each
+short transaction, within that budget. A longer lock yields a retryable refusal
+before submission; after acceptance the durable reservation stays pending.
 Dispatch runs in a separate task that owns its store and registration context.
 Handler timeout returns pending with the same request ID; disconnect does not
 cancel the outcome commit. Accepted packets cannot be recalled by disconnect.

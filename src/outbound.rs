@@ -419,7 +419,7 @@ pub async fn dispatch(
     limits: &Limits,
 ) -> Result<Outcome, Error> {
     limits.validate()?;
-    let mut dedicated = Store::open_nonblocking(&store.file)?;
+    let mut dedicated = Store::open_for_dispatch(&store.file)?;
     dispatch_on_connection(
         &mut dedicated,
         service,

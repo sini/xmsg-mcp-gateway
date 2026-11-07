@@ -347,10 +347,19 @@ CASES += [
         "expired stale reservation was denied instead of becoming unknown",
     ),
     (
+        "short-busy-wait",
+        "src/grants.rs",
+        "Self::open_with_wait(file, Duration::from_millis(250))",
+        "Self::open_with_wait(file, Duration::ZERO)",
+        "custody_outbound",
+        "dispatch_does_not_change_the_callers_custody_busy_wait",
+        "short heartbeat write refused a send",
+    ),
+    (
         "caller-busy-wait",
         "src/outbound.rs",
-        "let mut dedicated = Store::open_nonblocking(&store.file)?;",
-        "store.connection.busy_timeout(std::time::Duration::ZERO)?;\n    let mut dedicated = Store::open_nonblocking(&store.file)?;",
+        "let mut dedicated = Store::open_for_dispatch(&store.file)?;",
+        "store.connection.busy_timeout(std::time::Duration::ZERO)?;\n    let mut dedicated = Store::open_for_dispatch(&store.file)?;",
         "custody_outbound",
         "dispatch_does_not_change_the_callers_custody_busy_wait",
         "dispatch disabled the caller Store's custody busy wait",
@@ -418,7 +427,7 @@ def main():
     parser.add_argument("--case", choices=[case[0] for case in CASES])
     parser.add_argument("--list", action="store_true")
     args = parser.parse_args()
-    assert len(CASES) == 36, "outbound mutant inventory drift"
+    assert len(CASES) == 37, "outbound mutant inventory drift"
     for name, filename, old, *_ in CASES:
         assert (ROOT / filename).read_text().count(old) == 1, (
             name,
@@ -479,7 +488,7 @@ def main():
                 print(f"{name}: GREEN baseline / RED intended", flush=True)
             finally:
                 file.write_text(source)
-        assert completed == (1 if args.case else 36), (
+        assert completed == (1 if args.case else 37), (
             "outbound mutant completion mismatch"
         )
         if not args.case:

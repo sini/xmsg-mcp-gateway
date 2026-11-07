@@ -104,8 +104,8 @@ impl Store {
         Self::open_with_wait(file, Duration::from_secs(30))
     }
 
-    pub(crate) fn open_nonblocking(file: &Path) -> Result<Self, Error> {
-        Self::open_with_wait(file, Duration::ZERO)
+    pub(crate) fn open_for_dispatch(file: &Path) -> Result<Self, Error> {
+        Self::open_with_wait(file, Duration::from_millis(250))
     }
 
     fn open_with_wait(file: &Path, wait: Duration) -> Result<Self, Error> {

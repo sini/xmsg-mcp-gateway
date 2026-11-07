@@ -112,7 +112,7 @@ jobs:
           export XMSG_GATEWAY_BIN="$PWD/.artifacts/transport/$revision/xmsg"
           python3 scripts/outbound_mutants.py | tee outbound-mutants.log
           grep -Fx 'outbound-schema-floor-control:passed' outbound-mutants.log
-          grep -Fx 'outbound-mutants-complete:36' outbound-mutants.log
+          grep -Fx 'outbound-mutants-complete:37' outbound-mutants.log
       - name: MCP startup and messaging completion controls
         run: |
           revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')
