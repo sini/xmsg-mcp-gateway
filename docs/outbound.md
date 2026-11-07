@@ -13,6 +13,15 @@ Store API. Policy is empty until explicitly written; writing policy increments
 the grant revision and never enables it. There is no MCP policy mutation tool,
 automatic population, or fixture-only constructor.
 
+For example, an owner policy document can allow one exact destination:
+
+```json
+{"send":{"targets":["receiver@example.node"],"required_scope":"xmsg:send"},"reply":null}
+```
+
+The configured verifier must require `xmsg:send` too. This policy file is an owner
+input to the CLI, not an MCP argument or listener activation switch.
+
 Policy has optional `send` and `reply` permissions, each naming exact service
 addresses in `targets` and a `required_scope`. The verifier must require that
 scope and verify it on the actual token. Anonymous, instance and label matches
@@ -57,9 +66,25 @@ fail visibly without changing authority. Synchronous filesystem/database I/O is
 not a hard real-time guarantee. No SQLite transaction spans network I/O, and
 inbound custody commits and ACKs never acquire this lease. Outcome commit records
 the grant revision at submission and whether it changed afterward.
+If SQLite is busy before reservation, the dispatcher returns a transient busy
+refusal with no row or submission; retry uses the same request ID. If the outcome
+commit is busy after xmsg accepted, it returns pending rather than reporting a
+failed send. The existing durable pending row recovers with its stored key and
+original upstream message ID. The schema permits no fabricated failed state.
 
 The caller supplies explicit dedup lifetime and reservation count/byte bounds.
 There is no automatic ledger eviction that could forget an old request ID and
 turn a repeat into a fresh send. Exhaustion refuses new reservations; reconciliation
 and archival require a later owner workflow. The actual daemon TTL/queue checks
 remain the prerequisite startup work rather than guessed manifest values.
+
+The mandatory private-node profile runs 11 named cases with completion markers,
+missing-fixture and early-return refusals. It covers both process-crash cuts,
+same-ID receipts and payload conflicts, expired uncertainty, held revisions,
+owned replies, disable ordering, inbound progress during stalled acceptance, and
+both SQLite BUSY phases. Portable tests cover the explicit migrations, strict
+request IDs (including a committed trybuild snapshot), per-service lease custody
+and the real owner's 30-second timeout. The 28 single-site source mutants must
+fail their named assertions; compile failures, cached artifacts and harness
+timeouts do not count as kills. The later serving unit owns the end-to-end MCP
+JSON-RPC-ID, missing-request-ID and default-empty-policy acceptance cells.

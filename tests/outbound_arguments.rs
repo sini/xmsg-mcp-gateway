@@ -1,4 +1,4 @@
-use xmsg_mcp_gateway::outbound::{RequestId, SendArguments};
+use xmsg_mcp_gateway::outbound::{ReplyArguments, RequestId, SendArguments};
 
 #[test]
 fn request_id_is_required_and_strict() {
@@ -14,7 +14,17 @@ fn request_id_is_required_and_strict() {
         serde_json::json!({"request_id":123,"to":"receiver@node", "text":"hello"}),
         serde_json::json!({"request_id":"ok","to":"receiver@node", "text":"hello","id":1}),
     ] {
-        assert!(serde_json::from_value::<SendArguments>(value).is_err());
+        let mut reply = value.clone();
+        let to = reply.as_object_mut().unwrap().remove("to").unwrap();
+        reply["message_id"] = to;
+        assert!(
+            serde_json::from_value::<ReplyArguments>(reply).is_err(),
+            "outbound reply arguments accepted missing or non-strict request_id"
+        );
+        assert!(
+            serde_json::from_value::<SendArguments>(value).is_err(),
+            "outbound send arguments accepted missing or non-strict request_id"
+        );
     }
     let args: SendArguments = serde_json::from_value(serde_json::json!({
         "request_id":"operation-1","to":"receiver@node","text":"hello"

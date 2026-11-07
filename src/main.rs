@@ -62,6 +62,10 @@ enum CommandError {
     ReadBinding(#[source] std::io::Error),
     #[error("invalid enrollment binding document")]
     InvalidDocument(#[source] serde_json::Error),
+    #[error("cannot read outbound policy document")]
+    ReadPolicy(#[source] std::io::Error),
+    #[error("invalid outbound policy document")]
+    InvalidPolicy(#[source] serde_json::Error),
 }
 
 async fn run(cli: Cli) -> Result<(), CommandError> {
@@ -95,9 +99,8 @@ async fn run(cli: Cli) -> Result<(), CommandError> {
                 policy,
             },
         ) => {
-            let document = std::fs::read(policy).map_err(CommandError::ReadBinding)?;
-            let policy =
-                serde_json::from_slice(&document).map_err(CommandError::InvalidDocument)?;
+            let document = std::fs::read(policy).map_err(CommandError::ReadPolicy)?;
+            let policy = serde_json::from_slice(&document).map_err(CommandError::InvalidPolicy)?;
             let next = Store::open(&state)?.set_outbound_policy(&id, revision, &policy)?;
             println!("outbound policy changed at revision {next}");
         }

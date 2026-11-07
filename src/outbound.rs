@@ -19,16 +19,38 @@ pub enum Error {
     Configuration,
     #[error("outbound reservation capacity exhausted")]
     Capacity,
+    #[error("outbound store busy; operation not submitted, retry the same request_id")]
+    Busy,
     #[error(transparent)]
-    Authority(#[from] GrantError),
+    Authority(GrantError),
     #[error("outbound store unavailable")]
-    Database(#[from] rusqlite::Error),
+    Database(#[source] rusqlite::Error),
     #[error("invalid outbound record")]
     Encoding(#[from] serde_json::Error),
     #[error("credential verification failed")]
     Authentication(#[from] crate::auth::Error),
     #[error("target discovery unavailable")]
     Transport(#[from] xmsg::client::ClientError),
+}
+
+impl From<rusqlite::Error> for Error {
+    fn from(error: rusqlite::Error) -> Self {
+        if matches!(&error,rusqlite::Error::SqliteFailure(code,_) if matches!(code.code,rusqlite::ErrorCode::DatabaseBusy|rusqlite::ErrorCode::DatabaseLocked))
+        {
+            Self::Busy
+        } else {
+            Self::Database(error)
+        }
+    }
+}
+
+impl From<GrantError> for Error {
+    fn from(error: GrantError) -> Self {
+        match error {
+            GrantError::Database(error) => error.into(),
+            other => Self::Authority(other),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -46,6 +68,14 @@ pub struct Permission {
 }
 
 impl Policy {
+    fn permission(&self, request: &Request) -> Result<Permission, Error> {
+        match request {
+            Request::Send(_) => self.send.clone(),
+            Request::Reply(_) => self.reply.clone(),
+        }
+        .ok_or(Error::Denied)
+    }
+
     fn validate(&self) -> Result<(), Error> {
         for permission in [&self.send, &self.reply].into_iter().flatten() {
             if permission.required_scope.trim().is_empty()
@@ -269,6 +299,10 @@ impl Endpoint {
 }
 
 impl Limits {
+    fn text_fits(&self, framed: &str) -> bool {
+        framed.len() <= self.max_text_bytes
+    }
+
     fn validate(&self) -> Result<(), Error> {
         if self.dedup_lifetime_secs <= 0
             || self.max_text_bytes == 0
@@ -301,6 +335,7 @@ struct Reservation {
     created_at: i64,
     retry_until: i64,
     receipt: Option<String>,
+    target: String,
 }
 
 impl Reservation {
@@ -331,8 +366,8 @@ impl Store {
         op: &str,
         id: &RequestId,
     ) -> Result<Option<Reservation>, Error> {
-        Ok(self.connection.query_row("SELECT idempotency_key, payload_hash, sender, grant_id, grant_revision, framed_text, created_at, retry_until, receipt FROM outbound_reservations WHERE owner=?1 AND operation=?2 AND request_id=?3", params![owner,op,id.as_str()], |r| Ok(Reservation {
-            key:r.get(0)?,payload_hash:r.get(1)?,sender:r.get(2)?,grant_id:r.get(3)?,grant_revision:r.get(4)?,framed_text:r.get(5)?,created_at:r.get(6)?,retry_until:r.get(7)?,receipt:r.get(8)?
+        Ok(self.connection.query_row("SELECT idempotency_key, payload_hash, sender, grant_id, grant_revision, framed_text, created_at, retry_until, receipt, target FROM outbound_reservations WHERE owner=?1 AND operation=?2 AND request_id=?3", params![owner,op,id.as_str()], |r| Ok(Reservation {
+            key:r.get(0)?,payload_hash:r.get(1)?,sender:r.get(2)?,grant_id:r.get(3)?,grant_revision:r.get(4)?,framed_text:r.get(5)?,created_at:r.get(6)?,retry_until:r.get(7)?,receipt:r.get(8)?,target:r.get(9)?
         })).optional()?)
     }
 }
@@ -355,23 +390,37 @@ pub async fn dispatch(
         .map_err(|_| Error::Transport(xmsg::client::ClientError::Timeout))??;
     let initial_grant = store.authorize(&identity)?;
     let initial_policy = store.outbound_policy(&initial_grant.grant_id)?;
-    let initial_permission = match request {
-        Request::Send(_) => initial_policy.send,
-        Request::Reply(_) => initial_policy.reply,
-    }
-    .ok_or(Error::Denied)?;
+    let initial_permission = initial_policy.permission(request)?;
     if !verifier.requires_scope(&initial_permission.required_scope) {
         return Err(Error::Denied);
     }
-    let Some(_lease) = store.try_operation_lease(identity.service())? else {
-        return Ok(Outcome::Pending);
-    };
     let owner = crate::custody::fingerprint(&[
         identity.service(),
         identity.issuer(),
         identity.resource(),
         identity.subject(),
     ]);
+    let Some(_lease) = store.try_operation_lease(identity.service())? else {
+        let (op, id, text) = request.parts();
+        if let Some(reservation) = store.reservation(&owner, op, id)? {
+            let (target, correlation) = match request {
+                Request::Send(args) => (args.to.as_str(), ""),
+                Request::Reply(args) => (reservation.target.as_str(), args.message_id.as_str()),
+            };
+            if reservation.payload_hash
+                != crate::custody::fingerprint(&[op, target, correlation, text])
+            {
+                return Err(Error::Conflict);
+            }
+            if !initial_permission.targets.contains(target) {
+                return Err(Error::Denied);
+            }
+            if let Some(receipt) = reservation.receipt {
+                return Ok(Outcome::Confirmed(serde_json::from_str(&receipt)?));
+            }
+        }
+        return Ok(Outcome::Pending);
+    };
     let remaining = limits.timeout.saturating_sub(started.elapsed());
     let result = tokio::time::timeout(
         remaining,
@@ -391,7 +440,9 @@ pub async fn dispatch(
         Ok(result) => result,
         Err(_) => {
             let (op, id, _) = request.parts();
-            store.connection.execute("UPDATE outbound_reservations SET state='unknown' WHERE owner=?1 AND operation=?2 AND request_id=?3 AND receipt IS NULL", params![owner, op, id.as_str()])?;
+            if store.connection.execute("UPDATE outbound_reservations SET state='unknown' WHERE owner=?1 AND operation=?2 AND request_id=?3 AND receipt IS NULL", params![owner, op, id.as_str()]).is_err() {
+                tracing::debug!(target:"gateway_outbound_pending", "uncertain outcome could not be recorded");
+            }
             Ok(Outcome::Unknown)
         }
     }
@@ -421,11 +472,7 @@ async fn submit(
     let authority = store.authorize(&identity)?;
     let policy = store.outbound_policy(&authority.grant_id)?;
     let (op, id, text) = request.parts();
-    let permission = match request {
-        Request::Send(_) => policy.send,
-        Request::Reply(_) => policy.reply,
-    }
-    .ok_or(Error::Denied)?;
+    let permission = policy.permission(request)?;
     if !verifier.requires_scope(&permission.required_scope) {
         return Err(Error::Denied);
     }
@@ -433,7 +480,7 @@ async fn submit(
     let (target, correlation) = match request {
         Request::Send(args) => (args.to.clone(), None),
         Request::Reply(args) => {
-            let origin: Option<String> = store.connection.query_row("SELECT c.origin FROM custody_items c JOIN grants g ON g.id=c.grant_id WHERE c.bus=?1 AND c.upstream_id=?2 AND c.mailbox=?3 AND c.owner=?4 AND g.service=?5 AND g.issuer=?6 AND g.resource=?7", params![bus_instance, args.message_id, sender, identity.subject(), identity.service(), identity.issuer(), identity.resource()], |r|r.get(0)).optional()?;
+            let origin: Option<String> = store.connection.query_row("SELECT c.origin FROM custody_items c JOIN grants g ON g.id=c.grant_id WHERE c.bus=?1 AND c.upstream_id=?2 AND c.mailbox=?3 AND c.owner=?4 AND g.service=?5 AND g.issuer=?6 AND g.resource=?7 AND c.grant_id=?8 AND c.grant_revision=?9 AND c.text IS NOT NULL AND c.expires_at>?10", params![bus_instance, args.message_id, sender, identity.subject(), identity.service(), identity.issuer(), identity.resource(), authority.grant_id, authority.revision, now()], |r|r.get(0)).optional()?;
             let origin: xmsg::client::Origin = serde_json::from_str(&origin.ok_or(Error::Denied)?)?;
             let name = origin.service.ok_or(Error::Denied)?;
             if origin.id.is_some() {
@@ -507,7 +554,7 @@ async fn submit(
             );
             let framed_text =
                 format!("[External message via {sender}; gateway correlation {key}]\n{text}");
-            if framed_text.len() > limits.max_text_bytes {
+            if !limits.text_fits(&framed_text) {
                 return Err(Error::Oversized);
             }
             let timestamp = now();
@@ -536,7 +583,7 @@ async fn submit(
         store.expire_reservation(&reservation, limits)?;
         return Ok(Outcome::Unknown);
     }
-    if reservation.framed_text.len() > limits.max_text_bytes {
+    if !limits.text_fits(&reservation.framed_text) {
         return Err(Error::Oversized);
     }
     let key = reservation.key.clone();
@@ -553,24 +600,32 @@ async fn submit(
             .map(Receipt::Send),
     };
     tracing::debug!(target:"gateway_outbound_submitted", "outcome awaiting commit");
-    let tx = store
-        .connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let revision: i64 = tx.query_row(
-        "SELECT revision FROM grants WHERE id=?1",
-        [&authority.grant_id],
-        |r| r.get(0),
-    )?;
-    let outcome = match submitted {
-        Ok(receipt) => {
-            tx.execute("UPDATE outbound_reservations SET state='confirmed', receipt=?2, submission_revision=?3, revision_changed=?4 WHERE idempotency_key=?1 AND receipt IS NULL", params![reservation.key,serde_json::to_string(&receipt)?,authority.revision,revision!=authority.revision])?;
-            Outcome::Confirmed(receipt)
-        }
-        Err(_) => {
-            tx.execute("UPDATE outbound_reservations SET state='unknown', submission_revision=?2, revision_changed=?3 WHERE idempotency_key=?1 AND receipt IS NULL",params![reservation.key,authority.revision,revision!=authority.revision])?;
-            Outcome::Unknown
-        }
-    };
-    tx.commit()?;
-    Ok(outcome)
+    let accepted = submitted.is_ok();
+    let persisted = (|| -> Result<Outcome, Error> {
+        let tx = store
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let revision: i64 = tx.query_row(
+            "SELECT revision FROM grants WHERE id=?1",
+            [&authority.grant_id],
+            |r| r.get(0),
+        )?;
+        let outcome = match submitted {
+            Ok(receipt) => {
+                tx.execute("UPDATE outbound_reservations SET state='confirmed', receipt=?2, submission_revision=?3, revision_changed=?4 WHERE idempotency_key=?1 AND receipt IS NULL", params![reservation.key,serde_json::to_string(&receipt)?,authority.revision,revision!=authority.revision])?;
+                Outcome::Confirmed(receipt)
+            }
+            Err(_) => {
+                tx.execute("UPDATE outbound_reservations SET state='unknown', submission_revision=?2, revision_changed=?3 WHERE idempotency_key=?1 AND receipt IS NULL",params![reservation.key,authority.revision,revision!=authority.revision])?;
+                Outcome::Unknown
+            }
+        };
+        tx.commit()?;
+        Ok(outcome)
+    })();
+    match persisted {
+        Ok(outcome) => Ok(outcome),
+        Err(_error) if accepted => Ok(Outcome::Pending),
+        Err(_) => Ok(Outcome::Unknown),
+    }
 }

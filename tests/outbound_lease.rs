@@ -10,10 +10,18 @@ fn operation_lease_is_per_service_and_nonblocking() {
     let first = Store::initialize(&file).unwrap();
     let second = Store::open(&file).unwrap();
     let held = first.try_operation_lease("gateway").unwrap().unwrap();
-    assert!(second.try_operation_lease("gateway").unwrap().is_none());
-    assert!(second.try_operation_lease("other").unwrap().is_some());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        tx.send(second.try_operation_lease("gateway").unwrap().is_none())
+            .unwrap();
+    });
+    assert!(rx
+        .recv_timeout(std::time::Duration::from_millis(500))
+        .expect("lease acquisition blocked instead of returning pending"));
+    waiter.join().unwrap();
+    assert!(first.try_operation_lease("other").unwrap().is_some());
     drop(held);
-    assert!(second.try_operation_lease("gateway").unwrap().is_some());
+    assert!(first.try_operation_lease("gateway").unwrap().is_some());
 }
 
 #[cfg(unix)]
@@ -35,6 +43,12 @@ fn operation_lease_is_private_and_refuses_symlinks() {
         0o600
     );
     drop(held);
+    std::fs::set_permissions(lease, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(
+        store.try_operation_lease("gateway").is_err(),
+        "lease file with public permissions was accepted"
+    );
+    std::fs::set_permissions(lease, std::fs::Permissions::from_mode(0o600)).unwrap();
     let target = temp.path().join("target");
     std::fs::rename(lease, &target).unwrap();
     symlink(&target, lease).unwrap();

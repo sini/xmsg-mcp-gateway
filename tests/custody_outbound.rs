@@ -2,6 +2,8 @@
 
 #[path = "common/custody_crash.rs"]
 mod crash;
+#[path = "common/outbound_observer.rs"]
+mod observer;
 #[allow(dead_code)]
 #[path = "common/provider.rs"]
 mod provider;
@@ -16,8 +18,8 @@ use xmsg_mcp_gateway::{
     auth::Verifier,
     grants::Store,
     outbound::{
-        dispatch, Endpoint, Error, Limits, Outcome, Permission, Policy, Receipt, Request,
-        RequestId, SendArguments,
+        dispatch, Endpoint, Error, Limits, Outcome, Permission, Policy, Receipt, ReplyArguments,
+        Request, RequestId, SendArguments,
     },
 };
 
@@ -39,7 +41,7 @@ fn request(id: &str, target: &str, text: &str) -> Request {
     })
 }
 
-fn authority() -> (serving_fixture::Fixture, Store, Verifier) {
+fn unmigrated_authority() -> (serving_fixture::Fixture, Store, Verifier) {
     let fixture = serving_fixture::Fixture::new();
     fixture
         .tokens
@@ -50,7 +52,12 @@ fn authority() -> (serving_fixture::Fixture, Store, Verifier) {
     let mut config = fixture.config["verifier"].clone();
     config["required_scopes"] = serde_json::json!(["send:write", "reply:write"]);
     let verifier = Verifier::from_config(serde_json::from_value(config).unwrap()).unwrap();
-    let mut store = Store::open(&fixture.store_file).unwrap();
+    let store = Store::open(&fixture.store_file).unwrap();
+    (fixture, store, verifier)
+}
+
+fn authority() -> (serving_fixture::Fixture, Store, Verifier) {
+    let (fixture, mut store, verifier) = unmigrated_authority();
     store.migrate_custody().unwrap();
     store.migrate_outbound().unwrap();
     (fixture, store, verifier)
@@ -70,8 +77,30 @@ async fn same_request_reuses_receipt_and_changed_payload_conflicts() {
     let service = from.config.register().await.unwrap();
     let mut receiver = to.config.register().await.unwrap();
     let target = receiver.address().unwrap().to_owned();
-    let (fixture, mut store, verifier) = authority();
+    let (fixture, mut store, verifier) = unmigrated_authority();
     let original = request("stable-request", &target, "original bytes");
+    for version in [1, 2] {
+        assert!(
+            matches!(
+                dispatch(
+                    &mut store,
+                    &Endpoint::from_registered(&service).unwrap(),
+                    &verifier,
+                    "good-token",
+                    "private-bus",
+                    &original,
+                    &limits()
+                )
+                .await,
+                Err(Error::MigrationRequired)
+            ),
+            "outbound dispatch accepted an unmigrated store"
+        );
+        if version == 1 {
+            store.migrate_custody().unwrap();
+        }
+    }
+    store.migrate_outbound().unwrap();
     assert!(
         matches!(
             dispatch(
@@ -121,6 +150,23 @@ async fn same_request_reuses_receipt_and_changed_payload_conflicts() {
     assert!(delivery.text().ends_with("\noriginal bytes"));
     assert!(delivery.text().contains(service.address().unwrap()));
     receiver.ack(delivery.message_id()).await.unwrap();
+    store
+        .set_outbound_policy(
+            "grant",
+            3,
+            &Policy {
+                send: Some(Permission {
+                    targets: [target.clone()].into(),
+                    required_scope: "send:write".into(),
+                }),
+                reply: Some(Permission {
+                    targets: [target.clone()].into(),
+                    required_scope: "reply:write".into(),
+                }),
+            },
+        )
+        .unwrap();
+    let held = store.try_operation_lease("gateway").unwrap().unwrap();
     let again = dispatch(
         &mut store,
         &Endpoint::from_registered(&service).unwrap(),
@@ -131,8 +177,23 @@ async fn same_request_reuses_receipt_and_changed_payload_conflicts() {
         &limits(),
     )
     .await
-    .unwrap();
+    .expect("same request lost its original receipt");
     assert_eq!(again, first, "same request lost its original receipt");
+    drop(held);
+    assert_eq!(
+        dispatch(
+            &mut store,
+            &Endpoint::from_registered(&service).unwrap(),
+            &verifier,
+            "good-token",
+            "private-bus",
+            &original,
+            &limits()
+        )
+        .await
+        .expect("same request lost its original receipt"),
+        first
+    );
     assert!(
         receiver.poll(0).await.unwrap().is_none(),
         "same request delivered twice"
@@ -175,6 +236,75 @@ async fn same_request_reuses_receipt_and_changed_payload_conflicts() {
             Err(Error::Oversized)
         ),
         "oversized framed text was submitted"
+    );
+    assert!(receiver.poll(0).await.unwrap().is_none());
+    let identity_only =
+        Verifier::from_config(serde_json::from_value(fixture.config["verifier"].clone()).unwrap())
+            .unwrap();
+    fixture
+        .tokens
+        .lock()
+        .unwrap()
+        .insert("identity-only".into(), provider::claims(&fixture.binding));
+    assert!(
+        matches!(
+            dispatch(
+                &mut store,
+                &Endpoint::from_registered(&service).unwrap(),
+                &identity_only,
+                "identity-only",
+                "private-bus",
+                &original,
+                &limits()
+            )
+            .await,
+            Err(Error::Denied)
+        ),
+        "identity-only verifier admitted write scope"
+    );
+    let mut bounded = limits();
+    bounded.max_reservations = 1;
+    assert!(
+        matches!(
+            dispatch(
+                &mut store,
+                &Endpoint::from_registered(&service).unwrap(),
+                &verifier,
+                "good-token",
+                "private-bus",
+                &request("over-capacity", &target, "small"),
+                &bounded
+            )
+            .await,
+            Err(Error::Capacity)
+        ),
+        "outbound reservations exceeded their count budget"
+    );
+    let tokens = fixture.tokens.clone();
+    let revoked = request("revoked-after-reserve", &target, "must not submit");
+    use tracing::instrument::WithSubscriber;
+    let endpoint = Endpoint::from_registered(&service).unwrap();
+    let operation_limits = limits();
+    let result = dispatch(
+        &mut store,
+        &endpoint,
+        &verifier,
+        "good-token",
+        "private-bus",
+        &revoked,
+        &operation_limits,
+    )
+    .with_subscriber(observer::AtEvent {
+        target: "gateway_outbound_reserved",
+        action: move || {
+            tokens.lock().unwrap().get_mut("good-token").unwrap()["active"] =
+                serde_json::json!(false);
+        },
+    })
+    .await;
+    assert!(
+        matches!(result, Err(Error::Authentication(_))),
+        "revoked token was not rechecked before submission"
     );
     assert!(receiver.poll(0).await.unwrap().is_none());
     drop(store);
@@ -232,7 +362,17 @@ fn outbound_crash_child() {
     panic!("outbound crash cut not reached");
 }
 
-async fn crash_at(phase: &str, expire: bool, disable: bool) {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Recovery {
+    Resume,
+    Expire,
+    Disable,
+    Reenable,
+}
+
+async fn crash_at(phase: &str, recovery: Recovery) {
+    let expire = recovery == Recovery::Expire;
+    let disable = matches!(recovery, Recovery::Disable | Recovery::Reenable);
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
     let binary = real_node::pinned_binary();
@@ -389,6 +529,9 @@ async fn crash_at(phase: &str, expire: bool, disable: bool) {
     }
     from.restart(&binary).await;
     let service = from.config.register().await.unwrap();
+    if recovery == Recovery::Reenable {
+        store.set_enabled("grant", 4, true).unwrap();
+    }
     let mut recovery_limits = limits();
     if expire {
         recovery_limits.dedup_lifetime_secs = 1;
@@ -404,7 +547,12 @@ async fn crash_at(phase: &str, expire: bool, disable: bool) {
         &recovery_limits,
     )
     .await;
-    if disable {
+    if recovery == Recovery::Reenable {
+        assert!(
+            matches!(recovered, Err(Error::Denied)),
+            "old pending work escaped disable and re-enable"
+        );
+    } else if disable {
         assert!(
             matches!(
                 recovered,
@@ -433,6 +581,10 @@ async fn crash_at(phase: &str, expire: bool, disable: bool) {
             );
         } else {
             let delivered = receiver.poll(1).await.unwrap().unwrap();
+            assert!(
+                delivered.text().ends_with("\ncrash-preserved bytes"),
+                "recovery changed the stored framed body"
+            );
             assert_eq!(receipt.message_id, delivered.message_id());
             receiver.ack(delivered.message_id()).await.unwrap();
         }
@@ -457,29 +609,36 @@ async fn crash_at(phase: &str, expire: bool, disable: bool) {
 #[tokio::test]
 #[ignore = "mandatory private-node outbound profile"]
 async fn crash_after_reservation_recovers_with_the_stored_key() {
-    crash_at("before", false, false).await;
+    crash_at("before", Recovery::Resume).await;
     println!("gateway-outbound-complete:crash-before");
 }
 
 #[tokio::test]
 #[ignore = "mandatory private-node outbound profile"]
 async fn accepted_before_confirm_crash_returns_original_message_id() {
-    crash_at("after", false, false).await;
+    crash_at("after", Recovery::Resume).await;
     println!("gateway-outbound-complete:crash-after");
 }
 
 #[tokio::test]
 #[ignore = "mandatory private-node outbound profile"]
 async fn expired_uncertainty_never_blindly_retries() {
-    crash_at("after", true, false).await;
+    crash_at("after", Recovery::Expire).await;
     println!("gateway-outbound-complete:expired-unknown");
 }
 
 #[tokio::test]
 #[ignore = "mandatory private-node outbound profile"]
 async fn disable_waits_for_the_service_lease_and_prevents_later_submission() {
-    crash_at("before", false, true).await;
+    crash_at("before", Recovery::Disable).await;
     println!("gateway-outbound-complete:disable-order");
+}
+
+#[tokio::test]
+#[ignore = "mandatory private-node outbound profile"]
+async fn pending_work_stays_held_across_disable_and_reenable() {
+    crash_at("before", Recovery::Reenable).await;
+    println!("gateway-outbound-complete:held-revision");
 }
 
 #[tokio::test]
@@ -640,4 +799,346 @@ async fn inbound_commit_and_ack_complete_while_outbound_acceptance_is_stalled() 
     let delivered = receiver.poll(1).await.unwrap().unwrap();
     receiver.ack(delivered.message_id()).await.unwrap();
     println!("gateway-outbound-complete:inbound-concurrency");
+}
+
+#[tokio::test]
+#[ignore = "mandatory private-node outbound profile"]
+async fn replies_require_owned_current_correlations_and_preserve_bus_receipts() {
+    let binary = real_node::pinned_binary();
+    let ca = real_node::Authority::generate();
+    let from = real_node::Prepared::create("gateway", "gateway", Some(&ca));
+    let to = real_node::Prepared::create("receiver", "receiver", Some(&ca));
+    from.peer(&to, serde_json::json!({}));
+    to.peer(&from, serde_json::json!({}));
+    let from = from.launch(&binary).await;
+    let to = to.launch(&binary).await;
+    let mut service = from.config.register().await.unwrap();
+    let endpoint = Endpoint::from_registered(&service).unwrap();
+    let mut receiver = to.config.register().await.unwrap();
+    let target = receiver.address().unwrap().to_owned();
+    let (fixture, mut store, verifier) = authority();
+    store
+        .set_outbound_policy(
+            "grant",
+            2,
+            &Policy {
+                send: None,
+                reply: Some(Permission {
+                    targets: [target.clone()].into(),
+                    required_scope: "reply:write".into(),
+                }),
+            },
+        )
+        .unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let original = receiver
+        .send(
+            service.address().unwrap(),
+            "owned incoming correlation",
+            Some("owned-incoming"),
+        )
+        .await
+        .unwrap();
+    let delivery = service.poll(1).await.unwrap().unwrap();
+    store
+        .accept_delivery(
+            &xmsg_mcp_gateway::custody::Scope {
+                bus_instance: "private-bus".into(),
+                grant_id: "grant".into(),
+            },
+            &service,
+            &delivery,
+            &xmsg_mcp_gateway::custody::Limits::default(),
+            now,
+        )
+        .unwrap();
+    service.ack(delivery.message_id()).await.unwrap();
+    let operation = Request::Reply(ReplyArguments {
+        request_id: RequestId::parse("owned-reply").unwrap(),
+        message_id: original.message_id.clone(),
+        text: "reply bytes".into(),
+    });
+    let first = dispatch(
+        &mut store,
+        &endpoint,
+        &verifier,
+        "good-token",
+        "private-bus",
+        &operation,
+        &limits(),
+    )
+    .await
+    .unwrap();
+    let Outcome::Confirmed(Receipt::Reply(receipt)) = &first else {
+        panic!("reply did not return the original reply record");
+    };
+    assert_eq!(
+        receipt.message_id, original.message_id,
+        "reply record fabricated the original correlation"
+    );
+    let delivered = receiver.poll(1).await.unwrap().unwrap();
+    assert_eq!(
+        receipt.pushed_message_id.as_deref(),
+        Some(delivered.message_id())
+    );
+    assert_eq!(delivered.in_reply_to(), Some(original.message_id.as_str()));
+    assert!(delivered.text().ends_with("\nreply bytes"));
+    receiver.ack(delivered.message_id()).await.unwrap();
+    assert_eq!(
+        dispatch(
+            &mut store,
+            &endpoint,
+            &verifier,
+            "good-token",
+            "private-bus",
+            &operation,
+            &limits()
+        )
+        .await
+        .unwrap(),
+        first
+    );
+    assert!(
+        receiver.poll(0).await.unwrap().is_none(),
+        "same reply delivered twice"
+    );
+    let mut foreign = fixture.binding.clone();
+    foreign.subject = "different-owner".into();
+    store.enroll("foreign-grant", &foreign).unwrap();
+    let foreign_message = receiver
+        .send(
+            service.address().unwrap(),
+            "other owner's incoming correlation",
+            Some("foreign-incoming"),
+        )
+        .await
+        .unwrap();
+    let delivery = service.poll(1).await.unwrap().unwrap();
+    store
+        .accept_delivery(
+            &xmsg_mcp_gateway::custody::Scope {
+                bus_instance: "private-bus".into(),
+                grant_id: "foreign-grant".into(),
+            },
+            &service,
+            &delivery,
+            &xmsg_mcp_gateway::custody::Limits::default(),
+            now,
+        )
+        .unwrap();
+    service.ack(delivery.message_id()).await.unwrap();
+    let foreign_reply = Request::Reply(ReplyArguments {
+        request_id: RequestId::parse("foreign-reply").unwrap(),
+        message_id: foreign_message.message_id,
+        text: "must refuse".into(),
+    });
+    assert!(
+        matches!(
+            dispatch(
+                &mut store,
+                &endpoint,
+                &verifier,
+                "good-token",
+                "private-bus",
+                &foreign_reply,
+                &limits()
+            )
+            .await,
+            Err(Error::Denied)
+        ),
+        "foreign owner's correlation authorized a reply"
+    );
+    store.set_enabled("grant", 3, false).unwrap();
+    store.set_enabled("grant", 4, true).unwrap();
+    let held = Request::Reply(ReplyArguments {
+        request_id: RequestId::parse("held-reply").unwrap(),
+        message_id: original.message_id,
+        text: "old work must remain held".into(),
+    });
+    assert!(
+        matches!(
+            dispatch(
+                &mut store,
+                &endpoint,
+                &verifier,
+                "good-token",
+                "private-bus",
+                &held,
+                &limits()
+            )
+            .await,
+            Err(Error::Denied)
+        ),
+        "old inbound work escaped its original grant revision"
+    );
+    assert!(receiver.poll(0).await.unwrap().is_none());
+    println!("gateway-outbound-complete:owned-reply");
+}
+
+async fn busy_at_outcome(after_acceptance: bool) {
+    use std::sync::{Arc, Mutex};
+    use tracing::instrument::WithSubscriber;
+    let binary = real_node::pinned_binary();
+    let ca = real_node::Authority::generate();
+    let from = real_node::Prepared::create("gateway", "gateway", Some(&ca));
+    let to = real_node::Prepared::create("receiver", "receiver", Some(&ca));
+    from.peer(&to, serde_json::json!({}));
+    to.peer(&from, serde_json::json!({}));
+    let from = from.launch(&binary).await;
+    let to = to.launch(&binary).await;
+    let service = from.config.register().await.unwrap();
+    let endpoint = Endpoint::from_registered(&service).unwrap();
+    let mut receiver = to.config.register().await.unwrap();
+    let target = receiver.address().unwrap().to_owned();
+    let (fixture, mut store, verifier) = authority();
+    store
+        .set_outbound_policy(
+            "grant",
+            2,
+            &Policy {
+                send: Some(Permission {
+                    targets: [target.clone()].into(),
+                    required_scope: "send:write".into(),
+                }),
+                reply: None,
+            },
+        )
+        .unwrap();
+    let writer = Arc::new(Mutex::new(None::<rusqlite::Connection>));
+    let open_writer = |file: &std::path::Path| {
+        let sql = rusqlite::Connection::open(file).unwrap();
+        sql.busy_timeout(std::time::Duration::ZERO).unwrap();
+        sql.execute_batch("BEGIN IMMEDIATE; UPDATE custody_counters SET value=value WHERE name='expired_metadata'").unwrap();
+        sql
+    };
+    if !after_acceptance {
+        *writer.lock().unwrap() = Some(open_writer(&fixture.store_file));
+    }
+    let lock = writer.clone();
+    let file = fixture.store_file.clone();
+    let operation = request(
+        "busy-request",
+        &target,
+        "must survive a busy outcome commit",
+    );
+    let operation_limits = limits();
+    let first = dispatch(
+        &mut store,
+        &endpoint,
+        &verifier,
+        "good-token",
+        "private-bus",
+        &operation,
+        &operation_limits,
+    )
+    .with_subscriber(observer::AtEvent {
+        target: "gateway_outbound_submitted",
+        action: move || {
+            if after_acceptance {
+                *lock.lock().unwrap() = Some(open_writer(&file));
+            }
+        },
+    })
+    .await;
+    let sql = rusqlite::Connection::open(&fixture.store_file).unwrap();
+    sql.busy_timeout(std::time::Duration::ZERO).unwrap();
+    let original_id = if after_acceptance {
+        assert_eq!(
+            first.expect("accepted send reported failure on a busy outcome commit"),
+            Outcome::Pending,
+            "busy outcome commit did not leave acceptance pending"
+        );
+        let row: (String, Option<String>) = sql
+            .query_row("SELECT state,receipt FROM outbound_reservations", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(row, ("pending".into(), None));
+        let delivered = receiver.poll(1).await.unwrap().unwrap();
+        let id = delivered.message_id().to_owned();
+        receiver.ack(&id).await.unwrap();
+        Some(id)
+    } else {
+        assert!(
+            matches!(first, Err(Error::Busy)),
+            "pre-submit BUSY was not a transient refusal"
+        );
+        let count: i64 = sql
+            .query_row("SELECT COUNT(*) FROM outbound_reservations", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0, "pre-submit BUSY left a reservation row");
+        assert!(
+            receiver.poll(0).await.unwrap().is_none(),
+            "pre-submit BUSY still submitted"
+        );
+        let write=sql.execute("INSERT INTO outbound_reservations (owner,operation,request_id,payload_hash,sender,grant_id,grant_revision,idempotency_key,target,correlation,framed_text,created_at,retry_until,state) VALUES ('owner','send','forbidden','hash','sender','grant',3,'key','target',NULL,'body',1,2,'pending')",[]);
+        assert!(
+            matches!(write,Err(rusqlite::Error::SqliteFailure(code,_)) if code.code==rusqlite::ErrorCode::DatabaseBusy),
+            "a reservation bypassed SQLite's write lock"
+        );
+        None
+    };
+    writer
+        .lock()
+        .unwrap()
+        .take()
+        .unwrap()
+        .execute_batch("COMMIT")
+        .unwrap();
+    if after_acceptance {
+        assert!(
+            matches!(sql.execute("UPDATE outbound_reservations SET state='failed'", []), Err(rusqlite::Error::SqliteFailure(code,_)) if code.extended_code==rusqlite::ffi::SQLITE_CONSTRAINT_CHECK),
+            "schema accepted a fabricated failure state"
+        );
+        let state: String = sql
+            .query_row("SELECT state FROM outbound_reservations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(state, "pending");
+    }
+    let Outcome::Confirmed(Receipt::Send(receipt)) = dispatch(
+        &mut store,
+        &endpoint,
+        &verifier,
+        "good-token",
+        "private-bus",
+        &operation,
+        &limits(),
+    )
+    .await
+    .unwrap() else {
+        panic!("busy recovery did not return its bus receipt");
+    };
+    if let Some(id) = original_id {
+        assert_eq!(
+            receipt.message_id, id,
+            "outcome BUSY lost the original message ID"
+        );
+    } else {
+        let delivered = receiver.poll(1).await.unwrap().unwrap();
+        assert_eq!(receipt.message_id, delivered.message_id());
+        receiver.ack(delivered.message_id()).await.unwrap();
+    }
+    assert!(
+        receiver.poll(0).await.unwrap().is_none(),
+        "busy recovery produced a duplicate delivery"
+    );
+}
+
+#[tokio::test]
+#[ignore = "mandatory private-node outbound profile"]
+async fn busy_reservation_refuses_transiently_without_a_row_or_submission() {
+    busy_at_outcome(false).await;
+    println!("gateway-outbound-complete:reservation-busy");
+}
+
+#[tokio::test]
+#[ignore = "mandatory private-node outbound profile"]
+async fn busy_outcome_commit_keeps_pending_and_recovers_original_message_id() {
+    busy_at_outcome(true).await;
+    println!("gateway-outbound-complete:outcome-busy");
 }
