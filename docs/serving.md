@@ -20,8 +20,12 @@ schema readiness finish before a router is returned. A broken messaging section
 refuses startup; it never degrades to identity-only serving. A present `null` section
 is invalid. No request can supply messaging configuration or choose a mailbox.
 
-`messaging` denies unknown fields and requires every field below. Values come from
-the owner's dedicated node setup; omitted values are errors.
+`messaging` denies unknown fields. Every manifest value that must agree with the
+node is required: reply TTL, idempotency TTL, service queue capacity, gateway dedup
+lifetime and complete framed bound. The other fields in the table are also required.
+Gateway-local connection tunables retain their existing documented defaults:
+`xmsg.max_frame_bytes` is 1,048,576 bytes and `xmsg.operation_timeout_ms` is 10,000 ms.
+These are transport limits, distinct from the required node-bound manifest values.
 
 | Field | Meaning |
 |---|---|
@@ -49,19 +53,22 @@ cancel the outcome commit. Accepted packets cannot be recalled by disconnect.
 
 The complete framed bound must fit the node's reported `max_body_bytes` as well
 as the gateway's 65536-byte ceiling. A missing report or a smaller effective limit
-refuses startup; the gateway never guesses it from launch arguments. The current
-development pin includes registration health and socket activation, with its
-landing on xmsg main still required before the final gateway pin. Live activation
+refuses startup; the gateway never guesses it from launch arguments. The final pin is xmsg main `7d9d1ed`, including registration health and socket
+activation. Live activation
 and exposure gates below still apply.
 
 When messaging is configured, one session owner retains the registration. It
-samples non-consuming registration health once per second and records the bus
-observation in the existing bounded custody ledger. A disconnect invalidates the
+samples non-consuming registration health at most one second apart. Healthy bus
+observations are coalesced in the existing bounded custody ledger to
+`min(reply_ttl / 2, 60 seconds)`, while disconnect/reconnect transitions remain
+durable before readiness. A disconnect invalidates the
 old handle and withdraws dispatch snapshots. Re-registration uses the same
 identity validation and Q1 checks, with a one-second backoff doubling to at most
 30 seconds. Readiness is published only after a durable reconnect record and a
 final health check. Changed limits or ledger failure keep messaging unavailable;
-the manifest is never adapted automatically.
+the manifest is never adapted automatically. While blocked on changed limits, the
+owner keeps trying registration and drops each rejected handle, eventually once
+every 30 seconds. The status remains blocked throughout that register/drop cycle.
 
 `xmsg_identity` includes `messaging_status` only in this profile: `ready` with the
 registered mailbox, `reconnecting`, or `blocked` with a reason. Sends and replies
@@ -211,3 +218,14 @@ variant to infer acceptance. Once submission may have begun, every transport
 error, including `Disconnected`, leaves the durable reservation unknown. A
 retry uses its stored idempotency key within the dedup lifetime; after expiry
 it requires reconciliation. Successful receipts remain confirmed.
+
+Inside the stored dedup lifetime, an unknown result has
+`reconciliation_required: false` and instructs the caller to retry with the same
+`request_id` and identical arguments. Once the stored deadline expires, or cannot
+be read, it has `reconciliation_required: true` and offers no blind retry. Either
+response remains uncertain; neither fabricates a receipt.
+
+SIGTERM and Ctrl-C drain HTTP handlers and detached dispatch tasks before stopping
+the registration owner. A healthy stop writes a final observation and disconnect
+record, so a clean restart measures the stopped interval without the normal
+coalescing over-estimate. A failure to persist that observation exits visibly.

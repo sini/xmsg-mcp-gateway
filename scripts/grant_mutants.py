@@ -121,7 +121,7 @@ CASES = [
 ]
 
 
-def run(root, target, test, changed_source, *, test_timeout=30, test_args=()):
+def run(root, target, test, changed_source, *, test_timeout=30, test_args=(), application=False):
     entry = root / "tests" / f"{target}.rs"
     original = entry.read_text()
     variant = hashlib.sha256((root / changed_source).read_bytes()).hexdigest()
@@ -141,6 +141,7 @@ def run(root, target, test, changed_source, *, test_timeout=30, test_args=()):
             changed_source,
             test_timeout=test_timeout,
             test_args=test_args,
+            application=application,
         )
         if marker not in result.stdout + result.stderr:
             raise RuntimeError("compiled arm marker was not executed")
@@ -150,7 +151,7 @@ def run(root, target, test, changed_source, *, test_timeout=30, test_args=()):
         entry.write_text(original)
 
 
-def run_marked(root, target, test, changed_source, *, test_timeout, test_args):
+def run_marked(root, target, test, changed_source, *, test_timeout, test_args, application=False):
     env = {**os.environ, "CARGO_TARGET_DIR": str(ROOT / "target/grant-mutants-build")}
     built = subprocess.run(
         [
@@ -223,7 +224,16 @@ def run_marked(root, target, test, changed_source, *, test_timeout, test_args):
             f"application/{test}",
             directories=("src",),
         )
-    return subprocess.run(
+    app = None
+    if application:
+        apps = [item for item in artifacts if item.get("reason") == "compiler-artifact"
+                and item.get("target", {}).get("name") == "xmsg-mcp-gateway"
+                and not item.get("profile", {}).get("test") and item.get("executable")]
+        if len(apps) != 1 or apps[0].get("fresh", True):
+            raise RuntimeError("intended subprocess application was cached or missing")
+        app = Path(apps[0]["executable"])
+        record(root, app, f"application/{test}", directories=("src",))
+    result = subprocess.run(
         [executables[0]["executable"], test, "--exact", "--show-output", *test_args],
         cwd=root,
         env=env,
@@ -231,6 +241,9 @@ def run_marked(root, target, test, changed_source, *, test_timeout, test_args):
         text=True,
         timeout=test_timeout,
     )
+    if app is not None and f"gateway-mutant-app:{app}" not in result.stdout + result.stderr:
+        raise RuntimeError("named subprocess test did not execute the built application")
+    return result
 
 
 def main():

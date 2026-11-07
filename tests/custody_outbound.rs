@@ -569,7 +569,7 @@ async fn crash_at(phase: &str, recovery: Recovery) {
     } else if expire {
         assert_eq!(
             recovered.expect("expired stale reservation was denied instead of becoming unknown"),
-            Outcome::Unknown,
+            Outcome::ExpiredUnknown,
             "expired uncertainty was blindly retried"
         );
         let state: String = inspect

@@ -204,7 +204,7 @@ impl Store {
         self.record_bus_link(&scope.bus_instance, connected, limits, now)
     }
 
-    pub fn record_bus_link(
+    pub(crate) fn record_bus_link(
         &mut self,
         bus: &str,
         connected: bool,

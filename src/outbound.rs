@@ -276,6 +276,7 @@ pub enum Receipt {
 pub enum Outcome {
     Pending,
     Unknown,
+    ExpiredUnknown,
     Confirmed(Receipt),
 }
 
@@ -500,7 +501,7 @@ async fn dispatch_on_connection(
         ),
     )
     .await;
-    match result {
+    let outcome = match result {
         Ok(result) => result,
         Err(_) => {
             if !may_have_submitted.load(Ordering::Relaxed) {
@@ -512,6 +513,14 @@ async fn dispatch_on_connection(
             }
             Ok(Outcome::Unknown)
         }
+    }?;
+    if outcome == Outcome::Unknown {
+        match store.reservation(&owner, op, id) {
+            Ok(Some(reservation)) if !reservation.expired(limits) => Ok(Outcome::Unknown),
+            _ => Ok(Outcome::ExpiredUnknown),
+        }
+    } else {
+        Ok(outcome)
     }
 }
 

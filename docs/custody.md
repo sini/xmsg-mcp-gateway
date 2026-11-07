@@ -90,12 +90,12 @@ upstream timestamp. When pending IDs expire, a bounded per-bus summary preserves
 uncertainty without inventing expired message records. A brief outage does not
 reset an already old message's age; unknown downtime does not create known IDs.
 
-The status library accepts an effective reply TTL for this comparison. No
-configuration or startup path exposes that input. Before worker activation, the
-XR5 follow-up must obtain reply TTL, idempotency TTL and queue capacity from the
-actual registration response, enforce the reviewed window comparisons, and test
-each mismatch. This foundation remains pinned to the reviewed daemon until that
-follow-up. XR4's shared service-name validator and all other activation gates also
+The status library accepts an effective reply TTL for this comparison. Messaging
+startup now validates reply TTL, idempotency TTL, service queue capacity and body
+bound against the actual registration, including the dedup lifetime comparison.
+Inbound worker activation remains a separate unit: it must reuse that registration
+and the session's configured Limits source. The shared service-name validator and
+all other activation gates also
 remain prerequisites.
 
 CI builds revision-verified private daemon fixtures, then requires 18 custody
@@ -109,3 +109,15 @@ retention, transient failures and mailbox selection. No fleet endpoints or
 credentials are used. Missing-binary and source-edited early-return controls must
 refuse. The source-mutant job rejects compile failures, cached library artifacts,
 timeouts and failures outside the named assertion; all 29 mutants must be killed.
+
+The messaging session samples non-consuming health at most one second apart, but
+writes healthy observations only every `min(reply_ttl / 2, 60 seconds)`. Down/up
+transitions are still persisted before readiness. Downtime is over-estimated by
+at most the observation interval; at production defaults that is 60 seconds.
+A graceful SIGTERM/Ctrl-C drain writes a final healthy observation and disconnect
+record, giving a clean stop its actual boundary instead of the coalesced one.
+This does not relax the restart-gap or message-age loss checks.
+
+The session currently uses `custody::Limits::default()`. The future custody worker
+must share one configured Limits source with the session, including its retention
+and gap budgets; it must not introduce independent defaults.

@@ -17,6 +17,8 @@ pub struct Node {
     notify: Option<tokio::net::UnixDatagram>,
     reply_ttl_secs: u64,
     max_body_bytes: usize,
+    service_executable: PathBuf,
+    extra_service_executables: Vec<(String, PathBuf)>,
 }
 
 impl Drop for Node {
@@ -88,6 +90,7 @@ impl Authority {
 }
 
 pub struct Prepared {
+    pub extra_service_executables: Vec<(String, PathBuf)>,
     pub config: XmsgConfig,
     pub port: u16,
     pub uri: String,
@@ -143,6 +146,7 @@ impl Prepared {
             .as_ref()
             .map_or(0, |socket| socket.local_addr().unwrap().port());
         Self {
+            extra_service_executables: Vec::new(),
             config,
             port,
             uri,
@@ -167,6 +171,10 @@ impl Prepared {
         );
     }
     pub async fn launch(self, binary: &Path) -> Node {
+        self.launch_as(binary, &std::env::current_exe().unwrap())
+            .await
+    }
+    pub async fn launch_as(self, binary: &Path, service_executable: &Path) -> Node {
         let baseline = include_str!("../../ci/xmsg-pin.toml")
             .lines()
             .find_map(|line| line.strip_prefix("baseline_revision = "))
@@ -194,8 +202,13 @@ impl Prepared {
         launch.arg("--svc-exe").arg(format!(
             "{}={}",
             self.config.service,
-            std::env::current_exe().unwrap().display()
+            service_executable.display()
         ));
+        for (name, executable) in &self.extra_service_executables {
+            launch
+                .arg("--svc-exe")
+                .arg(format!("{name}={}", executable.display()));
+        }
         let mut node = Node {
             config: self.config,
             child: launch.spawn().unwrap(),
@@ -204,6 +217,8 @@ impl Prepared {
             notify,
             reply_ttl_secs: self.reply_ttl_secs,
             max_body_bytes: self.max_body_bytes,
+            service_executable: service_executable.to_owned(),
+            extra_service_executables: self.extra_service_executables,
         };
         node.ready().await;
         node
@@ -340,8 +355,13 @@ impl Node {
         launch.arg("--svc-exe").arg(format!(
             "{}={}",
             self.config.service,
-            std::env::current_exe().unwrap().display()
+            self.service_executable.display()
         ));
+        for (name, executable) in &self.extra_service_executables {
+            launch
+                .arg("--svc-exe")
+                .arg(format!("{name}={}", executable.display()));
+        }
         self.child = launch.spawn().unwrap();
         self.ready().await;
     }

@@ -92,6 +92,7 @@ struct Configuration {
 }
 
 struct App {
+    dispatch_tasks: tokio::sync::Mutex<tokio::task::JoinSet<()>>,
     verifier: Verifier,
     grant_store: PathBuf,
     request_timeout_ms: u64,
@@ -105,6 +106,7 @@ struct App {
 }
 
 pub struct Serving {
+    state: Arc<App>,
     router: Router,
     bind: SocketAddr,
 }
@@ -238,6 +240,7 @@ impl Serving {
             None
         };
         let state = Arc::new(App {
+            dispatch_tasks: tokio::sync::Mutex::new(tokio::task::JoinSet::new()),
             verifier,
             grant_store: config.grant_store,
             allowed_hosts: config.allowed_hosts,
@@ -258,7 +261,8 @@ impl Serving {
             router = router.route(&path, get(protected_resource));
         }
         Ok(Self {
-            router: router.with_state(state),
+            router: router.with_state(state.clone()),
+            state,
             bind: config.bind,
         })
     }
@@ -268,13 +272,34 @@ impl Serving {
     }
 
     pub async fn serve(self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         let listener = tokio::net::TcpListener::bind(self.bind).await?;
         println!("serving MCP at {}", listener.local_addr()?);
-        axum::serve(listener, self.router)
-            .with_graceful_shutdown(async {
+        let result = axum::serve(listener, self.router)
+            .with_graceful_shutdown(async move {
+                #[cfg(unix)]
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {},
+                    _ = terminate.recv() => {},
+                }
+                #[cfg(not(unix))]
                 let _ = tokio::signal::ctrl_c().await;
             })
-            .await
+            .await;
+        {
+            let mut tasks = self.state.dispatch_tasks.lock().await;
+            while tasks.join_next().await.is_some() {}
+        }
+        if let Some(messaging) = &self.state.messaging {
+            messaging
+                .session
+                .shutdown()
+                .await
+                .map_err(std::io::Error::other)?;
+        }
+        result
     }
 }
 
@@ -596,7 +621,11 @@ async fn messaging_call(
         .await;
         let _ = send.send(result);
     };
-    tokio::spawn(work);
+    {
+        let mut tasks = app.dispatch_tasks.lock().await;
+        while tasks.try_join_next().is_some() {}
+        tasks.spawn(work);
+    }
     let pending = PendingReply {
         id: id.clone(),
         request_id: request_id.clone(),
@@ -609,6 +638,12 @@ async fn messaging_call(
     match result {
         Ok(Outcome::Pending) => pending_response(&pending),
         Ok(Outcome::Unknown) => rpc_result(
+            &id,
+            tool_result(json!({"state":"unknown",
+            "request_id":request_id,"reconciliation_required":false,
+            "retry":"retry with the same request_id and identical arguments before dedup expiry"})),
+        ),
+        Ok(Outcome::ExpiredUnknown) => rpc_result(
             &id,
             tool_result(json!({"state":"unknown",
             "request_id":request_id,"reconciliation_required":true})),

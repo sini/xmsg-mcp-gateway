@@ -44,7 +44,7 @@ pub fn private_file(file: &Path, bytes: &[u8]) {
 
 impl Fixture {
     pub fn new() -> Self {
-        // Keep the default registered while scoped probes observe background tasks.
+        // A registered default prevents Interest::never when a lone inactive probe hits a callsite.
         static TRACING: std::sync::Once = std::sync::Once::new();
         TRACING.call_once(|| {
             let _ = tracing::subscriber::set_global_default(
@@ -163,12 +163,18 @@ pub struct Probe {
     pub opens: Arc<AtomicUsize>,
     pub dispatches: Arc<AtomicUsize>,
     pub registrations: Arc<AtomicUsize>,
+    pub health_samples: Arc<AtomicUsize>,
+    pub link_observations: Arc<AtomicUsize>,
 }
 impl Subscriber for Probe {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
         matches!(
             metadata.target(),
-            "gateway_policy_store" | "gateway_dispatch" | "gateway_registration"
+            "gateway_policy_store"
+                | "gateway_dispatch"
+                | "gateway_registration"
+                | "gateway_bus_health"
+                | "gateway_bus_observation"
         )
     }
     fn new_span(&self, _: &Attributes<'_>) -> Id {
@@ -185,6 +191,12 @@ impl Subscriber for Probe {
             }
             "gateway_dispatch" => {
                 self.dispatches.fetch_add(1, Ordering::SeqCst);
+            }
+            "gateway_bus_observation" => {
+                self.link_observations.fetch_add(1, Ordering::SeqCst);
+            }
+            "gateway_bus_health" => {
+                self.health_samples.fetch_add(1, Ordering::SeqCst);
             }
             "gateway_registration" => {
                 self.registrations.fetch_add(1, Ordering::SeqCst);

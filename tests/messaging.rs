@@ -248,6 +248,13 @@ async fn an_accepted_operation_across_restart_recovers_its_original_receipt_and_
     let (status, uncertain, _) = request.await.unwrap();
     assert_eq!(status, StatusCode::OK);
     assert_eq!(uncertain["result"]["structuredContent"]["state"], "unknown");
+    assert_eq!(
+        uncertain["result"]["structuredContent"]["reconciliation_required"], false,
+        "within-lifetime uncertainty must permit same-key retry"
+    );
+    assert!(uncertain["result"]["structuredContent"]["retry"]
+        .as_str()
+        .is_some_and(|hint| hint.contains("same request_id")));
     node.restart(&binary).await;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
@@ -1046,4 +1053,524 @@ async fn handler_deadline_reports_pending_without_cancelling_accepted_work() {
     mailbox.ack(delivery.message_id()).await.unwrap();
     assert!(mailbox.poll(0).await.unwrap().is_none());
     println!("gateway-wiring-complete:deadline-pending");
+}
+
+#[tokio::test]
+#[ignore = "requires the revision-verified private daemon in the wiring profile"]
+async fn expired_mcp_uncertainty_requires_reconciliation_without_resubmission() {
+    let binary = real_node::pinned_binary();
+    let node = real_node::Node::start(&binary).await;
+    let mut fixture = migrated_fixture(&node);
+    fixture.config["messaging"]["manifest"]["dedup_lifetime_secs"] = json!(1);
+    save(&fixture);
+    policy(
+        &fixture,
+        "2",
+        json!({"send":{"targets":["gateway@gateway.fixture"],"required_scope":"identity:read"},"reply":null}),
+    );
+    let serving = std::sync::Arc::new(fixture.serving().await);
+    let call = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"xmsg_send","arguments":{"request_id":"expire-uncertainty","to":"gateway@gateway.fixture","text":"accepted once"}}});
+    let mut stall = agent_stall::AgentStall::install(&node.config, "send");
+    let task_serving = serving.clone();
+    let task_call = call.clone();
+    let task = tokio::spawn(async move {
+        serving_fixture::request(&task_serving, "good-token", task_call).await
+    });
+    let accepted = stall.reached().await;
+    let original = accepted["message_id"].as_str().unwrap().to_owned();
+    stall.finish(false).await;
+    assert_eq!(task.await.unwrap().0, StatusCode::OK);
+    let database = rusqlite::Connection::open(&fixture.store_file).unwrap();
+    let retry_until: i64 = database
+        .query_row(
+            "SELECT retry_until FROM outbound_reservations WHERE request_id='expire-uncertainty'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        < retry_until as u64
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "reservation did not expire"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let (status, result, _) = serving_fixture::request(&serving, "good-token", call).await;
+    assert_eq!(status, StatusCode::OK);
+    let unknown = &result["result"]["structuredContent"];
+    assert_eq!(unknown["state"], "unknown");
+    assert_eq!(
+        unknown["reconciliation_required"], true,
+        "expired uncertainty must require reconciliation"
+    );
+    assert!(unknown.get("retry").is_none());
+    drop(serving);
+    tokio::task::yield_now().await;
+    let mut receiver = node.config.register().await.unwrap();
+    let delivery = receiver.poll(0).await.unwrap().unwrap();
+    assert_eq!(delivery.message_id(), original);
+    receiver.ack(delivery.message_id()).await.unwrap();
+    assert!(receiver.poll(0).await.unwrap().is_none());
+    println!("gateway-wiring-complete:expired-unknown");
+}
+
+#[tokio::test]
+#[ignore = "requires the revision-verified private daemon in the wiring profile"]
+async fn a_request_after_daemon_death_within_the_same_tick_refuses_the_old_snapshot() {
+    let binary = real_node::pinned_binary();
+    let mut node = real_node::Node::start(&binary).await;
+    let fixture = migrated_fixture(&node);
+    policy(
+        &fixture,
+        "2",
+        json!({"send":{"targets":["gateway@gateway.fixture"],"required_scope":"identity:read"},"reply":null}),
+    );
+    tokio::time::pause();
+    let keep_clock_paused = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
+    let probe = serving_fixture::Probe::default();
+    let serving = Serving::from_owner_file(&fixture.config_file)
+        .with_subscriber(probe.clone())
+        .await
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while probe.health_samples.load(Ordering::SeqCst) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "owner did not sample health"
+        );
+        tokio::task::yield_now().await;
+    }
+    let (_, ready, _) =
+        serving_fixture::request(&serving, "good-token", serving_fixture::Fixture::call()).await;
+    assert_eq!(
+        ready["result"]["structuredContent"]["messaging_status"]["state"],
+        "ready"
+    );
+    let tick = tokio::time::Instant::now();
+    node.stop();
+    let (_, result, _) =
+        serving_fixture::request(&serving, "good-token", serving_fixture::Fixture::call()).await;
+    let status = &result["result"]["structuredContent"]["messaging_status"];
+    assert_ne!(
+        status["state"], "ready",
+        "dead registration retained its ready snapshot before the next tick"
+    );
+    assert!(
+        status.get("mailbox").is_none(),
+        "dead registration exposed the old mailbox"
+    );
+    let call = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xmsg_send","arguments":{"request_id":"same-tick","to":"gateway@gateway.fixture","text":"must refuse"}}});
+    let (status, _, request_probe) = serving_fixture::request(&serving, "good-token", call).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(request_probe.dispatches.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        tick,
+        tokio::time::Instant::now(),
+        "request escaped the observed health tick"
+    );
+    keep_clock_paused.abort();
+    println!("gateway-wiring-complete:same-tick-health");
+}
+
+#[tokio::test]
+#[ignore = "requires the revision-verified private daemon in the wiring profile"]
+async fn healthy_observations_do_not_disrupt_ninety_sends_in_three_rounds() {
+    let binary = real_node::pinned_binary();
+    let mut prepared = real_node::Prepared::create("gateway", "gateway", None);
+    prepared
+        .extra_service_executables
+        .push(("sink".into(), std::env::current_exe().unwrap()));
+    let node = prepared.launch(&binary).await;
+    let receiver_files = tempfile::tempdir().unwrap();
+    let ready = receiver_files.path().join("ready");
+    let received = receiver_files.path().join("received");
+    let receiver_config = receiver_files.path().join("config.json");
+    let receiver_document = json!({"xmsg":{"service":"sink", "expected_node":node.config.expected_node,
+        "daemon_uid":node.config.daemon_uid,"register_socket":node.config.register_socket,
+        "agent_socket":node.config.agent_socket,"max_frame_bytes":node.config.max_frame_bytes,
+        "operation_timeout_ms":node.config.operation_timeout_ms}, "ready":ready,"received":received});
+    serving_fixture::private_file(
+        &receiver_config,
+        &serde_json::to_vec(&receiver_document).unwrap(),
+    );
+    struct ReceiverProcess(std::process::Child);
+    impl Drop for ReceiverProcess {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut receiver = ReceiverProcess(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "pressure_receiver_process",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("XMSG_PRESSURE_RECEIVER", &receiver_config)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !ready.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "receiver did not register"
+        );
+        assert!(
+            receiver.0.try_wait().unwrap().is_none(),
+            "receiver exited before readiness"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let fixture = migrated_fixture(&node);
+    policy(
+        &fixture,
+        "2",
+        json!({"send":{"targets":["sink@gateway.fixture"],"required_scope":"identity:read"},"reply":null}),
+    );
+    let probe = serving_fixture::Probe::default();
+    let serving = Serving::from_owner_file(&fixture.config_file)
+        .with_subscriber(probe.clone())
+        .await
+        .unwrap();
+    for round in 0..3 {
+        for index in 0..90 {
+            let call = json!({"jsonrpc":"2.0","id":index,"method":"tools/call","params":{"name":"xmsg_send","arguments":{"request_id":format!("pressure-{round}-{index}"),"to":"sink@gateway.fixture","text":"healthy traffic"}}});
+            let (status, response, _) =
+                serving_fixture::request(&serving, "good-token", call).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "healthy observation disrupted round {round} send {index}"
+            );
+            assert_eq!(
+                response["result"]["structuredContent"]["state"], "confirmed",
+                "healthy observation deferred round {round} send {index}"
+            );
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let count = std::fs::read_to_string(&received)
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(0);
+            if count >= (round + 1) * 90 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "receiver did not ACK the round"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+    assert_eq!(
+        probe.link_observations.load(Ordering::SeqCst),
+        0,
+        "healthy sampling wrote the ledger in the coalescing window"
+    );
+    assert!(receiver.0.wait().unwrap().success());
+    println!("gateway-wiring-complete:healthy-send-pressure");
+}
+
+#[tokio::test]
+#[ignore = "requires the revision-verified private daemon in the wiring profile"]
+async fn healthy_observation_is_persisted_at_the_sixty_second_ceiling() {
+    let binary = real_node::pinned_binary();
+    let node = real_node::Node::start(&binary).await;
+    let fixture = migrated_fixture(&node);
+    tokio::time::pause();
+    let keep_clock_paused = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
+    let probe = serving_fixture::Probe::default();
+    let serving = Serving::from_owner_file(&fixture.config_file)
+        .with_subscriber(probe.clone())
+        .await
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while probe.health_samples.load(Ordering::SeqCst) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "owner did not sample health"
+        );
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(probe.link_observations.load(Ordering::SeqCst), 0);
+    tokio::time::advance(std::time::Duration::from_secs(60)).await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while probe.link_observations.load(Ordering::SeqCst) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "healthy observation exceeded the sixty-second ceiling"
+        );
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(probe.link_observations.load(Ordering::SeqCst), 1);
+    let connection = rusqlite::Connection::open(&fixture.store_file).unwrap();
+    let connected: bool = connection
+        .query_row(
+            "SELECT connected FROM custody_links WHERE bus='gateway.fixture'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(connected);
+    keep_clock_paused.abort();
+    drop(serving);
+    println!("gateway-wiring-complete:observation-ceiling");
+}
+
+#[tokio::test]
+#[ignore = "requires the revision-verified private daemon in the wiring profile"]
+async fn sigterm_drains_and_persists_the_final_healthy_observation() {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let binary = real_node::pinned_binary();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_xmsg-mcp-gateway"));
+    eprintln!("gateway-mutant-app:{}", executable.display());
+    let prepared = real_node::Prepared::create("gateway", "gateway", None);
+    let node = prepared.launch_as(&binary, executable).await;
+    let mut fixture = migrated_fixture(&node);
+    fixture.config["bind"] = json!("127.0.0.1:0");
+    save(&fixture);
+    let mut child = tokio::process::Command::new(executable)
+        .args(["serve", "--config", fixture.config_file.to_str().unwrap()])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let ready = tokio::time::timeout(std::time::Duration::from_secs(5), lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        ready.starts_with("serving MCP at "),
+        "startup failed: {ready}"
+    );
+    let connection = rusqlite::Connection::open(&fixture.store_file).unwrap();
+    let observed: i64 = connection
+        .query_row(
+            "SELECT last_observed_at FROM custody_links WHERE bus='gateway.fixture'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let stopped_at = loop {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        if now > observed {
+            break now;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "wall clock did not advance"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    let pid = child.id().unwrap();
+    assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGTERM) }, 0);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "SIGTERM drain failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (connected, last, disconnected): (bool, i64, i64) = connection.query_row("SELECT connected,last_observed_at,disconnected_at FROM custody_links WHERE bus='gateway.fixture'", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+    assert!(!connected);
+    assert!(
+        last >= stopped_at && disconnected >= stopped_at,
+        "graceful shutdown did not persist its final observation"
+    );
+    println!("gateway-wiring-complete:graceful-observation");
+}
+
+#[tokio::test]
+#[ignore = "private receiver subprocess; the mandatory profile checks its control marker"]
+async fn pressure_receiver_process() {
+    let Some(file) = std::env::var_os("XMSG_PRESSURE_RECEIVER") else {
+        println!("gateway-wiring-complete:pressure-receiver-control");
+        return;
+    };
+    let config: serde_json::Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+    let connection: xmsg_mcp_gateway::xmsg_config::XmsgConfig =
+        serde_json::from_value(config["xmsg"].clone()).unwrap();
+    let mut registered = connection.register().await.unwrap();
+    std::fs::write(config["ready"].as_str().unwrap(), b"registered").unwrap();
+    let mut count = 0;
+    while count < 270 {
+        if let Some(delivery) = registered.poll(1).await.unwrap() {
+            registered.ack(delivery.message_id()).await.unwrap();
+            count += 1;
+            std::fs::write(config["received"].as_str().unwrap(), count.to_string()).unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires the revision-verified private daemon in the wiring profile"]
+async fn coalesced_background_observation_preserves_request_store_open_counts() {
+    let binary = real_node::pinned_binary();
+    let node = real_node::Node::start(&binary).await;
+    let fixture = migrated_fixture(&node);
+    policy(
+        &fixture,
+        "2",
+        json!({"send":{"targets":["gateway@gateway.fixture"],"required_scope":"identity:read"},"reply":null}),
+    );
+    tokio::time::pause();
+    let keep_clock_paused = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
+    // Observe the commit through SQLite: installing a tracing subscriber here would
+    // change the dispatcher-registration condition this oracle exercises.
+    let serving = fixture.serving().await;
+    let connection = rusqlite::Connection::open(&fixture.store_file).unwrap();
+    let observed: i64 = connection
+        .query_row(
+            "SELECT last_observed_at FROM custody_links WHERE bus='gateway.fixture'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        <= observed as u64
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "wall clock did not advance"
+        );
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(std::time::Duration::from_secs(60)).await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let latest: i64 = connection
+            .query_row(
+                "SELECT last_observed_at FROM custody_links WHERE bus='gateway.fixture'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        if latest > observed {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "coalesced observation was not committed"
+        );
+        tokio::task::yield_now().await;
+    }
+    let call = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"xmsg_send","arguments":{"request_id":"trace-after-observation","to":"gateway@gateway.fixture","text":"trace control"}}});
+    let (status, result, probe) = serving_fixture::request(&serving, "good-token", call).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(result["result"]["structuredContent"]["state"], "confirmed");
+    assert_eq!(
+        probe.opens.load(Ordering::SeqCst),
+        2,
+        "background observation hid request store opens"
+    );
+    keep_clock_paused.abort();
+    println!("gateway-wiring-complete:coalesced-store-trace");
+}
+
+#[tokio::test]
+#[ignore = "requires the revision-verified private daemon in the wiring profile"]
+async fn ordered_store_open_without_a_dispatcher_preserves_scoped_request_counts() {
+    const CHILD: &str = "XMSG_ORDERED_STORE_TRACE";
+    if std::env::var_os(CHILD).is_none() {
+        let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "ordered_store_open_without_a_dispatcher_preserves_scoped_request_counts",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .kill_on_drop(true)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "ordered store trace child failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        println!("gateway-wiring-complete:ordered-store-trace");
+        return;
+    }
+    // A fresh process guarantees this call precedes Fixture's subscriber setup,
+    // regardless of the parent test binary's parallel test order.
+    let probe = serving_fixture::Probe::default();
+    let dispatcher = tracing::Dispatch::new(probe.clone());
+    let directory = tempfile::tempdir().unwrap();
+    // Keep one dispatcher registered but inactive when the callsite is first hit.
+    assert!(xmsg_mcp_gateway::grants::Store::open(&directory.path().join("missing.db")).is_err());
+    let binary = real_node::pinned_binary();
+    let node = real_node::Node::start(&binary).await;
+    let fixture = migrated_fixture(&node);
+    policy(
+        &fixture,
+        "2",
+        json!({"send":{"targets":["gateway@gateway.fixture"],"required_scope":"identity:read"},"reply":null}),
+    );
+    let serving = fixture.serving().await;
+    let call = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"xmsg_send","arguments":{"request_id":"ordered-store-trace","to":"gateway@gateway.fixture","text":"trace control"}}});
+    use tower::ServiceExt;
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("host", "gateway.example")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer good-token")
+        .body(axum::body::Body::from(call.to_string()))
+        .unwrap();
+    // Reuse this dispatcher: registering another would rebuild callsite interests.
+    let response = serving
+        .router()
+        .oneshot(request)
+        .with_subscriber(dispatcher)
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+        .await
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["result"]["structuredContent"]["state"], "confirmed");
+    assert_eq!(
+        probe.opens.load(Ordering::SeqCst),
+        2,
+        "ordered no-dispatcher open hid scoped request store opens"
+    );
 }

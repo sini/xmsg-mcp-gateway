@@ -13,7 +13,7 @@ CASES = [
     (
         "detached-dispatch",
         "src/serving.rs",
-        "tokio::spawn(work);",
+        "tasks.spawn(work);",
         "work.await;",
         "messaging",
         "cancelling_a_handler_does_not_cancel_the_accepted_operation",
@@ -286,8 +286,8 @@ CASES.extend(
         (
             "durable-reconnect-before-publication",
             "src/session.rs",
-            "record_link(file.clone(), snapshot.bus.clone(), true).await?;",
-            "",
+            "record_link(file.clone(), snapshot.bus.clone(), true).await?",
+            "tokio::time::Instant::now()",
             "messaging",
             "reconnect_publication_waits_for_a_durable_ledger_commit",
             "replacement published before durable reconnect",
@@ -312,14 +312,42 @@ CASES.append(
         "tracing::subscriber::set_global_default(\n                tracing::subscriber::NoSubscriber::default(),\n            )",
         "Ok::<(), ()>(())",
         "messaging",
-        "mcp_replies_use_owned_custody_and_the_original_bus_receipt",
-        "left: 0",
+        "ordered_store_open_without_a_dispatcher_preserves_scoped_request_counts",
+        "ordered no-dispatcher open hid scoped request store opens",
     )
 )
 
 
+
+CASES.extend([
+    ("retryable-unknown", "src/serving.rs", '"reconciliation_required":false', '"reconciliation_required":true',
+     "messaging", "an_accepted_operation_across_restart_recovers_its_original_receipt_and_key",
+     "within-lifetime uncertainty must permit same-key retry"),
+    ("expired-unknown", "src/serving.rs", '"reconciliation_required":true', '"reconciliation_required":false',
+     "messaging", "expired_mcp_uncertainty_requires_reconciliation_without_resubmission",
+     "expired uncertainty must require reconciliation"),
+    ("same-tick-health", "src/session.rs", "match snapshot.endpoint.health() {", "match Ok::<(), ClientError>(()) {",
+     "messaging", "a_request_after_daemon_death_within_the_same_tick_refuses_the_old_snapshot",
+     "dead registration retained its ready snapshot"),
+    ("healthy-write-coalescing", "src/session.rs", "if observed_at.elapsed() >= observation_interval {", "if true {",
+     "messaging", "healthy_observations_do_not_disrupt_ninety_sends_in_three_rounds", "healthy "),
+    ("observation-ceiling", "src/session.rs", ".min(Duration::from_secs(60))", "",
+     "messaging", "healthy_observation_is_persisted_at_the_sixty_second_ceiling",
+     "healthy observation exceeded the sixty-second ceiling"),
+    ("graceful-observation", "src/session.rs", "if healthy {", "if false {",
+     "messaging", "sigterm_drains_and_persists_the_final_healthy_observation",
+     "graceful shutdown did not persist its final observation"),
+])
+
+
+CASES.append((
+    "store-open-event", "src/grants.rs", 'tracing::debug!(target: "gateway_policy_store", "open");', ";",
+    "messaging", "coalesced_background_observation_preserves_request_store_open_counts",
+    "background observation hid request store opens",
+))
+
 def main():
-    if len(CASES) != 29:
+    if len(CASES) != 36:
         raise RuntimeError("wiring mutant inventory drift")
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", choices=[case[0] for case in CASES])
@@ -344,6 +372,7 @@ def main():
                 filename,
                 test_timeout=60,
                 test_args=("--include-ignored",),
+                application=name == "graceful-observation",
             )
             if green.returncode or "1 passed; 0 failed; 0 ignored" not in green.stdout:
                 raise RuntimeError(
@@ -358,6 +387,7 @@ def main():
                     filename,
                     test_timeout=60,
                     test_args=("--include-ignored",),
+                application=name == "graceful-observation",
                 )
                 if (
                     red.returncode != 101

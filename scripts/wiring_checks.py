@@ -35,6 +35,14 @@ MARKERS = [
     "reconnect-limits-ledger",
     "in-flight-recovery",
     "durable-reconnect-publication",
+    "expired-unknown",
+    "same-tick-health",
+    "healthy-send-pressure",
+    "observation-ceiling",
+    "graceful-observation",
+    "pressure-receiver-control",
+    "coalesced-store-trace",
+    "ordered-store-trace",
 ]
 DEADLINE = "handler_deadline_reports_pending_without_cancelling_accepted_work"
 EMPTY_POLICY = "fresh_policy_is_empty_and_cannot_be_changed_by_mcp"

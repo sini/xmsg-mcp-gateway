@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{watch, Notify};
@@ -59,10 +59,17 @@ enum State {
     Unavailable(Arc<Error>),
 }
 
-struct Owner(tokio::task::JoinHandle<()>);
+struct Owner(Mutex<Option<tokio::task::JoinHandle<()>>>);
 impl Drop for Owner {
     fn drop(&mut self) {
-        self.0.abort();
+        if let Some(task) = self
+            .0
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
+            task.abort();
+        }
     }
 }
 
@@ -70,6 +77,15 @@ pub(crate) struct Session {
     state: watch::Receiver<State>,
     wake: Arc<Notify>,
     _owner: Owner,
+    stop: Arc<Notify>,
+    file: PathBuf,
+    bus: String,
+}
+
+fn observation_interval(reply_ttl_secs: u64) -> Duration {
+    Duration::from_secs(reply_ttl_secs)
+        .div_f64(2.0)
+        .min(Duration::from_secs(60))
 }
 
 fn timestamp() -> Result<i64, Error> {
@@ -86,13 +102,21 @@ fn record(store: &mut Store, bus: &str, connected: bool) -> Result<(), Error> {
         .map_err(|_| Error::Ledger)
 }
 
-async fn record_link(file: PathBuf, bus: String, connected: bool) -> Result<(), Error> {
+async fn record_link(
+    file: PathBuf,
+    bus: String,
+    connected: bool,
+) -> Result<tokio::time::Instant, Error> {
+    let record_bus = bus.clone();
+    let observed_at = tokio::time::Instant::now();
     tokio::task::spawn_blocking(move || {
         let mut store = Store::open(&file).map_err(|_| Error::Ledger)?;
-        record(&mut store, &bus, connected)
+        record(&mut store, &record_bus, connected)
     })
     .await
-    .map_err(|_| Error::Ledger)?
+    .map_err(|_| Error::Ledger)??;
+    tracing::debug!(target: "gateway_bus_observation", bus, connected, "persisted bus observation");
+    Ok(observed_at)
 }
 
 impl Session {
@@ -105,17 +129,24 @@ impl Session {
     ) -> Result<Self, Error> {
         let snapshot = Arc::new(Snapshot::from_registered(&registered)?);
         let bus = snapshot.bus.clone();
+        let initial_observation = tokio::time::Instant::now();
         tokio::task::spawn_blocking(move || record(&mut store, &bus, true))
             .await
             .map_err(|_| Error::Ledger)??;
         registered.health().map_err(Error::Registration)?;
+        let shutdown_bus = snapshot.bus.clone();
+        let shutdown_file = file.clone();
+        let observation_interval = observation_interval(manifest.reply_ttl_secs);
         let (publish, state) = watch::channel(State::Ready(snapshot));
+        let stop = Arc::new(Notify::new());
+        let owner_stop = stop.clone();
         let wake = Arc::new(Notify::new());
         let owner_wake = wake.clone();
         let subscriber = tracing::dispatcher::get_default(Clone::clone);
         let owner = tokio::spawn(
             async move {
                 let mut current = registered;
+                let mut observed_at = initial_observation;
                 let mut delay = Duration::from_secs(1);
                 loop {
                     let bus = match current.node() {
@@ -129,38 +160,52 @@ impl Session {
                             )));
                             break;
                         }
-                        if let Err(error) = record_link(file.clone(), bus.clone(), true).await {
-                            publish.send_replace(State::Unavailable(Arc::new(error)));
-                            break;
+                        tracing::trace!(target: "gateway_bus_health", "registration alive");
+                        if observed_at.elapsed() >= observation_interval {
+                            match record_link(file.clone(), bus.clone(), true).await {
+                                Ok(observation) => observed_at = observation,
+                                Err(error) => {
+                                    publish.send_replace(State::Unavailable(Arc::new(error)));
+                                    break;
+                                }
+                            }
                         }
                         tokio::select! {
-                            _ = tokio::time::sleep(Duration::from_secs(1)) => {},
+                            _ = tokio::time::sleep(Duration::from_secs(1).min(observation_interval)) => {},
                             _ = owner_wake.notified() => {},
+                            _ = owner_stop.notified() => return,
                         }
                     }
                     drop(current);
                     loop {
                         if let Err(error) = record_link(file.clone(), bus.clone(), false).await {
                             publish.send_replace(State::Unavailable(Arc::new(error)));
-                            tokio::time::sleep(delay).await;
+                            tokio::select! {
+                                _ = tokio::time::sleep(delay) => {},
+                                _ = owner_stop.notified() => return,
+                            }
                             delay = (delay * 2).min(Duration::from_secs(30));
                             continue;
                         }
                         break;
                     }
                     loop {
-                        tokio::time::sleep(delay).await;
+                        tokio::select! {
+                            _ = tokio::time::sleep(delay) => {},
+                            _ = owner_stop.notified() => return,
+                        }
                         let replacement = async {
                             let registered = register(&config, &manifest).await?;
                             let snapshot = Arc::new(Snapshot::from_registered(&registered)?);
-                            record_link(file.clone(), snapshot.bus.clone(), true).await?;
+                            let observation = record_link(file.clone(), snapshot.bus.clone(), true).await?;
                             registered.health().map_err(Error::Registration)?;
-                            Ok::<_, Error>((registered, snapshot))
+                            Ok::<_, Error>((registered, snapshot, observation))
                         }
                         .await;
                         match replacement {
-                            Ok((registered, snapshot)) => {
+                            Ok((registered, snapshot, observation)) => {
                                 current = registered;
+                                observed_at = observation;
                                 publish.send_replace(State::Ready(snapshot));
                                 delay = Duration::from_secs(1);
                                 break;
@@ -179,8 +224,31 @@ impl Session {
         Ok(Self {
             state,
             wake,
-            _owner: Owner(owner),
+            _owner: Owner(Mutex::new(Some(owner))),
+            stop,
+            file: shutdown_file,
+            bus: shutdown_bus,
         })
+    }
+
+    pub(crate) async fn shutdown(&self) -> Result<(), Error> {
+        let healthy = self.snapshot().is_ok();
+        let task = self
+            ._owner
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(task) = task {
+            self.stop.notify_one();
+            task.await.map_err(|_| Error::Ledger)?;
+        }
+        if healthy {
+            record_link(self.file.clone(), self.bus.clone(), true).await?;
+        }
+        record_link(self.file.clone(), self.bus.clone(), false)
+            .await
+            .map(|_| ())
     }
 
     pub(crate) fn snapshot(&self) -> Result<Arc<Snapshot>, Arc<Error>> {
@@ -219,6 +287,47 @@ impl Session {
                 };
                 serde_json::json!({"state":state,"reason":reason})
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coalesced_observations_overestimate_downtime_by_at_most_the_interval() {
+        let interval = observation_interval(604800);
+        assert_eq!(
+            interval,
+            Duration::from_secs(60),
+            "production observation bound changed"
+        );
+        assert_eq!(observation_interval(20), Duration::from_secs(10));
+        assert_eq!(observation_interval(1), Duration::from_millis(500));
+        for age in 0..=60 {
+            let directory = tempfile::tempdir().unwrap();
+            let mut store = Store::initialize(&directory.path().join("store.db")).unwrap();
+            store.migrate_custody().unwrap();
+            let limits = custody::Limits::default();
+            store.record_bus_link("node", true, &limits, 100).unwrap();
+            let true_downtime = 25;
+            store
+                .record_bus_link("node", true, &limits, 100 + age + true_downtime)
+                .unwrap();
+            let gap: i64 = store
+                .connection
+                .query_row(
+                    "SELECT MAX(gap_end-gap_start) FROM custody_gaps",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(gap >= true_downtime);
+            assert!(
+                gap <= true_downtime + interval.as_secs() as i64,
+                "coalescing exceeded its downtime overestimate bound"
+            );
         }
     }
 }
