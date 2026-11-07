@@ -1,5 +1,7 @@
 #![cfg(target_os = "linux")]
 
+#[path = "common/agent_stall.rs"]
+mod agent_stall;
 #[path = "common/custody_crash.rs"]
 mod crash;
 #[path = "common/outbound_observer.rs"]
@@ -785,6 +787,154 @@ async fn timeout_before_reservation_is_a_transient_refusal_not_unknown() {
     assert_eq!(count, 0);
     assert!(service.poll(0).await.unwrap().is_none());
     println!("gateway-outbound-complete:deadline-before-submit");
+}
+
+#[tokio::test]
+#[ignore = "mandatory private-node outbound profile"]
+async fn pending_recovery_timeout_during_discovery_remains_unknown() {
+    use tracing::instrument::WithSubscriber;
+    let node = real_node::Node::start(&real_node::pinned_binary()).await;
+    let mut service = node.config.register().await.unwrap();
+    let endpoint = Endpoint::from_registered(&service).unwrap();
+    let (fixture, mut store, verifier) = authority();
+    let target = service.address().unwrap().to_owned();
+    store
+        .set_outbound_policy(
+            "grant",
+            2,
+            &Policy {
+                send: Some(Permission {
+                    targets: [target.clone()].into(),
+                    required_scope: "send:write".into(),
+                }),
+                reply: None,
+            },
+        )
+        .unwrap();
+    let operation = request("unconfirmed-recovery", &target, "existing pending bytes");
+    let tokens = fixture.tokens.clone();
+    let normal_limits = limits();
+    let first = dispatch(
+        &mut store,
+        &endpoint,
+        &verifier,
+        "good-token",
+        "private-bus",
+        &operation,
+        &normal_limits,
+    )
+    .with_subscriber(observer::AtEvent {
+        target: "gateway_outbound_reserved",
+        action: move || {
+            tokens.lock().unwrap().get_mut("good-token").unwrap()["active"] =
+                serde_json::json!(false);
+        },
+    })
+    .await;
+    assert!(matches!(first, Err(Error::Authentication(_))));
+    fixture
+        .tokens
+        .lock()
+        .unwrap()
+        .get_mut("good-token")
+        .unwrap()["active"] = serde_json::json!(true);
+    let sql = rusqlite::Connection::open(&fixture.store_file).unwrap();
+    let row: (String, Option<String>) = sql
+        .query_row("SELECT state,receipt FROM outbound_reservations", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(row, ("pending".into(), None));
+    let mut stall = agent_stall::AgentStall::install(&node.config, "list");
+    let mut short = limits();
+    short.timeout = std::time::Duration::from_secs(1);
+    let recovery = dispatch(
+        &mut store,
+        &endpoint,
+        &verifier,
+        "good-token",
+        "private-bus",
+        &operation,
+        &short,
+    );
+    tokio::pin!(recovery);
+    tokio::select! {
+        result=&mut recovery => panic!("recovery did not reach stalled discovery: {result:?}"),
+        response=stall.reached() => assert_eq!(response["status"],"ok"),
+    }
+    let result = recovery.await;
+    stall.finish().await;
+    assert!(
+        matches!(result, Ok(Outcome::Unknown)),
+        "pending recovery deadline was reported as transient: {result:?}"
+    );
+    let state: String = sql
+        .query_row("SELECT state FROM outbound_reservations", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(state, "unknown");
+    assert!(service.poll(0).await.unwrap().is_none());
+    println!("gateway-outbound-complete:pending-recovery-deadline");
+}
+
+#[tokio::test]
+#[ignore = "mandatory private-node outbound profile"]
+async fn deadline_after_send_begins_keeps_the_outcome_unknown() {
+    let node = real_node::Node::start(&real_node::pinned_binary()).await;
+    let mut service = node.config.register().await.unwrap();
+    let endpoint = Endpoint::from_registered(&service).unwrap();
+    let (fixture, mut store, verifier) = authority();
+    let target = service.address().unwrap().to_owned();
+    store
+        .set_outbound_policy(
+            "grant",
+            2,
+            &Policy {
+                send: Some(Permission {
+                    targets: [target.clone()].into(),
+                    required_scope: "send:write".into(),
+                }),
+                reply: None,
+            },
+        )
+        .unwrap();
+    let mut stall = agent_stall::AgentStall::install(&node.config, "send");
+    let operation = request("send-deadline", &target, "accepted before response timeout");
+    let mut short = limits();
+    short.timeout = std::time::Duration::from_secs(1);
+    let submission = dispatch(
+        &mut store,
+        &endpoint,
+        &verifier,
+        "good-token",
+        "private-bus",
+        &operation,
+        &short,
+    );
+    tokio::pin!(submission);
+    let accepted = tokio::select! {
+        result=&mut submission => panic!("send did not reach the stalled response: {result:?}"),
+        response=stall.reached() => response,
+    };
+    assert_eq!(accepted["status"], "ok");
+    let result = submission.await;
+    stall.finish().await;
+    assert!(
+        matches!(result, Ok(Outcome::Unknown)),
+        "in-flight send deadline was reported as transient: {result:?}"
+    );
+    let sql = rusqlite::Connection::open(&fixture.store_file).unwrap();
+    let state: String = sql
+        .query_row("SELECT state FROM outbound_reservations", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(state, "unknown");
+    let delivery = service.poll(1).await.unwrap().unwrap();
+    assert_eq!(Some(delivery.message_id()), accepted["message_id"].as_str());
+    assert!(delivery
+        .text()
+        .ends_with("\naccepted before response timeout"));
+    service.ack(delivery.message_id()).await.unwrap();
+    assert!(service.poll(0).await.unwrap().is_none());
+    println!("gateway-outbound-complete:send-in-flight-deadline");
 }
 
 #[tokio::test]

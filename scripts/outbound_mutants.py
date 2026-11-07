@@ -385,12 +385,40 @@ CASES += [
 ]
 
 
+flag_line = "    may_have_submitted.store(true, Ordering::Relaxed);\n"
+send_start = OUTBOUND.index(flag_line)
+send_end = OUTBOUND.index(
+    '    tracing::debug!(target:"gateway_outbound_submitted"', send_start
+)
+send_block = OUTBOUND[send_start:send_end]
+CASES += [
+    (
+        "pending-row-is-uncertain",
+        "src/outbound.rs",
+        ".is_some_and(|row| row.receipt.is_none()),",
+        ".is_some_and(|row| row.receipt.is_none() && false),",
+        "custody_outbound",
+        "pending_recovery_timeout_during_discovery_remains_unknown",
+        "pending recovery deadline was reported as transient",
+    ),
+    (
+        "submission-flag-before-send",
+        "src/outbound.rs",
+        send_block,
+        send_block.replace(flag_line, "", 1) + flag_line,
+        "custody_outbound",
+        "deadline_after_send_begins_keeps_the_outcome_unknown",
+        "in-flight send deadline was reported as transient",
+    ),
+]
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", choices=[case[0] for case in CASES])
     parser.add_argument("--list", action="store_true")
     args = parser.parse_args()
-    assert len(CASES) == 34, "outbound mutant inventory drift"
+    assert len(CASES) == 36, "outbound mutant inventory drift"
     for name, filename, old, *_ in CASES:
         assert (ROOT / filename).read_text().count(old) == 1, (
             name,
@@ -451,7 +479,7 @@ def main():
                 print(f"{name}: GREEN baseline / RED intended", flush=True)
             finally:
                 file.write_text(source)
-        assert completed == (1 if args.case else 34), (
+        assert completed == (1 if args.case else 36), (
             "outbound mutant completion mismatch"
         )
         if not args.case:

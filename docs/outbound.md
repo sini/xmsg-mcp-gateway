@@ -85,13 +85,15 @@ turn a repeat into a fresh send. Exhaustion refuses new reservations; reconcilia
 and archival require a later owner workflow. The actual daemon TTL/queue checks
 remain the prerequisite startup work rather than guessed manifest values.
 
-The mandatory private-node profile runs 15 named cases with completion markers,
+The mandatory private-node profile runs 17 named cases with completion markers,
 missing-fixture and early-return refusals. It covers both process-crash cuts,
 same-ID receipts and payload conflicts, expired uncertainty, held revisions,
 owned replies, disable ordering, inbound progress during stalled acceptance, and
 both SQLite BUSY phases. Portable tests cover the explicit migrations, strict
 request IDs (including a committed trybuild snapshot), per-service lease custody
-and the real owner's 30-second timeout. The 34 single-site source mutants must
+and the real owner's 30-second timeout. Recovery that stalls while an unconfirmed
+reservation exists remains unknown, as does a new send whose accepted response
+is withheld beyond its budget. The 36 single-site source mutants must
 fail their named assertions; compile failures, cached artifacts and harness
 timeouts do not count as kills. A source control advances the supported schema
 ceiling while requiring outbound schema 3 to remain usable. The later serving unit owns the end-to-end MCP

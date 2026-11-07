@@ -23,13 +23,15 @@ MARKERS = (
     "expired-stale-revision",
     "isolated-connection",
     "deadline-before-submit",
+    "pending-recovery-deadline",
+    "send-in-flight-deadline",
 )
 
 
 def require_complete(result):
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert (
-        "15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out" in result.stdout
+        "17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out" in result.stdout
     ), "outbound profile count/skip mismatch"
     for marker in MARKERS:
         assert result.stdout.count(f"gateway-outbound-complete:{marker}") == 1, (
@@ -92,7 +94,7 @@ def main():
         "outbound missing-binary and early-return controls: expected refusals",
         flush=True,
     )
-    print("outbound-checks-complete:15", flush=True)
+    print("outbound-checks-complete:17", flush=True)
 
 
 if __name__ == "__main__":
