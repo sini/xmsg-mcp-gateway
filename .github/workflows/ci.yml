@@ -81,6 +81,7 @@ jobs:
         run: |
           python3 scripts/transport_compat.py | tee transport-compat.log
           grep -Fx 'transport-compat-complete:2-revisions-8-cases' transport-compat.log
+          grep -Fx 'copied-control-cached-artifact:refused:real_xmsg' transport-compat.log
       - name: Isolated federation admission source mutants
         run: |
           python3 scripts/transport_mutants.py | tee transport-mutants.log
@@ -92,6 +93,7 @@ jobs:
           export XMSG_GATEWAY_BIN="$PWD/.artifacts/transport/$revision/xmsg"
           python3 scripts/custody_checks.py | tee custody-checks.log
           grep -Fx 'custody-checks-complete:18' custody-checks.log
+          grep -Fx 'copied-control-cached-artifact:refused:custody_inbound' custody-checks.log
       - name: Custody source mutants
         run: |
           revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')
@@ -104,6 +106,7 @@ jobs:
           export XMSG_GATEWAY_BIN="$PWD/.artifacts/transport/$revision/xmsg"
           python3 scripts/outbound_checks.py | tee outbound-checks.log
           grep -Fx 'outbound-checks-complete:17' outbound-checks.log
+          grep -Fx 'copied-control-cached-artifact:refused:custody_outbound' outbound-checks.log
       - name: Outbound custody source mutants
         run: |
           revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')

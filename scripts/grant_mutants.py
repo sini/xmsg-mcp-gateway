@@ -153,7 +153,8 @@ def run(root, target, test, changed_source, *, test_timeout=30, test_args=()):
         and item.get("executable")
     ]
     assert len(executables) == 1, "missing intended test artifact"
-    assert not executables[0].get("fresh", True), "selected test executable was cached"
+    if executables[0].get("fresh", True):
+        raise RuntimeError("selected test executable was cached")
     from artifact_evidence import record
 
     record(root, Path(executables[0]["executable"]), f"{target}/{test}")
@@ -167,9 +168,8 @@ def run(root, target, test, changed_source, *, test_timeout=30, test_args=()):
         and item.get("target", {}).get("name") == changed_target
         and not item.get("profile", {}).get("test")
     ]
-    assert len(rebuilt) == 1 and not rebuilt[0].get("fresh", True), (
-        "changed library or application binary was cached"
-    )
+    if len(rebuilt) != 1 or rebuilt[0].get("fresh", True):
+        raise RuntimeError("changed library or application binary was cached")
     return subprocess.run(
         [executables[0]["executable"], test, "--exact", *test_args],
         cwd=root,

@@ -110,13 +110,14 @@ def build(source, target, revision, output):
         and item.get("executable")
     ]
     assert len(binary) == 1, "fixture daemon executable missing"
-    assert all(
+    if not all(
         not item["fresh"]
         for item in artifacts
         if item.get("reason") == "compiler-artifact"
         and item.get("target", {}).get("name") == "xmsg"
         and item.get("executable")
-    ), "fixture daemon reused a cached executable"
+    ):
+        raise RuntimeError("fixture daemon reused a cached executable")
     record(source, Path(binary[0]), "xmsg-daemon")
     output.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(binary[0], output)
@@ -172,9 +173,10 @@ def build_test(root=ROOT, *, target="real_xmsg", target_dir=None):
                 or item.get("executable") == found[0]
             )
         ]
-        assert len(rebuilt) == 2 and all(
+        if len(rebuilt) != 2 or not all(
             not item.get("fresh", True) for item in rebuilt
-        ), "copied control reused a cached artifact"
+        ):
+            raise RuntimeError("copied control reused a cached artifact")
         record(root, Path(found[0]), target)
     return found[0]
 
@@ -182,10 +184,11 @@ def build_test(root=ROOT, *, target="real_xmsg", target_dir=None):
 def refuse_cached_control(root, *, target, target_dir):
     try:
         build_test(root, target=target, target_dir=target_dir)
-    except AssertionError as error:
-        assert str(error) == "copied control reused a cached artifact", str(error)
+    except RuntimeError as error:
+        if str(error) != "copied control reused a cached artifact":
+            raise
     else:
-        raise AssertionError("cached copied-control artifact was accepted")
+        raise RuntimeError("cached copied-control artifact was accepted")
     print(f"copied-control-cached-artifact:refused:{target}", flush=True)
 
 

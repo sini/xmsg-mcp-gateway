@@ -16,9 +16,8 @@ def record(root, executable, label):
     variant = source.hexdigest()
     digest = hashlib.sha256(executable.read_bytes()).hexdigest()
     previous = SEEN.setdefault(digest, variant)
-    assert previous == variant, (
-        "different source variants reused a test-executable hash"
-    )
+    if previous != variant:
+        raise RuntimeError("different source variants reused a test-executable hash")
     print(
         f"artifact nonce={NONCE} arm={label} path={executable} "
         f"mtime_ns={executable.stat().st_mtime_ns} sha256={digest} source={variant}",
