@@ -99,9 +99,9 @@ for name, getter, field, test in [
     CASES.append(
         (
             name,
-            "src/serving.rs",
+            "src/session.rs",
             f"registered.{getter}()",
-            f"Some(messaging.manifest.{field})",
+            f"Some(manifest.{field})",
             "messaging",
             test,
             "inconsistent node manifest reached the router",
@@ -254,7 +254,7 @@ CASES.append(
 CASES.append(
     (
         "startup-reported-body-bound",
-        "src/serving.rs",
+        "src/session.rs",
         "registered.max_body_bytes(),",
         "Some(65536),",
         "messaging",
@@ -263,9 +263,50 @@ CASES.append(
     )
 )
 
+CASES.extend(
+    [
+        (
+            "runtime-reregistration",
+            "src/session.rs",
+            "let registered = register(&config, &manifest).await?;",
+            "let registered = Err::<RegisteredService, Error>(Error::Identity)?;",
+            "messaging",
+            "serving_recovers_after_a_real_daemon_restart_without_consuming_mail",
+            "serving failed to recover its registration",
+        ),
+        (
+            "fresh-registration-limits",
+            "src/session.rs",
+            "let registered = register(&config, &manifest).await?;",
+            "let registered = config.register().await.map_err(Error::Registration)?;",
+            "messaging",
+            "reconnect_rechecks_changed_limits_and_records_the_link_before_readiness",
+            "changed node limits were published as ready",
+        ),
+        (
+            "durable-reconnect-before-publication",
+            "src/session.rs",
+            "record_link(file.clone(), snapshot.bus.clone(), true).await?;",
+            "",
+            "messaging",
+            "reconnect_publication_waits_for_a_durable_ledger_commit",
+            "replacement published before durable reconnect",
+        ),
+        (
+            "in-flight-snapshot-publication",
+            "src/session.rs",
+            "publish.send_replace(State::Ready(snapshot));",
+            "",
+            "messaging",
+            "an_accepted_operation_across_restart_recovers_its_original_receipt_and_key",
+            "in-flight operation did not recover its receipt",
+        ),
+    ]
+)
+
 
 def main():
-    if len(CASES) != 24:
+    if len(CASES) != 28:
         raise RuntimeError("wiring mutant inventory drift")
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", choices=[case[0] for case in CASES])

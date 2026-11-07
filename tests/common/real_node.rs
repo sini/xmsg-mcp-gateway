@@ -316,9 +316,13 @@ impl Node {
         self.reply_ttl_secs = seconds;
         self.restart(binary).await;
     }
-    pub async fn restart(&mut self, binary: &Path) {
-        self.child.kill().unwrap();
+    #[allow(dead_code)]
+    pub fn stop(&mut self) {
+        let _ = self.child.kill();
         self.child.wait().unwrap();
+    }
+    pub async fn restart(&mut self, binary: &Path) {
+        self.stop();
         for name in ["register.sock", "agent.sock", "http.sock"] {
             let socket = self._temp.path().join("run").join(name);
             if socket.exists() {

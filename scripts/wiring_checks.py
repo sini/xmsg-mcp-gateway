@@ -31,6 +31,10 @@ MARKERS = [
     "complete-framed-bound",
     "deadline-pending",
     "reported-body-bound",
+    "daemon-recovery",
+    "reconnect-limits-ledger",
+    "in-flight-recovery",
+    "durable-reconnect-publication",
 ]
 DEADLINE = "handler_deadline_reports_pending_without_cancelling_accepted_work"
 EMPTY_POLICY = "fresh_policy_is_empty_and_cannot_be_changed_by_mcp"
@@ -64,7 +68,7 @@ def expected_refusal(result, expected, **kwargs):
 
 
 def main():
-    if len(MARKERS) != 16 or len(set(MARKERS)) != 16:
+    if len(MARKERS) != 20 or len(set(MARKERS)) != 20:
         raise RuntimeError("wiring profile marker inventory drift")
     pin = pins()
     binary = Path(os.environ["XMSG_GATEWAY_BIN"])
@@ -74,7 +78,7 @@ def main():
     evidence.mkdir(parents=True, exist_ok=True)
     (evidence / "profile.log").write_text(result.stdout + result.stderr)
     require_complete(result)
-    print("wiring profile:16/16, zero ignored, all completion markers", flush=True)
+    print("wiring profile:20/20, zero ignored, all completion markers", flush=True)
     missing = live(executable, None, pin["revision"], case=EMPTY_POLICY)
     if (
         missing.returncode != 101
@@ -113,13 +117,13 @@ def main():
             skipped,
             "wiring completion missing: fresh-empty-policy",
             markers=["fresh-empty-policy"],
-            filtered=14,
+            filtered=len(MARKERS) - 1,
         )
     print(
         "wiring missing-binary, missing-case and early-return controls: expected refusals",
         flush=True,
     )
-    print("wiring-checks-complete:16", flush=True)
+    print("wiring-checks-complete:20", flush=True)
 
 
 if __name__ == "__main__":

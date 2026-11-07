@@ -294,6 +294,14 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
+    pub(crate) fn health(&self) -> Result<(), xmsg::client::ClientError> {
+        self.client.health()
+    }
+
+    pub(crate) fn sender(&self) -> &str {
+        &self.sender
+    }
+
     pub fn from_registered(service: &xmsg::client::RegisteredService) -> Result<Self, Error> {
         Ok(Self {
             sender: service

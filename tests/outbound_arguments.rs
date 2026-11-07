@@ -37,3 +37,10 @@ fn request_id_is_required_and_strict() {
 fn json_rpc_id_cannot_become_a_request_id() {
     trybuild::TestCases::new().compile_fail("tests/ui/request_id_from_rpc.rs");
 }
+
+#[test]
+fn a_sqlite_transaction_cannot_cross_a_send_task_await() {
+    let tests = trybuild::TestCases::new();
+    tests.compile_fail("tests/ui/transaction_across_await.rs");
+    tests.pass("tests/ui/transaction_before_await.rs");
+}

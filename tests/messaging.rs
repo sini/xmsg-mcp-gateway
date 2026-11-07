@@ -81,6 +81,282 @@ fn save(fixture: &serving_fixture::Fixture) {
     );
 }
 
+#[tokio::test]
+#[ignore = "requires the revision-verified private daemon in the wiring profile"]
+async fn serving_recovers_after_a_real_daemon_restart_without_consuming_mail() {
+    let binary = real_node::pinned_binary();
+    let mut node = real_node::Node::start(&binary).await;
+    let fixture = migrated_fixture(&node);
+    policy(
+        &fixture,
+        "2",
+        json!({"send":{"targets":["gateway@gateway.fixture"],"required_scope":"identity:read"},"reply":null}),
+    );
+    let serving = fixture.serving().await;
+    let send = |request_id: &str| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"xmsg_send","arguments":{"request_id":request_id,"to":"gateway@gateway.fixture","text":"restart test"}}});
+    let (status, before, _) =
+        serving_fixture::request(&serving, "good-token", send("before-restart")).await;
+    assert_eq!(status, StatusCode::OK);
+    let before = before["result"]["structuredContent"]["receipt"].clone();
+    assert!(before["receipt"]["message_id"].is_string());
+    node.restart(&binary).await;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let after = loop {
+        let (status, response, _) =
+            serving_fixture::request(&serving, "good-token", send("after-restart")).await;
+        if status == StatusCode::OK
+            && response["result"]["structuredContent"]["state"] == "confirmed"
+        {
+            break response["result"]["structuredContent"]["receipt"].clone();
+        }
+        assert_ne!(
+            status,
+            StatusCode::FORBIDDEN,
+            "disconnect is not a policy denial"
+        );
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "serving failed to recover its registration"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    let (status, replay, _) =
+        serving_fixture::request(&serving, "good-token", send("after-restart")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(replay["result"]["structuredContent"]["receipt"], after);
+    drop(serving);
+    tokio::task::yield_now().await;
+    let mut mailbox = node.config.register().await.unwrap();
+    let mut ids = Vec::new();
+    while let Some(delivery) = mailbox.poll(0).await.unwrap() {
+        ids.push(delivery.message_id().to_owned());
+        mailbox.ack(delivery.message_id()).await.unwrap();
+    }
+    ids.sort();
+    let mut expected = vec![
+        before["receipt"]["message_id"].as_str().unwrap().to_owned(),
+        after["receipt"]["message_id"].as_str().unwrap().to_owned(),
+    ];
+    expected.sort();
+    assert_eq!(
+        ids, expected,
+        "recovery must not poll, ACK or duplicate queued mail"
+    );
+    println!("gateway-wiring-complete:daemon-recovery");
+}
+
+#[tokio::test]
+#[ignore = "requires the revision-verified private daemon in the wiring profile"]
+async fn reconnect_rechecks_changed_limits_and_records_the_link_before_readiness() {
+    let binary = real_node::pinned_binary();
+    let mut node = real_node::Node::start(&binary).await;
+    let fixture = migrated_fixture(&node);
+    policy(
+        &fixture,
+        "2",
+        json!({"send":{"targets":["gateway@gateway.fixture"],"required_scope":"identity:read"},"reply":null}),
+    );
+    let serving = fixture.serving().await;
+    let identity = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"xmsg_identity","arguments":{}}});
+    let (_, ready, _) = serving_fixture::request(&serving, "good-token", identity.clone()).await;
+    assert_eq!(
+        ready["result"]["structuredContent"]["messaging_status"]["state"],
+        "ready"
+    );
+    node.restart_with_reply_ttl(&binary, 604799).await;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let (_, response, _) =
+            serving_fixture::request(&serving, "good-token", identity.clone()).await;
+        let state = &response["result"]["structuredContent"]["messaging_status"];
+        if state["state"] == "blocked" {
+            assert_eq!(
+                state["reason"], "reply_ttl_mismatch",
+                "new handle must be checked against the original manifest"
+            );
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "changed node limits were published as ready"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let send = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xmsg_send","arguments":{"request_id":"changed-limits","to":"gateway@gateway.fixture","text":"must refuse"}}});
+    let (status, _, probe) = serving_fixture::request(&serving, "good-token", send).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(probe.dispatches.load(Ordering::SeqCst), 0);
+    let connection = rusqlite::Connection::open(&fixture.store_file).unwrap();
+    let connected: bool = connection
+        .query_row(
+            "SELECT connected FROM custody_links WHERE bus='gateway.fixture'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!connected, "disconnect must be durably recorded");
+    node.restart_with_reply_ttl(&binary, 604800).await;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let (_, response, _) =
+            serving_fixture::request(&serving, "good-token", identity.clone()).await;
+        if response["result"]["structuredContent"]["messaging_status"]["state"] == "ready" {
+            let connected: bool = connection
+                .query_row(
+                    "SELECT connected FROM custody_links WHERE bus='gateway.fixture'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(connected, "readiness preceded the durable reconnect");
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "original manifest did not recover"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    println!("gateway-wiring-complete:reconnect-limits-ledger");
+}
+
+#[tokio::test]
+#[ignore = "requires the revision-verified private daemon in the wiring profile"]
+async fn an_accepted_operation_across_restart_recovers_its_original_receipt_and_key() {
+    let binary = real_node::pinned_binary();
+    let mut node = real_node::Node::start(&binary).await;
+    let fixture = migrated_fixture(&node);
+    policy(
+        &fixture,
+        "2",
+        json!({"send":{"targets":["gateway@gateway.fixture"],"required_scope":"identity:read"},"reply":null}),
+    );
+    let serving = std::sync::Arc::new(fixture.serving().await);
+    let send = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"xmsg_send","arguments":{"request_id":"accepted-across-restart","to":"gateway@gateway.fixture","text":"accepted before restart"}}});
+    let mut stall = agent_stall::AgentStall::install(&node.config, "send");
+    let task_serving = serving.clone();
+    let task_send = send.clone();
+    let request = tokio::spawn(async move {
+        serving_fixture::request(&task_serving, "good-token", task_send).await
+    });
+    let accepted = stall.reached().await;
+    let original_id = accepted["message_id"].as_str().unwrap().to_owned();
+    let connection = rusqlite::Connection::open(&fixture.store_file).unwrap();
+    let original_key: String = connection.query_row("SELECT idempotency_key FROM outbound_reservations WHERE request_id='accepted-across-restart'", [], |row| row.get(0)).unwrap();
+    node.stop();
+    stall.finish(false).await;
+    let (status, uncertain, _) = request.await.unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(uncertain["result"]["structuredContent"]["state"], "unknown");
+    node.restart(&binary).await;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let (status, replay, _) =
+            serving_fixture::request(&serving, "good-token", send.clone()).await;
+        if status == StatusCode::OK && replay["result"]["structuredContent"]["state"] == "confirmed"
+        {
+            let receipt: Receipt =
+                serde_json::from_value(replay["result"]["structuredContent"]["receipt"].clone())
+                    .unwrap();
+            let Receipt::Send(receipt) = receipt else {
+                panic!("wrong receipt kind")
+            };
+            assert_eq!(receipt.message_id, original_id);
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "in-flight operation did not recover its receipt"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let recovered_key: String = connection.query_row("SELECT idempotency_key FROM outbound_reservations WHERE request_id='accepted-across-restart'", [], |row| row.get(0)).unwrap();
+    assert_eq!(recovered_key, original_key);
+    drop(serving);
+    tokio::task::yield_now().await;
+    let mut mailbox = node.config.register().await.unwrap();
+    let delivery = mailbox.poll(0).await.unwrap().unwrap();
+    assert_eq!(delivery.message_id(), original_id);
+    mailbox.ack(delivery.message_id()).await.unwrap();
+    assert!(mailbox.poll(0).await.unwrap().is_none());
+    println!("gateway-wiring-complete:in-flight-recovery");
+}
+
+#[tokio::test]
+#[ignore = "requires the revision-verified private daemon in the wiring profile"]
+async fn reconnect_publication_waits_for_a_durable_ledger_commit() {
+    let binary = real_node::pinned_binary();
+    let mut node = real_node::Node::start(&binary).await;
+    let fixture = migrated_fixture(&node);
+    let probe = serving_fixture::Probe::default();
+    let serving = Serving::from_owner_file(&fixture.config_file)
+        .with_subscriber(probe.clone())
+        .await
+        .unwrap();
+    assert_eq!(probe.registrations.load(Ordering::SeqCst), 1);
+    node.stop();
+    let connection = rusqlite::Connection::open(&fixture.store_file).unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let connected: bool = connection
+            .query_row(
+                "SELECT connected FROM custody_links WHERE bus='gateway.fixture'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        if !connected {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "disconnect was not recorded"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+    node.restart(&binary).await;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while probe.registrations.load(Ordering::SeqCst) < 2 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "replacement registration was not observed"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let identity = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"xmsg_identity","arguments":{}}});
+    let (status, response, _) =
+        serving_fixture::request(&serving, "good-token", identity.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_ne!(
+        response["result"]["structuredContent"]["messaging_status"]["state"], "ready",
+        "replacement published before durable reconnect"
+    );
+    connection.execute_batch("COMMIT").unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let (_, response, _) =
+            serving_fixture::request(&serving, "good-token", identity.clone()).await;
+        if response["result"]["structuredContent"]["messaging_status"]["state"] == "ready" {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "committed reconnect was not published"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let connected: bool = connection
+        .query_row(
+            "SELECT connected FROM custody_links WHERE bus='gateway.fixture'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(connected);
+    println!("gateway-wiring-complete:durable-reconnect-publication");
+}
+
 async fn cli_refuses(fixture: &serving_fixture::Fixture) {
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(5),

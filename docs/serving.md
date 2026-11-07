@@ -54,6 +54,28 @@ development pin includes registration health and socket activation, with its
 landing on xmsg main still required before the final gateway pin. Live activation
 and exposure gates below still apply.
 
+When messaging is configured, one session owner retains the registration. It
+samples non-consuming registration health once per second and records the bus
+observation in the existing bounded custody ledger. A disconnect invalidates the
+old handle and withdraws dispatch snapshots. Re-registration uses the same
+identity validation and Q1 checks, with a one-second backoff doubling to at most
+30 seconds. Readiness is published only after a durable reconnect record and a
+final health check. Changed limits or ledger failure keep messaging unavailable;
+the manifest is never adapted automatically.
+
+`xmsg_identity` includes `messaging_status` only in this profile: `ready` with the
+registered mailbox, `reconnecting`, or `blocked` with a reason. Sends and replies
+return 503 while unavailable. Recovery never polls or ACKs the mailbox, submits
+work, mints an idempotency key, or authorizes a replay. A caller retries uncertain
+work with its original request ID. Link records retain the custody ledger's
+existing seven-day / 1000-gap bounds and capacity costs; an exhausted ledger also
+blocks messaging until a durable update can succeed.
+
+The detached task's `Send` requirement statically rejects a SQLite Transaction
+held across an await. A trybuild refusal and commit-before-await positive control
+cover that boundary. The runtime ordering mutant instead submits before opening
+the reservation transaction; the crash cell detects the premature delivery.
+
 ## Owner configuration
 
 `serve --config FILE` is the only serving configuration entry. Request arguments,

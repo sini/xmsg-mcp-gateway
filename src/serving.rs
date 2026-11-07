@@ -18,6 +18,7 @@ use serde_json::{json, Map, Value};
 use crate::auth::{self, VerifiedIdentity, Verifier, VerifierConfig};
 use crate::grants::{Authorization, Binding, Error as GrantError, Store};
 use crate::outbound::{self, Outcome, Policy};
+use crate::session;
 use crate::xmsg_config::{DeploymentManifest, ManifestError, XmsgConfig};
 
 const MAX_REQUEST: usize = 65_536;
@@ -41,6 +42,19 @@ pub enum StartupError {
     Store(#[source] outbound::Error),
     #[error("request budget must cover verification, store wait and submission")]
     RequestBudget,
+    #[error("bus link ledger is unavailable")]
+    BusLedger,
+}
+
+impl From<session::Error> for StartupError {
+    fn from(error: session::Error) -> Self {
+        match error {
+            session::Error::Registration(error) => Self::Registration(error),
+            session::Error::Manifest(error) => Self::Manifest(error),
+            session::Error::Identity => Self::ConnectionConfiguration,
+            session::Error::Ledger => Self::BusLedger,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -60,9 +74,7 @@ fn present_messaging<'de, D: serde::Deserializer<'de>>(
 }
 
 struct Messaging {
-    _registration: tokio::sync::Mutex<xmsg::client::RegisteredService>,
-    endpoint: outbound::Endpoint,
-    bus: String,
+    session: session::Session,
     limits: outbound::Limits,
 }
 
@@ -212,30 +224,16 @@ impl Serving {
             if config.request_timeout_ms < minimum_budget {
                 return Err(StartupError::RequestBudget);
             }
-            let registered = messaging
-                .xmsg
-                .register()
-                .await
-                .map_err(StartupError::Registration)?;
-            tracing::info!(target: "gateway_registration", address = registered.address(), "registered xmsg service");
-            messaging.manifest.check(
-                registered.reply_ttl_secs(),
-                registered.idempotency_ttl_secs(),
-                registered.svc_queue_cap(),
-                registered.max_body_bytes(),
-            )?;
-            let endpoint =
-                outbound::Endpoint::from_registered(&registered).map_err(StartupError::Store)?;
-            let bus = registered
-                .node()
-                .ok_or(StartupError::ConnectionConfiguration)?
-                .to_owned();
-            Some(Messaging {
-                _registration: tokio::sync::Mutex::new(registered),
-                endpoint,
-                bus,
-                limits,
-            })
+            let registered = session::register(&messaging.xmsg, &messaging.manifest).await?;
+            let session = session::Session::start(
+                messaging.xmsg,
+                messaging.manifest,
+                registered,
+                config.grant_store.clone(),
+                store,
+            )
+            .await?;
+            Some(Messaging { session, limits })
         } else {
             None
         };
@@ -564,6 +562,14 @@ async fn messaging_call(
     if !permission_enabled(&app, permission) {
         return StatusCode::FORBIDDEN.into_response();
     }
+    let snapshot = match app
+        .messaging
+        .as_ref()
+        .and_then(|messaging| messaging.session.snapshot().ok())
+    {
+        Some(snapshot) => snapshot,
+        None => return unavailable(),
+    };
     tracing::info!(target: "gateway_dispatch", operation, "dispatch");
     let (send, receive) = tokio::sync::oneshot::channel();
     let task_app = app.clone();
@@ -577,10 +583,10 @@ async fn messaging_call(
                 .ok_or(outbound::Error::Configuration)?;
             outbound::dispatch(
                 &mut store,
-                &messaging.endpoint,
+                &snapshot.endpoint,
                 &task_app.verifier,
                 &token,
-                &messaging.bus,
+                &snapshot.bus,
                 &request,
                 &messaging.limits,
             )
@@ -796,8 +802,11 @@ async fn mcp_request(
                 return rpc_error(&id, -32602, "Invalid params");
             }
             tracing::info!(target: "gateway_dispatch", operation = "xmsg_identity", "dispatch");
-            let data = json!({"service":identity.service(),"subject":identity.subject(),"issuer":identity.issuer(),
+            let mut data = json!({"service":identity.service(),"subject":identity.subject(),"issuer":identity.issuer(),
                 "resource":identity.resource(),"hosted_client":identity.hosted_client(),"grant_revision":grant.revision});
+            if let Some(messaging) = &app.messaging {
+                data["messaging_status"] = messaging.session.status();
+            }
             json!({"content":[{"type":"text","text":data.to_string()}],"structuredContent":data,"isError":false})
         }
         "events/list" | "events/subscribe" | "events/unsubscribe" => {

@@ -171,10 +171,22 @@ def run_marked(root, target, test, changed_source, *, test_timeout, test_args):
         text=True,
         timeout=120,
     )
-    assert built.returncode == 0, (
-        "compilation failed; not a kill",
-        built.stderr[-4000:],
-    )
+    if built.returncode:
+        diagnostics = []
+        for line in built.stdout.splitlines():
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if message.get("reason") == "compiler-message":
+                diagnostics.append(message.get("message", {}).get("rendered", ""))
+        raise RuntimeError(
+            (
+                "compilation failed; not a kill",
+                "".join(diagnostics)[-8000:],
+                built.stderr[-4000:],
+            )
+        )
     artifacts = [
         json.loads(line) for line in built.stdout.splitlines() if line.startswith("{")
     ]
