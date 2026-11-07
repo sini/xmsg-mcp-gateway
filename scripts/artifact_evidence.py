@@ -7,9 +7,9 @@ NONCE = uuid.uuid4().hex
 SEEN = {}
 
 
-def record(root, executable, label):
+def record(root, executable, label, *, directories=("src", "tests")):
     source = hashlib.sha256()
-    for directory in ("src", "tests"):
+    for directory in directories:
         for file in sorted((root / directory).rglob("*.rs")):
             source.update(str(file.relative_to(root)).encode())
             source.update(file.read_bytes())
