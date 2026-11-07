@@ -1,11 +1,18 @@
 """Require every private-node custody oracle and its completion/skip controls."""
 
 import os
-import shutil
 import tempfile
 from pathlib import Path
 
-from transport_compat import ROOT, build_test, failure_tail, live, pins
+from transport_compat import (
+    ROOT,
+    build_test,
+    copy_fixture_tree,
+    failure_tail,
+    live,
+    pins,
+    refuse_cached_control,
+)
 
 MARKERS = [
     "commit-before-ack",
@@ -64,10 +71,7 @@ def main():
         prefix="gateway-custody-skip-control-"
     ) as directory:
         root = Path(directory)
-        for name in ("Cargo.toml", "Cargo.lock"):
-            shutil.copyfile(ROOT / name, root / name)
-        for name in ("src", "tests", "ci"):
-            shutil.copytree(ROOT / name, root / name, copy_function=shutil.copyfile)
+        copy_fixture_tree(root)
         file = root / "tests/custody_inbound.rs"
         source = file.read_text()
         site = (
@@ -79,7 +83,7 @@ def main():
             build_test(
                 root,
                 target="custody_inbound",
-                target_dir=ROOT / "target/custody-controls",
+                target_dir=root / "target/skip",
             ),
             binary,
             pin["revision"],
@@ -87,6 +91,9 @@ def main():
         assert control.returncode == 0, (
             "skip control did not reach completion guard",
             failure_tail(control),
+        )
+        refuse_cached_control(
+            root, target="custody_inbound", target_dir=root / "target/skip"
         )
         try:
             require_complete(control)

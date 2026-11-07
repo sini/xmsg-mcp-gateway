@@ -153,6 +153,10 @@ def run(root, target, test, changed_source, *, test_timeout=30, test_args=()):
         and item.get("executable")
     ]
     assert len(executables) == 1, "missing intended test artifact"
+    assert not executables[0].get("fresh", True), "selected test executable was cached"
+    from artifact_evidence import record
+
+    record(root, Path(executables[0]["executable"]), f"{target}/{test}")
     changed_target = (
         "xmsg-mcp-gateway" if changed_source == "src/main.rs" else "xmsg_mcp_gateway"
     )

@@ -10,6 +10,8 @@ import tempfile
 import tomllib
 from pathlib import Path
 
+from artifact_evidence import record
+
 ROOT = Path(__file__).resolve().parents[1]
 MARKERS = [
     "roundtrip",
@@ -115,12 +117,20 @@ def build(source, target, revision, output):
         and item.get("target", {}).get("name") == "xmsg"
         and item.get("executable")
     ), "fixture daemon reused a cached executable"
+    record(source, Path(binary[0]), "xmsg-daemon")
     output.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(binary[0], output)
     assert (
         command([str(output), "--version"], ROOT).strip() == f"xmsg 0.1.0+{revision}"
     ), "built daemon revision stamp missing"
     return output
+
+
+def copy_fixture_tree(destination):
+    for name in ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml"):
+        shutil.copyfile(ROOT / name, destination / name)
+    for name in ("src", "tests", "ci"):
+        shutil.copytree(ROOT / name, destination / name, copy_function=shutil.copyfile)
 
 
 def build_test(root=ROOT, *, target="real_xmsg", target_dir=None):
@@ -139,10 +149,7 @@ def build_test(root=ROOT, *, target="real_xmsg", target_dir=None):
         root,
         env={
             **os.environ,
-            "CARGO_TARGET_DIR": str(
-                target_dir
-                or ROOT / ("target" if root == ROOT else "target/transport-controls")
-            ),
+            "CARGO_TARGET_DIR": str(target_dir or root / "target"),
         },
     )
     records = [json.loads(line) for line in log.splitlines() if line.startswith("{")]
@@ -155,7 +162,31 @@ def build_test(root=ROOT, *, target="real_xmsg", target_dir=None):
         and item.get("executable")
     ]
     assert len(found) == 1, "mandatory real-node test binary absent"
+    if root != ROOT:
+        rebuilt = [
+            item
+            for item in records
+            if item.get("reason") == "compiler-artifact"
+            and (
+                item.get("target", {}).get("name") == "xmsg_mcp_gateway"
+                or item.get("executable") == found[0]
+            )
+        ]
+        assert len(rebuilt) == 2 and all(
+            not item.get("fresh", True) for item in rebuilt
+        ), "copied control reused a cached artifact"
+        record(root, Path(found[0]), target)
     return found[0]
+
+
+def refuse_cached_control(root, *, target, target_dir):
+    try:
+        build_test(root, target=target, target_dir=target_dir)
+    except AssertionError as error:
+        assert str(error) == "copied control reused a cached artifact", str(error)
+    else:
+        raise AssertionError("cached copied-control artifact was accepted")
+    print(f"copied-control-cached-artifact:refused:{target}", flush=True)
 
 
 def live(executable, binary, revision, *, case=None):
@@ -190,10 +221,7 @@ def require_complete(result):
 def consumer_controls(binary, revision):
     with tempfile.TemporaryDirectory(prefix="gateway-transport-controls-") as directory:
         fixture = Path(directory)
-        for name in ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml"):
-            shutil.copy2(ROOT / name, fixture / name)
-        for name in ("src", "tests", "ci"):
-            shutil.copytree(ROOT / name, fixture / name)
+        copy_fixture_tree(fixture)
         entry = fixture / "tests/real_xmsg.rs"
         original = entry.read_text()
         before = (
@@ -201,7 +229,10 @@ def consumer_controls(binary, revision):
         )
         assert original.count(before) == 1
         entry.write_text(original.replace(before, before + "\n    return;", 1))
-        skipped = live(build_test(fixture), binary, revision)
+        skip_target = fixture / "target/skip"
+        executable = build_test(fixture, target_dir=skip_target)
+        refuse_cached_control(fixture, target="real_xmsg", target_dir=skip_target)
+        skipped = live(executable, binary, revision)
         assert skipped.returncode == 0, (
             "early-return control failed before completion guard",
             failure_tail(skipped),
@@ -219,7 +250,7 @@ def consumer_controls(binary, revision):
         assert original_config.count(before) == 1
         config.write_text(original_config.replace(before, "expected_node: None,", 1))
         result = live(
-            build_test(fixture),
+            build_test(fixture, target_dir=fixture / "target/expected-node"),
             binary,
             revision,
             case="pinned_node_refuses_a_different_configured_identity",

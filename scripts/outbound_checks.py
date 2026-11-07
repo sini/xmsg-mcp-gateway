@@ -1,11 +1,18 @@
 """Require the complete real-node outbound profile and deliberate skip refusals."""
 
 import os
-import shutil
 import tempfile
 from pathlib import Path
 
-from transport_compat import ROOT, build_test, failure_tail, live, pins
+from transport_compat import (
+    ROOT,
+    build_test,
+    copy_fixture_tree,
+    failure_tail,
+    live,
+    pins,
+    refuse_cached_control,
+)
 
 MARKERS = (
     "child-control",
@@ -60,10 +67,7 @@ def main():
     ), ("outbound missing-binary control escaped", failure_tail(missing))
     with tempfile.TemporaryDirectory(prefix="gateway-outbound-skip-") as directory:
         root = Path(directory)
-        for name in ("Cargo.toml", "Cargo.lock"):
-            shutil.copyfile(ROOT / name, root / name)
-        for name in ("src", "tests", "ci"):
-            shutil.copytree(ROOT / name, root / name, copy_function=shutil.copyfile)
+        copy_fixture_tree(root)
         file = root / "tests/custody_outbound.rs"
         source = file.read_text()
         site = "async fn expired_uncertainty_never_blindly_retries() {"
@@ -73,7 +77,7 @@ def main():
             build_test(
                 root,
                 target="custody_outbound",
-                target_dir=ROOT / "target/outbound-controls",
+                target_dir=root / "target/skip",
             ),
             binary,
             pin["revision"],
@@ -81,6 +85,9 @@ def main():
         assert skipped.returncode == 0, (
             "skip control failed before the guard",
             failure_tail(skipped),
+        )
+        refuse_cached_control(
+            root, target="custody_outbound", target_dir=root / "target/skip"
         )
         try:
             require_complete(skipped)
