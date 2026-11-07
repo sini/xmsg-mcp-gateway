@@ -1,14 +1,14 @@
 use xmsg_mcp_gateway::serving::Serving;
 
-#[test]
-fn serving_requires_an_owner_configuration_file() {
+#[tokio::test]
+async fn serving_requires_an_owner_configuration_file() {
     let temp = tempfile::tempdir().unwrap();
     let missing = temp.path().join("missing.json");
-    assert!(Serving::from_owner_file(&missing).is_err());
+    assert!(Serving::from_owner_file(&missing).await.is_err());
     assert!(!missing.exists());
     let invalid = temp.path().join("invalid.json");
     std::fs::write(&invalid, r#"{"verified":true,"subject":"forged"}"#).unwrap();
-    assert!(Serving::from_owner_file(&invalid).is_err());
+    assert!(Serving::from_owner_file(&invalid).await.is_err());
 }
 
 #[allow(dead_code)]
@@ -27,7 +27,7 @@ use tower::ServiceExt;
 #[tokio::test]
 async fn approved_token_dispatches_the_real_identity_tool() {
     let fixture = Fixture::new();
-    let serving = fixture.serving();
+    let serving = fixture.serving().await;
     let (status, body, probe) = request(&serving, "good-token", Fixture::call()).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["result"]["structuredContent"]["subject"], "owner");
@@ -43,7 +43,7 @@ async fn approved_token_dispatches_the_real_identity_tool() {
 #[tokio::test]
 async fn invalid_token_is_refused_before_an_unavailable_store_is_opened() {
     let fixture = Fixture::new();
-    let serving = fixture.serving();
+    let serving = fixture.serving().await;
     std::fs::remove_file(&fixture.store_file).unwrap();
     for token in ["invalid-token", "foreign-token"] {
         let (status, _, probe) = request(&serving, token, Fixture::call()).await;
@@ -64,7 +64,7 @@ async fn invalid_token_is_refused_before_an_unavailable_store_is_opened() {
 #[tokio::test]
 async fn approved_token_reports_an_unavailable_store_as_retryable() {
     let fixture = Fixture::new();
-    let serving = fixture.serving();
+    let serving = fixture.serving().await;
     std::fs::remove_file(&fixture.store_file).unwrap();
     let (status, _, probe) = request(&serving, "good-token", Fixture::call()).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
@@ -76,7 +76,7 @@ async fn approved_token_reports_an_unavailable_store_as_retryable() {
 #[tokio::test]
 async fn caller_identity_fields_cannot_override_verified_identity() {
     let fixture = Fixture::new();
-    let serving = fixture.serving();
+    let serving = fixture.serving().await;
     let (status, _, positive) = request(&serving, "good-token", Fixture::call()).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(positive.dispatches.load(Ordering::SeqCst), 1);
@@ -116,7 +116,7 @@ async fn caller_identity_fields_cannot_override_verified_identity() {
 #[tokio::test]
 async fn unapproved_token_cannot_use_a_verified_flag_to_fail_open() {
     let fixture = Fixture::new();
-    let serving = fixture.serving();
+    let serving = fixture.serving().await;
     let mut body = Fixture::call();
     body["params"]["_meta"] =
         json!({"verified":true,"subject":"owner","resource":fixture.binding.resource});
@@ -133,7 +133,7 @@ async fn unapproved_token_cannot_use_a_verified_flag_to_fail_open() {
 #[tokio::test]
 async fn each_request_rechecks_the_current_token() {
     let fixture = Fixture::new();
-    let serving = fixture.serving();
+    let serving = fixture.serving().await;
     let (status, _, positive) = request(&serving, "good-token", Fixture::call()).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(positive.dispatches.load(Ordering::SeqCst), 1);
@@ -151,7 +151,7 @@ async fn each_request_rechecks_the_current_token() {
 #[tokio::test]
 async fn revocation_is_checked_on_a_later_request() {
     let fixture = Fixture::new();
-    let serving = fixture.serving();
+    let serving = fixture.serving().await;
     assert_eq!(
         request(&serving, "good-token", Fixture::call()).await.0,
         StatusCode::OK
@@ -176,7 +176,7 @@ async fn revocation_is_checked_on_a_later_request() {
 #[tokio::test]
 async fn grant_is_rechecked_after_discovery() {
     let fixture = Fixture::new();
-    let serving = fixture.serving();
+    let serving = fixture.serving().await;
     let list = json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}});
     let (status, body, _) = request(&serving, "good-token", list).await;
     assert_eq!(status, StatusCode::OK);
@@ -200,7 +200,7 @@ async fn request_data_cannot_select_a_different_owner_file() {
         .lock()
         .unwrap()
         .insert("foreign-token".into(), provider::claims(&other.binding));
-    let serving = owner.serving();
+    let serving = owner.serving().await;
     let mut body = Fixture::call();
     body["params"]["_meta"] = json!({"config_file":other.config_file});
     let (status, _, probe) = request(&serving, "foreign-token", body).await;
@@ -212,7 +212,7 @@ async fn request_data_cannot_select_a_different_owner_file() {
     assert_eq!(probe.dispatches.load(Ordering::SeqCst), 0);
     assert_eq!(owner.requests.load(Ordering::SeqCst), 1);
     assert_eq!(other.requests.load(Ordering::SeqCst), 0);
-    let (status, _, _) = request(&other.serving(), "foreign-token", Fixture::call()).await;
+    let (status, _, _) = request(&other.serving().await, "foreign-token", Fixture::call()).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(other.requests.load(Ordering::SeqCst), 1);
 }
@@ -220,7 +220,7 @@ async fn request_data_cannot_select_a_different_owner_file() {
 #[tokio::test]
 async fn protocol_metadata_and_unavailable_operations_are_honest() {
     let fixture = Fixture::new();
-    let serving = fixture.serving();
+    let serving = fixture.serving().await;
     for version in ["2025-03-26", "2025-06-18", "2025-11-25", "unsupported"] {
         let body = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
             "protocolVersion":version,"capabilities":{},"clientInfo":{"name":"fixture","version":"1"},
@@ -273,7 +273,7 @@ async fn resource_metadata_is_public_without_credentials_or_policy_io() {
     use axum::body::Body;
     use axum::http::Request;
     let fixture = Fixture::new();
-    let serving = fixture.serving();
+    let serving = fixture.serving().await;
     for uri in [
         "/.well-known/oauth-protected-resource",
         "/.well-known/oauth-protected-resource/mcp",
@@ -298,10 +298,10 @@ async fn resource_metadata_is_public_without_credentials_or_policy_io() {
     assert_eq!(fixture.requests.load(Ordering::SeqCst), 0);
 }
 
-#[test]
-fn incomplete_or_exposed_serving_profiles_are_refused() {
+#[tokio::test]
+async fn incomplete_or_exposed_serving_profiles_are_refused() {
     let mut fixture = Fixture::new();
-    let _positive = fixture.serving();
+    let _positive = fixture.serving().await;
     for (field, value) in [
         ("bind", json!("0.0.0.0:8080")),
         ("request_timeout_ms", json!(0)),
@@ -311,7 +311,9 @@ fn incomplete_or_exposed_serving_profiles_are_refused() {
         invalid[field] = value;
         fixture::private_file(&fixture.config_file, &serde_json::to_vec(&invalid).unwrap());
         assert!(
-            Serving::from_owner_file(&fixture.config_file).is_err(),
+            Serving::from_owner_file(&fixture.config_file)
+                .await
+                .is_err(),
             "unsafe serving profile accepted: {field}"
         );
     }
@@ -320,14 +322,16 @@ fn incomplete_or_exposed_serving_profiles_are_refused() {
         &fixture.config_file,
         &serde_json::to_vec(&fixture.config).unwrap(),
     );
-    assert!(Serving::from_owner_file(&fixture.config_file).is_err());
+    assert!(Serving::from_owner_file(&fixture.config_file)
+        .await
+        .is_err());
     assert!(!fixture.keys._directory.path().join("missing.db").exists());
 }
 
 #[tokio::test]
 async fn unavailable_provider_is_retryable_and_never_opens_the_store() {
     let mut fixture = Fixture::new();
-    let serving = fixture.serving();
+    let serving = fixture.serving().await;
     assert_eq!(
         request(&serving, "good-token", Fixture::call()).await.0,
         StatusCode::OK
@@ -353,7 +357,7 @@ async fn body_read_is_bounded_before_any_credential_or_policy_io() {
         &fixture.config_file,
         &serde_json::to_vec(&fixture.config).unwrap(),
     );
-    let serving = fixture.serving();
+    let serving = fixture.serving().await;
     let pending = futures_util::stream::pending::<Result<Bytes, std::io::Error>>();
     let input = Request::builder()
         .method("POST")
@@ -381,7 +385,7 @@ async fn http_host_origin_body_and_method_guards_hold() {
     use axum::body::Body;
     use axum::http::Request;
     let fixture = Fixture::new();
-    let serving = fixture.serving();
+    let serving = fixture.serving().await;
     for (host, origin) in [
         ("foreign.example", None),
         ("gateway.example", Some("https://foreign.example")),
@@ -446,15 +450,17 @@ async fn http_host_origin_body_and_method_guards_hold() {
     assert_eq!(probe.dispatches.load(Ordering::SeqCst), 0);
 }
 
-#[test]
-fn owner_file_permissions_and_unknown_fields_are_checked() {
+#[tokio::test]
+async fn owner_file_permissions_and_unknown_fields_are_checked() {
     let fixture = Fixture::new();
-    let _positive = fixture.serving();
+    let _positive = fixture.serving().await;
     let mut invalid = fixture.config.clone();
     invalid["verified"] = json!(true);
     fixture::private_file(&fixture.config_file, &serde_json::to_vec(&invalid).unwrap());
     assert!(
-        Serving::from_owner_file(&fixture.config_file).is_err(),
+        Serving::from_owner_file(&fixture.config_file)
+            .await
+            .is_err(),
         "unknown owner config fields accepted"
     );
     fixture::private_file(
@@ -467,7 +473,9 @@ fn owner_file_permissions_and_unknown_fields_are_checked() {
         std::fs::set_permissions(&fixture.config_file, std::fs::Permissions::from_mode(0o644))
             .unwrap();
         assert!(
-            Serving::from_owner_file(&fixture.config_file).is_err(),
+            Serving::from_owner_file(&fixture.config_file)
+                .await
+                .is_err(),
             "public owner configuration accepted"
         );
     }
@@ -527,10 +535,10 @@ async fn actual_cli_serves_only_the_owner_file_profile() {
     child.wait().await.unwrap();
 }
 
-#[test]
-fn state_cannot_be_reused_for_another_service_resource_or_owner() {
+#[tokio::test]
+async fn state_cannot_be_reused_for_another_service_resource_or_owner() {
     let fixture = Fixture::new();
-    let _positive = fixture.serving();
+    let _positive = fixture.serving().await;
     for field in ["service", "issuer", "resource", "subject"] {
         let mut other = fixture.config.clone();
         other["verifier"][field] = if field == "issuer" || field == "resource" {
@@ -540,7 +548,9 @@ fn state_cannot_be_reused_for_another_service_resource_or_owner() {
         };
         fixture::private_file(&fixture.config_file, &serde_json::to_vec(&other).unwrap());
         assert!(
-            Serving::from_owner_file(&fixture.config_file).is_err(),
+            Serving::from_owner_file(&fixture.config_file)
+                .await
+                .is_err(),
             "foreign authority profile was accepted: {field}"
         );
     }
@@ -555,7 +565,9 @@ fn state_cannot_be_reused_for_another_service_resource_or_owner() {
         .enroll("mixed-profile", &mixed)
         .unwrap();
     assert!(
-        Serving::from_owner_file(&fixture.config_file).is_err(),
+        Serving::from_owner_file(&fixture.config_file)
+            .await
+            .is_err(),
         "mixed authority profile was accepted"
     );
 }
@@ -567,7 +579,7 @@ async fn token_expiry_during_policy_wait_prevents_dispatch() {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tracing::instrument::WithSubscriber;
     let fixture = Fixture::new();
-    let serving = fixture.serving();
+    let serving = fixture.serving().await;
     let expires = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -641,7 +653,7 @@ async fn relative_paths_belong_to_the_owner_configuration_directory() {
         &fixture.config_file,
         &serde_json::to_vec(&fixture.config).unwrap(),
     );
-    let serving = Serving::from_owner_file(&fixture.config_file);
+    let serving = Serving::from_owner_file(&fixture.config_file).await;
     assert!(
         serving.is_ok(),
         "relative path resolved outside owner configuration directory"

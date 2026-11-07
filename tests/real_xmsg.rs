@@ -5,6 +5,34 @@ mod real_node;
 
 use xmsg::client::{ClientError, ListQuery};
 
+#[tokio::test]
+#[ignore = "requires the pinned socket-activation daemon"]
+async fn socket_activation_survives_an_occupied_port_and_restart() {
+    let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let authority = real_node::Authority::generate();
+    let prepared = real_node::Prepared::create("gateway", "gateway", Some(&authority));
+    let peer = real_node::Prepared::create("peer", "peer", Some(&authority));
+    assert_ne!(prepared.port, occupied.local_addr().unwrap().port());
+    prepared.peer(&peer, serde_json::json!({}));
+    let binary = real_node::pinned_binary();
+    let mut node = prepared.launch(&binary).await;
+    for restart in [false, true] {
+        if restart {
+            node.restart(&binary).await;
+        }
+        let mut service = node.config.register().await.unwrap();
+        let sent = service
+            .send(service.address().unwrap(), "activation", None)
+            .await
+            .unwrap();
+        let delivered = service.poll(0).await.unwrap().unwrap();
+        assert_eq!(delivered.message_id(), sent.message_id);
+        service.ack(delivered.message_id()).await.unwrap();
+    }
+    drop(occupied);
+    println!("gateway-real-node-complete:socket-activation");
+}
+
 #[test]
 fn mandatory_profile_includes_real_node_cases() {
     if std::env::var_os("XMSG_GATEWAY_REQUIRED").is_some() {

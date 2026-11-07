@@ -44,6 +44,13 @@ pub fn private_file(file: &Path, bytes: &[u8]) {
 
 impl Fixture {
     pub fn new() -> Self {
+        // Keep the default registered while scoped probes observe background tasks.
+        static TRACING: std::sync::Once = std::sync::Once::new();
+        TRACING.call_once(|| {
+            let _ = tracing::subscriber::set_global_default(
+                tracing::subscriber::NoSubscriber::default(),
+            );
+        });
         let keys = provider::TlsFixture::new();
         let binding = Binding {
             service: "gateway".into(),
@@ -134,8 +141,8 @@ impl Fixture {
             worker.join().unwrap();
         }
     }
-    pub fn serving(&self) -> Serving {
-        Serving::from_owner_file(&self.config_file).unwrap()
+    pub async fn serving(&self) -> Serving {
+        Serving::from_owner_file(&self.config_file).await.unwrap()
     }
     pub fn call() -> Value {
         json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"xmsg_identity","arguments":{}}})
@@ -155,12 +162,13 @@ impl Drop for Fixture {
 pub struct Probe {
     pub opens: Arc<AtomicUsize>,
     pub dispatches: Arc<AtomicUsize>,
+    pub registrations: Arc<AtomicUsize>,
 }
 impl Subscriber for Probe {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
         matches!(
             metadata.target(),
-            "gateway_policy_store" | "gateway_dispatch"
+            "gateway_policy_store" | "gateway_dispatch" | "gateway_registration"
         )
     }
     fn new_span(&self, _: &Attributes<'_>) -> Id {
@@ -177,6 +185,9 @@ impl Subscriber for Probe {
             }
             "gateway_dispatch" => {
                 self.dispatches.fetch_add(1, Ordering::SeqCst);
+            }
+            "gateway_registration" => {
+                self.registrations.fetch_add(1, Ordering::SeqCst);
             }
             _ => {}
         }

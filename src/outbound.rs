@@ -136,7 +136,7 @@ impl Store {
         Ok(())
     }
 
-    fn require_outbound_ready(&self) -> Result<(), Error> {
+    pub(crate) fn require_outbound_ready(&self) -> Result<(), Error> {
         let version: i64 = self
             .connection
             .pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -186,7 +186,7 @@ impl Store {
         Ok(revision + 1)
     }
 
-    fn outbound_policy(&self, grant_id: &str) -> Result<Policy, Error> {
+    pub(crate) fn outbound_policy(&self, grant_id: &str) -> Result<Policy, Error> {
         let document: Option<String> = self
             .connection
             .query_row(
@@ -281,7 +281,8 @@ pub enum Outcome {
 
 pub struct Limits {
     pub dedup_lifetime_secs: i64,
-    pub max_text_bytes: usize,
+    /// Complete framed message including the gateway preamble, in bytes.
+    pub max_framed_bytes: usize,
     pub timeout: std::time::Duration,
     pub max_reservations: i64,
     pub max_retained_bytes: i64,
@@ -293,6 +294,14 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
+    pub(crate) fn health(&self) -> Result<(), xmsg::client::ClientError> {
+        self.client.health()
+    }
+
+    pub(crate) fn sender(&self) -> &str {
+        &self.sender
+    }
+
     pub fn from_registered(service: &xmsg::client::RegisteredService) -> Result<Self, Error> {
         Ok(Self {
             sender: service
@@ -306,13 +315,13 @@ impl Endpoint {
 
 impl Limits {
     fn text_fits(&self, framed: &str) -> bool {
-        framed.len() <= self.max_text_bytes
+        framed.len() <= self.max_framed_bytes
     }
 
-    fn validate(&self) -> Result<(), Error> {
+    pub(crate) fn validate(&self) -> Result<(), Error> {
         if self.dedup_lifetime_secs <= 0
-            || self.max_text_bytes == 0
-            || self.max_text_bytes > 65536
+            || self.max_framed_bytes == 0
+            || self.max_framed_bytes > 65536
             || self.timeout.is_zero()
             || self.timeout > std::time::Duration::from_secs(25)
             || self.max_reservations <= 0

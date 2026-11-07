@@ -122,7 +122,7 @@ CASES = [
     (
         "framed-text-bound",
         "src/outbound.rs",
-        "framed.len() <= self.max_text_bytes",
+        "framed.len() <= self.max_framed_bytes",
         "true",
         "custody_outbound",
         SEND_TEST,
@@ -140,8 +140,8 @@ CASES = [
     (
         "submit-before-reserve-commit",
         "src/outbound.rs",
-        "            tx.commit()?;\n            store\n                .reservation(owner, op, id)?",
-        "            service.client.send(&target, &framed_text, Some(&key)).await?;\n            tx.commit()?;\n            store\n                .reservation(owner, op, id)?",
+        "            let timestamp = now();\n            let tx = store",
+        "            let timestamp = now();\n            service.client.send(&target, &framed_text, Some(&key)).await?;\n            let tx = store",
         "custody_outbound",
         BEFORE,
         "reserved work submitted before crash cut",

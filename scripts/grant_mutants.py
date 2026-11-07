@@ -171,10 +171,22 @@ def run_marked(root, target, test, changed_source, *, test_timeout, test_args):
         text=True,
         timeout=120,
     )
-    assert built.returncode == 0, (
-        "compilation failed; not a kill",
-        built.stderr[-4000:],
-    )
+    if built.returncode:
+        diagnostics = []
+        for line in built.stdout.splitlines():
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if message.get("reason") == "compiler-message":
+                diagnostics.append(message.get("message", {}).get("rendered", ""))
+        raise RuntimeError(
+            (
+                "compilation failed; not a kill",
+                "".join(diagnostics)[-8000:],
+                built.stderr[-4000:],
+            )
+        )
     artifacts = [
         json.loads(line) for line in built.stdout.splitlines() if line.startswith("{")
     ]
@@ -200,7 +212,9 @@ def run_marked(root, target, test, changed_source, *, test_timeout, test_args):
         and item.get("target", {}).get("name") == changed_target
         and not item.get("profile", {}).get("test")
     ]
-    if len(rebuilt) != 1 or rebuilt[0].get("fresh", True):
+    if not changed_source.startswith("tests/") and (
+        len(rebuilt) != 1 or rebuilt[0].get("fresh", True)
+    ):
         raise RuntimeError("changed library or application binary was cached")
     if changed_source == "src/main.rs":
         record(

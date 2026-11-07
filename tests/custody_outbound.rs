@@ -28,7 +28,7 @@ use xmsg_mcp_gateway::{
 fn limits() -> Limits {
     Limits {
         dedup_lifetime_secs: 86400,
-        max_text_bytes: 65536,
+        max_framed_bytes: 65536,
         timeout: std::time::Duration::from_secs(5),
         max_reservations: 1000,
         max_retained_bytes: 64 * 1024 * 1024,
@@ -863,7 +863,7 @@ async fn pending_recovery_timeout_during_discovery_remains_unknown() {
         response=stall.reached() => assert_eq!(response["status"],"ok"),
     }
     let result = recovery.await;
-    stall.finish().await;
+    stall.finish(false).await;
     assert!(
         matches!(result, Ok(Outcome::Unknown)),
         "pending recovery deadline was reported as transient: {result:?}"
@@ -917,7 +917,7 @@ async fn deadline_after_send_begins_keeps_the_outcome_unknown() {
     };
     assert_eq!(accepted["status"], "ok");
     let result = submission.await;
-    stall.finish().await;
+    stall.finish(false).await;
     assert!(
         matches!(result, Ok(Outcome::Unknown)),
         "in-flight send deadline was reported as transient: {result:?}"

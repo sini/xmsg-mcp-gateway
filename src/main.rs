@@ -49,7 +49,7 @@ enum CommandError {
     #[error("serve obtains its state path only from the owner configuration file")]
     UnexpectedState,
     #[error(transparent)]
-    Configuration(#[from] xmsg_mcp_gateway::serving::ConfigurationError),
+    Configuration(#[from] xmsg_mcp_gateway::serving::StartupError),
     #[error("MCP server failed")]
     Serve(#[source] std::io::Error),
     #[error(transparent)]
@@ -74,7 +74,8 @@ async fn run(cli: Cli) -> Result<(), CommandError> {
             if state.is_some() {
                 return Err(CommandError::UnexpectedState);
             }
-            xmsg_mcp_gateway::serving::Serving::from_owner_file(&config)?
+            xmsg_mcp_gateway::serving::Serving::from_owner_file(&config)
+                .await?
                 .serve()
                 .await
                 .map_err(CommandError::Serve)?;
@@ -85,11 +86,11 @@ async fn run(cli: Cli) -> Result<(), CommandError> {
         }
         (Some(state), Command::MigrateCustody) => {
             Store::open(&state)?.migrate_custody()?;
-            println!("custody schema migrated; startup remains unavailable");
+            println!("custody schema migrated; worker startup remains unavailable");
         }
         (Some(state), Command::MigrateOutbound) => {
             Store::open(&state)?.migrate_outbound()?;
-            println!("outbound schema migrated; startup remains unavailable");
+            println!("outbound schema migrated");
         }
         (
             Some(state),

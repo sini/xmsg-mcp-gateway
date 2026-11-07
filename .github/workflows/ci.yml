@@ -3,7 +3,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
 permissions:
   contents: read
 jobs:
@@ -48,7 +47,7 @@ jobs:
           assert summaries, "no Rust test summaries"
           counts = [tuple(map(int, row)) for row in summaries]
           assert all(not row[1] and not any(row[3:]) for row in counts), "failed or filtered Rust tests"
-          expected_passed, expected_ignored = (62, 42) if sys.platform == "linux" else (61, 0)
+          expected_passed, expected_ignored = (67, 63) if sys.platform == "linux" else (66, 0)
           assert sum(row[0] for row in counts) == expected_passed, "executed Rust test count mismatch"
           assert sum(row[2] for row in counts) == expected_ignored, "private-node deferral count mismatch"
           print(f"Rust test completion guard: {expected_passed} passed; {expected_ignored} private-node cases run in mandatory transport/custody job")
@@ -80,7 +79,7 @@ jobs:
       - name: Real private-node compatibility and provenance controls
         run: |
           python3 scripts/transport_compat.py | tee transport-compat.log
-          grep -Fx 'transport-compat-complete:2-revisions-8-cases' transport-compat.log
+          grep -Fx 'transport-compat-complete:pinned-9-baseline-unix-4' transport-compat.log
           grep -Fx 'copied-control-cached-artifact:refused:real_xmsg' transport-compat.log
       - name: Isolated federation admission source mutants
         run: |
@@ -114,3 +113,16 @@ jobs:
           python3 scripts/outbound_mutants.py | tee outbound-mutants.log
           grep -Fx 'outbound-schema-floor-control:passed' outbound-mutants.log
           grep -Fx 'outbound-mutants-complete:36' outbound-mutants.log
+      - name: MCP startup and messaging completion controls
+        run: |
+          revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')
+          export XMSG_GATEWAY_BIN="$PWD/.artifacts/transport/$revision/xmsg"
+          python3 scripts/wiring_checks.py | tee wiring-checks.log
+          grep -Fx 'copied-control-cached-artifact:refused:messaging' wiring-checks.log
+          grep -Fx 'wiring-checks-complete:20' wiring-checks.log
+      - name: MCP wiring source mutants
+        run: |
+          revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')
+          export XMSG_GATEWAY_BIN="$PWD/.artifacts/transport/$revision/xmsg"
+          python3 scripts/wiring_mutants.py | tee wiring-mutants.log
+          grep -Fx 'wiring-mutants-complete:29' wiring-mutants.log

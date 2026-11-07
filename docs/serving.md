@@ -1,17 +1,80 @@
-# Rust identity listener
+# Rust MCP listener
 
 The Rust listener serves OAuth-protected MCP identity reads with durable local
 grants. Its public resource metadata advertises the canonical resource and issuer
 from the owner's configuration. `initialize`, `ping`, `tools/list`,
 `notifications/initialized` and `xmsg_identity` are implemented. Standard `_meta`
-progress tokens are accepted but unused. Messaging and Events return explicit
-“not yet available” errors until their transport and custody units land.
+progress tokens are accepted but unused. An optional owner-file messaging section
+enables authorized `xmsg_send` and `xmsg_reply`. Events remain unavailable.
 
 The existing xmsg MCP entry point is a harness-associated stdio adapter behind its
 daemon feature. Service-node I/O belongs to the shared `xmsg::client` boundary.
-This unit implements HTTP and authorization and opens no xmsg socket. The identity
+Without a messaging section, serving opens no xmsg socket. The identity
 result describes the verified OAuth service profile and grant revision; it claims
 no bus registration or node address.
+
+## Optional messaging profile
+
+The owner-file constructor is asynchronous: registration, manifest validation and
+schema readiness finish before a router is returned. A broken messaging section
+refuses startup; it never degrades to identity-only serving. A present `null` section
+is invalid. No request can supply messaging configuration or choose a mailbox.
+
+`messaging` denies unknown fields and requires every field below. Values come from
+the owner's dedicated node setup; omitted values are errors.
+
+| Field | Meaning |
+|---|---|
+| `xmsg` | Existing strict connection configuration: service, expected node, daemon UID and socket paths |
+| `manifest.reply_ttl_secs` | Declared effective reply TTL |
+| `manifest.idempotency_ttl_secs` | Declared effective upstream deduplication TTL |
+| `manifest.svc_queue_cap` | Declared effective service queue capacity |
+| `manifest.dedup_lifetime_secs` | Positive gateway retry lifetime, at most the effective upstream deduplication TTL |
+| `manifest.max_framed_bytes` | Complete framed message including the gateway preamble, in bytes |
+| `submission_timeout_ms` | Positive dispatcher deadline, at most 25 seconds |
+| `max_reservations` | Positive retained outbound-operation limit |
+| `max_retained_bytes` | Positive outbound-ledger byte limit |
+
+The service name uses xmsg's shared validator. The retained registration supplies
+the actual mailbox, node and effective TTL/capacity values; config supplies no bus
+address. Explicit custody and outbound migrations are required before messaging.
+Only the owner CLI/store changes per-grant policy. Empty policy advertises no
+messaging tools and refuses messaging calls.
+
+The handler budget must cover initial verification, the store's actual SQLite
+busy wait and the submission deadline, within the existing 60-second ceiling.
+Dispatch runs in a separate task that owns its store and registration context.
+Handler timeout returns pending with the same request ID; disconnect does not
+cancel the outcome commit. Accepted packets cannot be recalled by disconnect.
+
+The complete framed bound must fit the node's reported `max_body_bytes` as well
+as the gateway's 65536-byte ceiling. A missing report or a smaller effective limit
+refuses startup; the gateway never guesses it from launch arguments. The current
+development pin includes registration health and socket activation, with its
+landing on xmsg main still required before the final gateway pin. Live activation
+and exposure gates below still apply.
+
+When messaging is configured, one session owner retains the registration. It
+samples non-consuming registration health once per second and records the bus
+observation in the existing bounded custody ledger. A disconnect invalidates the
+old handle and withdraws dispatch snapshots. Re-registration uses the same
+identity validation and Q1 checks, with a one-second backoff doubling to at most
+30 seconds. Readiness is published only after a durable reconnect record and a
+final health check. Changed limits or ledger failure keep messaging unavailable;
+the manifest is never adapted automatically.
+
+`xmsg_identity` includes `messaging_status` only in this profile: `ready` with the
+registered mailbox, `reconnecting`, or `blocked` with a reason. Sends and replies
+return 503 while unavailable. Recovery never polls or ACKs the mailbox, submits
+work, mints an idempotency key, or authorizes a replay. A caller retries uncertain
+work with its original request ID. Link records retain the custody ledger's
+existing seven-day / 1000-gap bounds and capacity costs; an exhausted ledger also
+blocks messaging until a durable update can succeed.
+
+The detached task's `Send` requirement statically rejects a SQLite Transaction
+held across an await. A trybuild refusal and commit-before-await positive control
+cover that boundary. The runtime ordering mutant instead submits before opening
+the reservation transaction; the crash cell detects the premature delivery.
 
 ## Owner configuration
 
