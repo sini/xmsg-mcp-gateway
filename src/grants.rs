@@ -1,5 +1,5 @@
 use std::fs::OpenOptions;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::auth::VerifiedIdentity;
@@ -10,7 +10,9 @@ use thiserror::Error;
 
 const APPLICATION_ID: i64 = 0x584d4757;
 const SCHEMA_VERSION: i64 = 1;
-pub const MAX_SUPPORTED_SCHEMA_VERSION: i64 = 2;
+pub const CUSTODY_SCHEMA_VERSION: i64 = 2;
+pub const OUTBOUND_SCHEMA_VERSION: i64 = 3;
+pub const MAX_SUPPORTED_SCHEMA_VERSION: i64 = 3;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -46,6 +48,8 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("authority store unavailable")]
     Database(#[from] rusqlite::Error),
+    #[error("service operation is still in progress")]
+    OperationBusy,
 }
 
 pub fn exact_audience(value: &Value, resource: &str) -> bool {
@@ -58,6 +62,7 @@ pub fn exact_audience(value: &Value, resource: &str) -> bool {
 
 pub struct Store {
     pub(crate) connection: Connection,
+    pub(crate) file: PathBuf,
 }
 
 impl Store {
@@ -70,7 +75,7 @@ impl Store {
             options.mode(0o600);
         }
         options.open(file)?;
-        let mut connection = Self::connect(file)?;
+        let mut connection = Self::connect(file, Duration::from_secs(30))?;
         let tx = connection.transaction()?;
         tx.execute_batch(
             "CREATE TABLE grants (
@@ -89,30 +94,47 @@ impl Store {
         tx.pragma_update(None, "application_id", APPLICATION_ID)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            file: file.canonicalize()?,
+        })
     }
 
     pub fn open(file: &Path) -> Result<Self, Error> {
+        Self::open_with_wait(file, Duration::from_secs(30))
+    }
+
+    pub(crate) fn open_nonblocking(file: &Path) -> Result<Self, Error> {
+        Self::open_with_wait(file, Duration::ZERO)
+    }
+
+    fn open_with_wait(file: &Path, wait: Duration) -> Result<Self, Error> {
         tracing::debug!(target: "gateway_policy_store", "open");
-        let connection = Self::connect(file)?;
+        let connection = Self::connect(file, wait)?;
         let application: i64 =
             connection.pragma_query_value(None, "application_id", |r| r.get(0))?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if application != APPLICATION_ID
-            || (version != SCHEMA_VERSION && version != MAX_SUPPORTED_SCHEMA_VERSION)
+            || !(SCHEMA_VERSION..=MAX_SUPPORTED_SCHEMA_VERSION).contains(&version)
         {
             return Err(Error::InvalidStore);
         }
         connection.prepare("SELECT id, service, issuer, resource, subject, hosted_client, revision, enabled FROM grants LIMIT 0")?;
-        if version == MAX_SUPPORTED_SCHEMA_VERSION {
+        if version >= CUSTODY_SCHEMA_VERSION {
             crate::custody::validate_schema(&connection)?;
         }
-        Ok(Self { connection })
+        if version >= OUTBOUND_SCHEMA_VERSION {
+            crate::outbound::validate_schema(&connection)?;
+        }
+        Ok(Self {
+            connection,
+            file: file.canonicalize()?,
+        })
     }
 
-    fn connect(file: &Path) -> Result<Connection, Error> {
+    fn connect(file: &Path, wait: Duration) -> Result<Connection, Error> {
         let connection = Connection::open_with_flags(file, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-        connection.busy_timeout(Duration::from_secs(30))?;
+        connection.busy_timeout(wait)?;
         connection.pragma_update(None, "synchronous", "FULL")?;
         Ok(connection)
     }
@@ -140,6 +162,14 @@ impl Store {
     }
 
     pub fn set_enabled(&mut self, id: &str, revision: i64, enabled: bool) -> Result<i64, Error> {
+        let service: String = self
+            .connection
+            .query_row("SELECT service FROM grants WHERE id=?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()?
+            .ok_or(Error::NoChange)?;
+        let _lease = self.wait_operation_lease(&service, Duration::from_secs(30))?;
         let tx = self.connection.transaction()?;
         let changed = tx.execute(
             "UPDATE grants SET enabled = ?1, revision = revision + 1

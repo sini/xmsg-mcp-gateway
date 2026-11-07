@@ -1,11 +1,16 @@
 """Drive grant-store and CLI source mutations; compilation/timeout is never a kill."""
 
+import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
+
+from artifact_evidence import NONCE, record
 
 ROOT = Path(__file__).resolve().parents[1]
 CASES = [
@@ -76,7 +81,7 @@ CASES = [
     (
         "foreign-store",
         "src/grants.rs",
-        "if application != APPLICATION_ID\n            || (version != SCHEMA_VERSION && version != MAX_SUPPORTED_SCHEMA_VERSION)\n        {",
+        "if application != APPLICATION_ID\n            || !(SCHEMA_VERSION..=MAX_SUPPORTED_SCHEMA_VERSION).contains(&version)\n        {",
         "if false {",
         "grant_core",
         "foreign_store_metadata_is_refused_without_reinitialization",
@@ -117,6 +122,35 @@ CASES = [
 
 
 def run(root, target, test, changed_source, *, test_timeout=30, test_args=()):
+    entry = root / "tests" / f"{target}.rs"
+    original = entry.read_text()
+    variant = hashlib.sha256((root / changed_source).read_bytes()).hexdigest()
+    marker = f"gateway-mutant-arm:{NONCE}:{target}/{test}:{variant}:{uuid.uuid4().hex}"
+    pattern = rf"(\bfn {re.escape(test)}\(\)\s*\{{)"
+    instrumented, count = re.subn(
+        pattern, lambda match: match[0] + f'\n    eprintln!("{marker}");', original
+    )
+    if count != 1:
+        raise RuntimeError(f"named-test marker site missing: {target}/{test}")
+    entry.write_text(instrumented)
+    try:
+        result = run_marked(
+            root,
+            target,
+            test,
+            changed_source,
+            test_timeout=test_timeout,
+            test_args=test_args,
+        )
+        if marker not in result.stdout + result.stderr:
+            raise RuntimeError("compiled arm marker was not executed")
+        print(f"executed {marker}", flush=True)
+        return result
+    finally:
+        entry.write_text(original)
+
+
+def run_marked(root, target, test, changed_source, *, test_timeout, test_args):
     env = {**os.environ, "CARGO_TARGET_DIR": str(ROOT / "target/grant-mutants-build")}
     built = subprocess.run(
         [
@@ -153,6 +187,9 @@ def run(root, target, test, changed_source, *, test_timeout=30, test_args=()):
         and item.get("executable")
     ]
     assert len(executables) == 1, "missing intended test artifact"
+    if executables[0].get("fresh", True):
+        raise RuntimeError("selected test executable was cached")
+    record(root, Path(executables[0]["executable"]), f"{target}/{test}")
     changed_target = (
         "xmsg-mcp-gateway" if changed_source == "src/main.rs" else "xmsg_mcp_gateway"
     )
@@ -163,11 +200,17 @@ def run(root, target, test, changed_source, *, test_timeout=30, test_args=()):
         and item.get("target", {}).get("name") == changed_target
         and not item.get("profile", {}).get("test")
     ]
-    assert len(rebuilt) == 1 and not rebuilt[0].get("fresh", True), (
-        "changed library or application binary was cached"
-    )
+    if len(rebuilt) != 1 or rebuilt[0].get("fresh", True):
+        raise RuntimeError("changed library or application binary was cached")
+    if changed_source == "src/main.rs":
+        record(
+            root,
+            Path(rebuilt[0]["executable"]),
+            f"application/{test}",
+            directories=("src",),
+        )
     return subprocess.run(
-        [executables[0]["executable"], test, "--exact", *test_args],
+        [executables[0]["executable"], test, "--exact", "--show-output", *test_args],
         cwd=root,
         env=env,
         capture_output=True,

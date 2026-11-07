@@ -12,8 +12,11 @@ The Rust [identity listener](docs/serving.md) runs with `cargo run --locked -- s
 
 The Rust library and local owner CLI persist disabled enrollment, exact service /
 issuer / resource / subject / hosted-client bindings, and revision-checked enable
-and disable operations. Runtime ceilings, rebind, audit/replay, guarded HTTP/xmsg dispatch, the
-per-service operation guard are pending. The identity listener provides 401/403/503 mapping. The Python reference uses its separate state store.
+and disable operations. The [outbound custody foundation](docs/outbound.md) adds
+durable send/reply reservations and a per-service operation lease shared with
+owner policy and disable commands. Serving integration, runtime ceilings, rebind
+and audit/replay remain pending. The identity listener provides 401/403/503 mapping.
+The Python reference uses its separate state store.
 
 Build with the toolchain in `rust-toolchain.toml` and the committed Cargo lockfile:
 
@@ -24,6 +27,7 @@ python3 scripts/grant_mutants.py
 install -d -m 700 .state
 cargo run --locked -- --state .state/grants.db init
 cargo run --locked -- --state .state/grants.db migrate-custody
+cargo run --locked -- --state .state/grants.db migrate-outbound
 cargo run --locked -- --state .state/grants.db enroll grant-id binding.json
 cargo run --locked -- --state .state/grants.db enable grant-id 1
 cargo run --locked -- --state .state/grants.db disable grant-id 2

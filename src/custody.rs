@@ -2,7 +2,9 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
 use xmsg::client::{Delivery, RegisteredService};
 
-use crate::grants::{Error as GrantError, Store, MAX_SUPPORTED_SCHEMA_VERSION};
+use crate::grants::{
+    Error as GrantError, Store, CUSTODY_SCHEMA_VERSION, MAX_SUPPORTED_SCHEMA_VERSION,
+};
 
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -123,7 +125,7 @@ pub(crate) fn validate_schema(connection: &Connection) -> Result<(), GrantError>
     Ok(())
 }
 
-fn fingerprint(parts: &[&str]) -> String {
+pub(crate) fn fingerprint(parts: &[&str]) -> String {
     let mut digest = Sha256::new();
     for part in parts {
         digest.update((part.len() as u64).to_be_bytes());
@@ -186,7 +188,7 @@ impl Store {
         let version: i64 = self
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version != crate::grants::MAX_SUPPORTED_SCHEMA_VERSION {
+        if !(CUSTODY_SCHEMA_VERSION..=MAX_SUPPORTED_SCHEMA_VERSION).contains(&version) {
             return Err(Error::MigrationRequired);
         }
         Ok(())
@@ -322,7 +324,7 @@ impl Store {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version != MAX_SUPPORTED_SCHEMA_VERSION - 1 {
+        if version != CUSTODY_SCHEMA_VERSION - 1 {
             return Err(GrantError::NoChange.into());
         }
         tx.execute_batch(
@@ -352,7 +354,7 @@ impl Store {
                 gap_end INTEGER NOT NULL, expires_at INTEGER NOT NULL);
              INSERT INTO custody_counters VALUES ('expired_metadata', 0), ('expired_content', 0), ('expired_tombstones', 0), ('expired_pending', 0);",
         )?;
-        tx.pragma_update(None, "user_version", MAX_SUPPORTED_SCHEMA_VERSION)?;
+        tx.pragma_update(None, "user_version", CUSTODY_SCHEMA_VERSION)?;
         tx.commit()?;
         Ok(())
     }
@@ -373,7 +375,7 @@ impl Store {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version != MAX_SUPPORTED_SCHEMA_VERSION {
+        if !(CUSTODY_SCHEMA_VERSION..=MAX_SUPPORTED_SCHEMA_VERSION).contains(&version) {
             return Err(Error::MigrationRequired);
         }
         expire(&tx, limits, now)?;

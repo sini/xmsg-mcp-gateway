@@ -175,7 +175,7 @@ def main():
         for name in ("Cargo.toml", "Cargo.lock"):
             shutil.copyfile(ROOT / name, root / name)
         for name in ("src", "tests"):
-            shutil.copytree(ROOT / name, root / name)
+            shutil.copytree(ROOT / name, root / name, copy_function=shutil.copyfile)
         for name, filename, old, new, test in CASES:
             file = root / filename
             original = file.read_text()
