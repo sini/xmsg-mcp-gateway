@@ -1,6 +1,8 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -11,8 +13,8 @@ pub struct Node {
     pub config: XmsgConfig,
     child: Child,
     _temp: tempfile::TempDir,
-    federated: bool,
-    port: u16,
+    listener: Option<std::net::TcpListener>,
+    notify: Option<tokio::net::UnixDatagram>,
     reply_ttl_secs: u64,
 }
 
@@ -89,7 +91,7 @@ pub struct Prepared {
     pub port: u16,
     pub uri: String,
     temp: tempfile::TempDir,
-    federated: bool,
+    listener: Option<std::net::TcpListener>,
     reply_ttl_secs: u64,
 }
 impl Prepared {
@@ -134,15 +136,16 @@ impl Prepared {
             max_frame_bytes: 1_048_576,
             operation_timeout_ms: 5000,
         };
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        let listener = authority.map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap());
+        let port = listener
+            .as_ref()
+            .map_or(0, |socket| socket.local_addr().unwrap().port());
         Self {
             config,
             port,
             uri,
             temp,
-            federated: authority.is_some(),
+            listener,
             reply_ttl_secs: 604800,
         }
     }
@@ -161,11 +164,27 @@ impl Prepared {
         );
     }
     pub async fn launch(self, binary: &Path) -> Node {
+        let baseline = include_str!("../../ci/xmsg-pin.toml")
+            .lines()
+            .find_map(|line| line.strip_prefix("baseline_revision = "))
+            .unwrap()
+            .trim_matches('"');
+        let version = Command::new(binary).arg("--version").output().unwrap();
+        assert!(version.status.success());
+        let legacy =
+            String::from_utf8(version.stdout).unwrap().trim() == format!("xmsg 0.1.0+{baseline}");
+        assert!(
+            !legacy || self.listener.is_none(),
+            "baseline has only Unix-socket compatibility cells"
+        );
+        let notify = (!legacy).then(|| {
+            tokio::net::UnixDatagram::bind(self.temp.path().join("run/notify.sock")).unwrap()
+        });
         let mut launch = command(
             binary,
             self.temp.path(),
-            self.federated,
-            self.port,
+            self.listener.as_ref(),
+            notify.is_some(),
             self.reply_ttl_secs,
         );
         launch.arg("--svc-exe").arg(format!(
@@ -177,8 +196,8 @@ impl Prepared {
             config: self.config,
             child: launch.spawn().unwrap(),
             _temp: self.temp,
-            federated: self.federated,
-            port: self.port,
+            listener: self.listener,
+            notify,
             reply_ttl_secs: self.reply_ttl_secs,
         };
         node.ready().await;
@@ -189,12 +208,24 @@ impl Prepared {
 fn command(
     binary: &Path,
     directory: &Path,
-    federated: bool,
-    port: u16,
+    listener: Option<&std::net::TcpListener>,
+    notify: bool,
     reply_ttl_secs: u64,
 ) -> Command {
     let run = directory.join("run");
-    let mut command = Command::new(binary);
+    let mut command = if listener.is_some() {
+        let mut shell = Command::new("/bin/sh");
+        shell
+            .args([
+                "-c",
+                "LISTEN_PID=$$; export LISTEN_PID; exec \"$@\"",
+                "gateway-test-node",
+            ])
+            .arg(binary);
+        shell
+    } else {
+        Command::new(binary)
+    };
     command
         .env_clear()
         .env("HOME", directory)
@@ -226,12 +257,26 @@ fn command(
                 .open(directory.join("daemon.log"))
                 .unwrap(),
         ));
-    if federated {
+    if notify {
+        command.env("NOTIFY_SOCKET", run.join("notify.sock"));
+    }
+    if let Some(listener) = listener {
+        let descriptor = listener.as_raw_fd();
+        unsafe {
+            command.pre_exec(move || {
+                if libc::dup2(descriptor, 3) < 0 || libc::fcntl(3, libc::F_SETFD, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
         command
+            .env("LISTEN_FDS", "1")
+            .env("LISTEN_FDNAMES", "fed")
             .arg("--peers-file")
             .arg(directory.join("peers.json"))
             .arg("--fed-listen")
-            .arg(format!("127.0.0.1:{port}"));
+            .arg(listener.local_addr().unwrap().to_string());
     }
     command
 }
@@ -264,8 +309,8 @@ impl Node {
         let mut launch = command(
             binary,
             self._temp.path(),
-            self.federated,
-            self.port,
+            self.listener.as_ref(),
+            self.notify.is_some(),
             self.reply_ttl_secs,
         );
         launch.arg("--svc-exe").arg(format!(
@@ -277,6 +322,27 @@ impl Node {
         self.ready().await;
     }
     async fn ready(&mut self) {
+        if let Some(notify) = &self.notify {
+            let mut message = [0; 4096];
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    let count = notify.recv(&mut message).await.unwrap();
+                    if message[..count]
+                        .split(|byte| *byte == b'\n')
+                        .any(|field| field == b"READY=1")
+                    {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("fixture daemon sd_notify readiness deadline");
+            assert!(
+                self.child.try_wait().unwrap().is_none(),
+                "fixture daemon exited after readiness"
+            );
+            return;
+        }
         let deadline = Instant::now() + Duration::from_secs(15);
         while !self.config.register_socket.exists() || !self.config.agent_socket.exists() {
             assert!(

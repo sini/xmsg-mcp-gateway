@@ -14,13 +14,26 @@ source change: embedding that revision in the CLI version. It builds both privat
 daemons from source. The client-only normal dependency graph excludes daemon
 SQL, TLS and HTTP dependencies.
 
-The mandatory Linux transport job runs eight cases against each revision,
-including a test-profile guard. Seven completion markers additionally prevent an
-early-return test from becoming a false success. Missing binaries, a mismatched
+The mandatory Linux transport job requires nine cases against the pinned daemon,
+including a test-profile guard and a socket-activation restart control. Eight
+completion markers additionally prevent an early-return test from becoming a
+false success. The previous 9b5bd5e daemon runs four Unix-socket cases: the profile
+guard, registration/agent round trip, node mismatch and poll/ACK redelivery after
+restart. Its five federation/socket-activation cases are explicitly filtered and
+the count guard requires exactly four passed and five filtered. Federation returns
+to the baseline lane when that baseline advances to a socket-activation daemon.
+Missing binaries, a mismatched
 binary revision and a mismatched actual source revision must refuse. A copied
 consumer with its expected-node check removed must fail the named node-mismatch
-assertion. Portable unit tests run separately on Linux and macOS; the seven
-Linux real-node cases deferred there all run in the mandatory transport job.
+assertion. Portable unit tests run separately on Linux and macOS.
+
+The parent fixture holds the bound federation listener for the node's lifetime,
+including restarts. It passes that listener through `LISTEN_FDS` with the name
+`fed`, sets `LISTEN_PID` in the child before exec, and waits for `READY=1` on its
+own `NOTIFY_SOCKET`. It never drops a listener and attempts to reclaim its port.
+The old baseline creates only Unix sockets and waits for those sockets to appear;
+it has no TCP fallback. The activation control keeps another ephemeral port
+occupied and proves that both initial startup and restart use the held listener.
 
 Federation tests generate an ephemeral CA and two certified nodes, with their own
 private directories, databases, sockets and loopback listeners. Each admission

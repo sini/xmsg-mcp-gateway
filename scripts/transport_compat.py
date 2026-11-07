@@ -21,6 +21,7 @@ MARKERS = [
     "federation-targets",
     "federation-from",
     "restart-redelivery",
+    "socket-activation",
 ]
 
 
@@ -192,7 +193,7 @@ def refuse_cached_control(root, *, target, target_dir):
     print(f"copied-control-cached-artifact:refused:{target}", flush=True)
 
 
-def live(executable, binary, revision, *, case=None, skip=None):
+def live(executable, binary, revision, *, case=None, skip=None, baseline=False):
     env = {
         **os.environ,
         "XMSG_GATEWAY_REQUIRED": "1",
@@ -207,17 +208,25 @@ def live(executable, binary, revision, *, case=None, skip=None):
         args.extend([case, "--exact"])
     if skip:
         args.extend(["--skip", skip])
+    if baseline:
+        args.extend(["--skip", "federation_", "--skip", "socket_activation_"])
     return subprocess.run(
         args, cwd=ROOT, env=env, text=True, capture_output=True, timeout=120
     )
 
 
-def require_complete(result):
+def require_complete(result, *, baseline=False):
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert (
-        "8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out" in result.stdout
-    ), "mandatory live case count/skip mismatch"
+            "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out"
+        if baseline
+            else "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
+    ) in result.stdout, "mandatory live case count/skip mismatch"
     for marker in MARKERS:
+        if baseline and (
+            marker.startswith("federation-") or marker == "socket-activation"
+        ):
+            continue
         assert result.stdout.count(f"gateway-real-node-complete:{marker}") == 1, (
             f"mandatory live completion missing: {marker}"
         )
@@ -341,11 +350,13 @@ def main():
         return
     executable = build_test()
     for revision, binary in binaries.items():
-        result = live(executable, binary, revision)
+        baseline = revision == pin["baseline_revision"]
+        result = live(executable, binary, revision, baseline=baseline)
         (evidence / f"{revision}.log").write_text(result.stdout + result.stderr)
-        require_complete(result)
+        require_complete(result, baseline=baseline)
         print(
-            f"{revision}: mandatory real-node compatibility 8/8 completed", flush=True
+            f"{revision}: mandatory real-node compatibility {'4/4 Unix-only' if baseline else '9/9'} completed",
+            flush=True,
         )
     case = "pinned_node_roundtrip_uses_the_registered_service_identity"
     missing = live(executable, None, pin["revision"], case=case)
@@ -364,7 +375,7 @@ def main():
         flush=True,
     )
     consumer_controls(binaries[pin["revision"]], pin["revision"])
-    print("transport-compat-complete:2-revisions-8-cases", flush=True)
+    print("transport-compat-complete:pinned-9-baseline-unix-4", flush=True)
 
 
 if __name__ == "__main__":
