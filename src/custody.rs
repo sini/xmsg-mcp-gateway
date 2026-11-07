@@ -201,19 +201,29 @@ impl Store {
         limits: &Limits,
         now: i64,
     ) -> Result<(), Error> {
+        self.record_bus_link(&scope.bus_instance, connected, limits, now)
+    }
+
+    pub fn record_bus_link(
+        &mut self,
+        bus: &str,
+        connected: bool,
+        limits: &Limits,
+        now: i64,
+    ) -> Result<(), Error> {
         limits.validate(now)?;
-        if scope.bus_instance.trim().is_empty() {
+        if bus.trim().is_empty() {
             return Err(Error::Configuration);
         }
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        ensure_link(&tx, &scope.bus_instance, limits)?;
+        ensure_link(&tx, bus, limits)?;
         expire(&tx, limits, now)?;
         let (was_connected, last_observed, disconnected): (bool, Option<i64>, Option<i64>) = tx
             .query_row(
             "SELECT connected, last_observed_at, disconnected_at FROM custody_links WHERE bus=?1",
-            [&scope.bus_instance],
+            [bus],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
         let observed = now.max(last_observed.unwrap_or(now));
@@ -227,18 +237,18 @@ impl Store {
                 let expiry = observed
                     .checked_add(limits.metadata_retention_secs)
                     .ok_or(Error::Configuration)?;
-                tx.execute("DELETE FROM custody_gaps WHERE bus=?1 AND gap_end-gap_start<=?2 AND expires_at<=?3", params![scope.bus_instance, observed-start, expiry])?;
+                tx.execute("DELETE FROM custody_gaps WHERE bus=?1 AND gap_end-gap_start<=?2 AND expires_at<=?3", params![bus, observed-start, expiry])?;
                 let count: i64 =
                     tx.query_row("SELECT COUNT(*) FROM custody_gaps", [], |row| row.get(0))?;
                 if count >= limits.max_gap_intervals {
                     return Err(Error::MetadataFull);
                 }
-                tx.execute("INSERT INTO custody_gaps(bus,gap_start,gap_end,expires_at) VALUES (?1,?2,?3,?4)", params![scope.bus_instance, start, observed, expiry])?;
+                tx.execute("INSERT INTO custody_gaps(bus,gap_start,gap_end,expires_at) VALUES (?1,?2,?3,?4)", params![bus, start, observed, expiry])?;
             }
         }
         tx.execute(
             "UPDATE custody_links SET last_observed_at=?2 WHERE bus=?1",
-            params![scope.bus_instance, observed],
+            params![bus, observed],
         )?;
         if was_connected == connected {
             tx.commit()?;
@@ -247,10 +257,10 @@ impl Store {
         if connected {
             tx.execute(
                 "UPDATE custody_links SET connected=1, reconnected_at=?2 WHERE bus=?1",
-                params![scope.bus_instance, now],
+                params![bus, now],
             )?;
         } else {
-            tx.execute("UPDATE custody_links SET disconnected_at=CASE WHEN connected=1 THEN ?2 ELSE disconnected_at END, outages=outages+connected, connected=0 WHERE bus=?1", params![scope.bus_instance, last_observed.unwrap_or(observed)])?;
+            tx.execute("UPDATE custody_links SET disconnected_at=CASE WHEN connected=1 THEN ?2 ELSE disconnected_at END, outages=outages+connected, connected=0 WHERE bus=?1", params![bus, last_observed.unwrap_or(observed)])?;
         }
         tx.commit()?;
         Ok(())
