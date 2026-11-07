@@ -6,8 +6,10 @@ use xmsg_mcp_gateway::xmsg_config::XmsgConfig;
 
 pub struct AgentStall {
     entered: Option<oneshot::Receiver<serde_json::Value>>,
-    release: Option<oneshot::Sender<()>>,
+    release: Option<oneshot::Sender<bool>>,
     worker: Option<tokio::task::JoinHandle<()>>,
+    socket: std::path::PathBuf,
+    backend: std::path::PathBuf,
 }
 
 impl AgentStall {
@@ -21,6 +23,7 @@ impl AgentStall {
             .unwrap();
         let (entered_tx, entered_rx) = oneshot::channel();
         let (release_tx, release_rx) = oneshot::channel();
+        let restore_backend = backend.clone();
         let worker = tokio::spawn(async move {
             let mut entered = Some(entered_tx);
             let mut release = Some(release_rx);
@@ -44,7 +47,10 @@ impl AgentStall {
                         .unwrap()
                         .send(serde_json::from_str(&response).unwrap())
                         .unwrap();
-                    release.take().unwrap().await.unwrap();
+                    if release.take().unwrap().await.unwrap() {
+                        // A cancelled inline caller may have closed its connection.
+                        let _ = socket.get_mut().write_all(response.as_bytes()).await;
+                    }
                     return;
                 }
                 socket
@@ -58,6 +64,8 @@ impl AgentStall {
             entered: Some(entered_rx),
             release: Some(release_tx),
             worker: Some(worker),
+            socket: config.agent_socket.clone(),
+            backend: restore_backend,
         }
     }
 
@@ -65,9 +73,10 @@ impl AgentStall {
         self.entered.take().unwrap().await.unwrap()
     }
 
-    pub async fn finish(mut self) {
-        self.release.take().unwrap().send(()).unwrap();
+    pub async fn finish(mut self, forward_response: bool) {
+        self.release.take().unwrap().send(forward_response).unwrap();
         self.worker.take().unwrap().await.unwrap();
+        std::fs::rename(&self.backend, &self.socket).unwrap();
     }
 }
 

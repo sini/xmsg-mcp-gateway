@@ -1,5 +1,7 @@
 #![cfg(target_os = "linux")]
 
+#[path = "common/agent_stall.rs"]
+mod agent_stall;
 #[allow(dead_code)]
 #[path = "common/provider.rs"]
 mod provider;
@@ -116,7 +118,7 @@ async fn real_mcp_send_keeps_request_identity_and_owner_policy() {
         let (_, response, probe) = serving_fixture::request(&serving, "good-token", missing).await;
         assert_eq!(
             response["error"]["code"], -32602,
-            "missing request_id was derived from a stringified RPC id"
+            "request_id came from outside strict tool arguments"
         );
         assert_eq!(probe.dispatches.load(Ordering::SeqCst), 0);
         assert_eq!(probe.opens.load(Ordering::SeqCst), 1);
@@ -128,7 +130,11 @@ async fn real_mcp_send_keeps_request_identity_and_owner_policy() {
     denied["params"]["arguments"]["request_id"] = json!("new-denied-operation");
     let (status, _, probe) = serving_fixture::request(&serving, "good-token", denied).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(probe.dispatches.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        probe.dispatches.load(Ordering::SeqCst),
+        0,
+        "empty policy reached dispatcher"
+    );
     assert_eq!(probe.opens.load(Ordering::SeqCst), 1);
     let receipt: Receipt =
         serde_json::from_value(first["result"]["structuredContent"]["receipt"].clone()).unwrap();
@@ -145,4 +151,75 @@ async fn real_mcp_send_keeps_request_identity_and_owner_policy() {
         "duplicate logical delivery"
     );
     println!("gateway-wiring-complete:mcp-request-id-policy");
+}
+
+#[tokio::test]
+#[ignore = "requires the revision-verified private daemon in the wiring profile"]
+async fn cancelling_a_handler_does_not_cancel_the_accepted_operation() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+    let node = real_node::Node::start(&real_node::pinned_binary()).await;
+    let mut fixture = serving_fixture::Fixture::new();
+    owner(&fixture, &["migrate-custody"]);
+    owner(&fixture, &["migrate-outbound"]);
+    policy(
+        &fixture,
+        "2",
+        json!({"send":{"targets":["gateway@gateway.fixture"],
+        "required_scope":"identity:read"},"reply":null}),
+    );
+    configure(&mut fixture, &node);
+    let serving = fixture.serving().await;
+    let mut stall = agent_stall::AgentStall::install(&node.config, "send");
+    let send = json!({"jsonrpc":"2.0","id":201,"method":"tools/call",
+        "params":{"name":"xmsg_send","arguments":{"request_id":"cancel-operation",
+            "to":"gateway@gateway.fixture","text":"accepted before handler cancellation"}}});
+    let request = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("host", "gateway.example")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer good-token")
+        .body(Body::from(send.to_string()))
+        .unwrap();
+    let handler = tokio::spawn(serving.router().oneshot(request));
+    let accepted = tokio::time::timeout(std::time::Duration::from_secs(5), stall.reached())
+        .await
+        .unwrap();
+    handler.abort();
+    assert!(handler.await.unwrap_err().is_cancelled());
+    stall.finish(true).await;
+    let recorded = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let connection = rusqlite::Connection::open(&fixture.store_file).unwrap();
+            let state: (String, bool) = connection.query_row(
+                "SELECT state, receipt IS NOT NULL FROM outbound_reservations WHERE request_id='cancel-operation'",
+                [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+            if state.0 == "confirmed" && state.1 { return; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await;
+    assert!(
+        recorded.is_ok(),
+        "detached dispatch did not commit before retry"
+    );
+    let (status, response, _) = serving_fixture::request(&serving, "good-token", send).await;
+    assert_eq!(status, StatusCode::OK);
+    let receipt: Receipt =
+        serde_json::from_value(response["result"]["structuredContent"]["receipt"].clone()).unwrap();
+    let Receipt::Send(receipt) = receipt else {
+        panic!("wrong receipt vocabulary")
+    };
+    assert_eq!(accepted["status"], "ok");
+    let mut accepted = accepted;
+    accepted.as_object_mut().unwrap().remove("status");
+    let accepted: xmsg::client::SendResult = serde_json::from_value(accepted).unwrap();
+    assert_eq!(receipt, accepted);
+    drop(serving);
+    let mut mailbox = node.config.register().await.unwrap();
+    let delivery = mailbox.poll(1).await.unwrap().unwrap();
+    assert_eq!(delivery.message_id(), receipt.message_id);
+    mailbox.ack(delivery.message_id()).await.unwrap();
+    assert!(mailbox.poll(0).await.unwrap().is_none());
+    println!("gateway-wiring-complete:handler-cancellation");
 }
