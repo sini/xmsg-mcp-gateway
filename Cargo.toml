@@ -9,7 +9,7 @@ license = "MIT"
 [dependencies]
 libc = "0.2"
 sha2 = "0.10"
-xmsg = { git = "https://github.com/sini/xmsg", rev = "f7f163efb72910967c829517792016acdbc7856b", default-features = false, features = ["client"] }
+xmsg = { git = "https://github.com/sini/xmsg", rev = "7d9d1ed3f7c37c3433a95c65570892736fd914ab", default-features = false, features = ["client"] }
 clap = { version = "4.5", features = ["derive"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }

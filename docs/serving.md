@@ -202,3 +202,12 @@ The next serving unit also carries these findings:
 
 The provider/broker, transport, custody and hosted feasibility gates above remain
 required independently of these connection and serving checks.
+
+Registration health errors do not prove that an operation was never submitted.
+The session owner withdraws an unhealthy handle and re-registers through the
+same identity and effective-limit checks, regardless of the original transport
+error. A health probe can replace that error, so recovery never uses its exact
+variant to infer acceptance. Once submission may have begun, every transport
+error, including `Disconnected`, leaves the durable reservation unknown. A
+retry uses its stored idempotency key within the dedup lifetime; after expiry
+it requires reconciliation. Successful receipts remain confirmed.
