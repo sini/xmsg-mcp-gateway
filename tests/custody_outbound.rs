@@ -1490,6 +1490,7 @@ async fn busy_at_outcome(after_acceptance: bool) {
         "must survive a busy outcome commit",
     );
     let operation_limits = limits();
+    let dispatch_started = std::time::Instant::now();
     let first = dispatch(
         &mut store,
         &endpoint,
@@ -1508,6 +1509,13 @@ async fn busy_at_outcome(after_acceptance: bool) {
         },
     })
     .await;
+    if !after_acceptance {
+        assert!(
+            dispatch_started.elapsed() <= std::time::Duration::from_millis(750),
+            "pre-submit BUSY exceeded its bounded wait: {:?}",
+            dispatch_started.elapsed()
+        );
+    }
     let sql = rusqlite::Connection::open(&fixture.store_file).unwrap();
     sql.busy_timeout(std::time::Duration::ZERO).unwrap();
     let original_id = if after_acceptance {
