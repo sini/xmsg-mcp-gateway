@@ -5,7 +5,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from transport_compat import ROOT, build_test, live, pins
+from transport_compat import ROOT, build_test, failure_tail, live, pins
 
 MARKERS = (
     "child-control",
@@ -51,7 +51,7 @@ def main():
     assert (
         missing.returncode == 101
         and "required pinned xmsg binary missing" in missing.stderr
-    ), "outbound missing-binary control escaped"
+    ), ("outbound missing-binary control escaped", failure_tail(missing))
     with tempfile.TemporaryDirectory(prefix="gateway-outbound-skip-") as directory:
         root = Path(directory)
         for name in ("Cargo.toml", "Cargo.lock"):
@@ -72,7 +72,10 @@ def main():
             binary,
             pin["revision"],
         )
-        assert skipped.returncode == 0, "skip control failed before the guard"
+        assert skipped.returncode == 0, (
+            "skip control failed before the guard",
+            failure_tail(skipped),
+        )
         try:
             require_complete(skipped)
         except AssertionError as error:

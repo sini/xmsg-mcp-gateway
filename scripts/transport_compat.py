@@ -22,6 +22,10 @@ MARKERS = [
 ]
 
 
+def failure_tail(result):
+    return (result.returncode, result.stdout[-4000:], result.stderr[-4000:])
+
+
 def command(args, cwd, *, env=None, timeout=300):
     result = subprocess.run(
         args, cwd=cwd, env=env, text=True, capture_output=True, timeout=timeout
@@ -199,7 +203,8 @@ def consumer_controls(binary, revision):
         entry.write_text(original.replace(before, before + "\n    return;", 1))
         skipped = live(build_test(fixture), binary, revision)
         assert skipped.returncode == 0, (
-            "early-return control failed before completion guard"
+            "early-return control failed before completion guard",
+            failure_tail(skipped),
         )
         try:
             require_complete(skipped)

@@ -5,7 +5,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from transport_compat import ROOT, build_test, live, pins
+from transport_compat import ROOT, build_test, failure_tail, live, pins
 
 MARKERS = [
     "commit-before-ack",
@@ -59,7 +59,7 @@ def main():
     assert (
         missing.returncode == 101
         and "required pinned xmsg binary missing" in missing.stderr
-    ), "custody missing-binary control was not refused"
+    ), ("custody missing-binary control was not refused", failure_tail(missing))
     with tempfile.TemporaryDirectory(
         prefix="gateway-custody-skip-control-"
     ) as directory:
@@ -84,7 +84,10 @@ def main():
             binary,
             pin["revision"],
         )
-        assert control.returncode == 0, "skip control did not reach completion guard"
+        assert control.returncode == 0, (
+            "skip control did not reach completion guard",
+            failure_tail(control),
+        )
         try:
             require_complete(control)
         except AssertionError as error:
