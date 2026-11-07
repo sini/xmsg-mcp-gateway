@@ -210,7 +210,7 @@ def run_marked(root, target, test, changed_source, *, test_timeout, test_args):
             directories=("src",),
         )
     return subprocess.run(
-        [executables[0]["executable"], test, "--exact", "--nocapture", *test_args],
+        [executables[0]["executable"], test, "--exact", "--show-output", *test_args],
         cwd=root,
         env=env,
         capture_output=True,
