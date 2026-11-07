@@ -212,7 +212,9 @@ def run_marked(root, target, test, changed_source, *, test_timeout, test_args):
         and item.get("target", {}).get("name") == changed_target
         and not item.get("profile", {}).get("test")
     ]
-    if len(rebuilt) != 1 or rebuilt[0].get("fresh", True):
+    if not changed_source.startswith("tests/") and (
+        len(rebuilt) != 1 or rebuilt[0].get("fresh", True)
+    ):
         raise RuntimeError("changed library or application binary was cached")
     if changed_source == "src/main.rs":
         record(

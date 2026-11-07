@@ -44,6 +44,13 @@ pub fn private_file(file: &Path, bytes: &[u8]) {
 
 impl Fixture {
     pub fn new() -> Self {
+        // Keep the default registered while scoped probes observe background tasks.
+        static TRACING: std::sync::Once = std::sync::Once::new();
+        TRACING.call_once(|| {
+            let _ = tracing::subscriber::set_global_default(
+                tracing::subscriber::NoSubscriber::default(),
+            );
+        });
         let keys = provider::TlsFixture::new();
         let binding = Binding {
             service: "gateway".into(),

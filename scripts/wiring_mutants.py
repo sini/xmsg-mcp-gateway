@@ -305,8 +305,21 @@ CASES.extend(
 )
 
 
+CASES.append(
+    (
+        "scoped-trace-observation",
+        "tests/common/serving_fixture.rs",
+        "tracing::subscriber::set_global_default(\n                tracing::subscriber::NoSubscriber::default(),\n            )",
+        "Ok::<(), ()>(())",
+        "messaging",
+        "mcp_replies_use_owned_custody_and_the_original_bus_receipt",
+        "left: 0",
+    )
+)
+
+
 def main():
-    if len(CASES) != 28:
+    if len(CASES) != 29:
         raise RuntimeError("wiring mutant inventory drift")
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", choices=[case[0] for case in CASES])
