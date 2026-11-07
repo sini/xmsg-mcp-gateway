@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::Read;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::to_bytes;
@@ -17,6 +17,8 @@ use serde_json::{json, Map, Value};
 
 use crate::auth::{self, VerifiedIdentity, Verifier, VerifierConfig};
 use crate::grants::{Authorization, Binding, Error as GrantError, Store};
+use crate::outbound::{self, Outcome, Policy};
+use crate::xmsg_config::{DeploymentManifest, ManifestError, XmsgConfig};
 
 const MAX_REQUEST: usize = 65_536;
 const VERSIONS: [&str; 3] = ["2025-03-26", "2025-06-18", "2025-11-25"];
@@ -24,6 +26,45 @@ const VERSIONS: [&str; 3] = ["2025-03-26", "2025-06-18", "2025-11-25"];
 #[derive(Debug, thiserror::Error)]
 #[error("invalid or unavailable owner serving configuration")]
 pub struct ConfigurationError;
+
+#[derive(Debug, thiserror::Error)]
+pub enum StartupError {
+    #[error(transparent)]
+    Configuration(#[from] ConfigurationError),
+    #[error("invalid xmsg connection configuration or service name")]
+    ConnectionConfiguration,
+    #[error("xmsg registration failed")]
+    Registration(#[source] xmsg::client::ClientError),
+    #[error(transparent)]
+    Manifest(#[from] ManifestError),
+    #[error("messaging store is not ready: {0}")]
+    Store(#[source] outbound::Error),
+    #[error("request budget must cover verification, store wait and submission")]
+    RequestBudget,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MessagingConfiguration {
+    xmsg: XmsgConfig,
+    manifest: DeploymentManifest,
+    submission_timeout_ms: u64,
+    max_reservations: i64,
+    max_retained_bytes: i64,
+}
+
+fn present_messaging<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<MessagingConfiguration>, D::Error> {
+    MessagingConfiguration::deserialize(deserializer).map(Some)
+}
+
+struct Messaging {
+    _registration: tokio::sync::Mutex<xmsg::client::RegisteredService>,
+    endpoint: outbound::Endpoint,
+    bus: String,
+    limits: outbound::Limits,
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -34,6 +75,8 @@ struct Configuration {
     allowed_hosts: Vec<String>,
     allowed_origins: Vec<String>,
     verifier: VerifierConfig,
+    #[serde(default, deserialize_with = "present_messaging")]
+    messaging: Option<MessagingConfiguration>,
 }
 
 struct App {
@@ -46,6 +89,7 @@ struct App {
     issuer: String,
     scopes: Vec<String>,
     challenge: HeaderValue,
+    messaging: Option<Messaging>,
 }
 
 pub struct Serving {
@@ -60,17 +104,17 @@ fn resolve_profile_path(directory: &Path, file: &mut PathBuf) {
 }
 
 impl Serving {
-    pub async fn from_owner_file(config_file: &Path) -> Result<Self, ConfigurationError> {
+    pub async fn from_owner_file(config_file: &Path) -> Result<Self, StartupError> {
         let mut file = File::open(config_file).map_err(|_| ConfigurationError)?;
         let metadata = file.metadata().map_err(|_| ConfigurationError)?;
         if !metadata.is_file() || metadata.len() > MAX_REQUEST as u64 {
-            return Err(ConfigurationError);
+            return Err(ConfigurationError.into());
         }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             if metadata.permissions().mode() & 0o077 != 0 {
-                return Err(ConfigurationError);
+                return Err(ConfigurationError.into());
             }
         }
         let mut raw = Vec::new();
@@ -79,7 +123,7 @@ impl Serving {
             .read_to_end(&mut raw)
             .map_err(|_| ConfigurationError)?;
         if raw.len() > MAX_REQUEST {
-            return Err(ConfigurationError);
+            return Err(ConfigurationError.into());
         }
         let mut config: Configuration =
             serde_json::from_slice(&raw).map_err(|_| ConfigurationError)?;
@@ -89,6 +133,14 @@ impl Serving {
         resolve_profile_path(directory, &mut config.verifier.client_secret_file);
         if let Some(file) = &mut config.verifier.root_certificate_file {
             resolve_profile_path(directory, file);
+        }
+        if let Some(messaging) = &mut config.messaging {
+            resolve_profile_path(directory, &mut messaging.xmsg.register_socket);
+            resolve_profile_path(directory, &mut messaging.xmsg.agent_socket);
+            messaging
+                .xmsg
+                .validate()
+                .map_err(|_| StartupError::ConnectionConfiguration)?;
         }
         if !config.bind.ip().is_loopback()
             || config.allowed_hosts.is_empty()
@@ -104,13 +156,13 @@ impl Serving {
                 .iter()
                 .any(|scope| scope == "identity:read")
         {
-            return Err(ConfigurationError);
+            return Err(ConfigurationError.into());
         }
         let mut metadata_url =
             reqwest::Url::parse(&config.verifier.resource).map_err(|_| ConfigurationError)?;
         let resource_path = metadata_url.path().trim_end_matches('/').to_owned();
         if resource_path.contains(['{', '}', '*']) || resource_path.starts_with("/.well-known/") {
-            return Err(ConfigurationError);
+            return Err(ConfigurationError.into());
         }
         metadata_url.set_path(&format!(
             "{resource_path}/.well-known/oauth-protected-resource"
@@ -130,10 +182,63 @@ impl Serving {
             subject: config.verifier.subject.clone(),
             hosted_client: config.verifier.hosted_client.clone(),
         };
+        let verification_timeout_ms = config.verifier.timeout_ms;
         let verifier = Verifier::from_config(config.verifier).map_err(|_| ConfigurationError)?;
-        Store::open(&config.grant_store)
-            .and_then(|store| store.validate_profile(&profile))
+        let store = Store::open(&config.grant_store).map_err(|_| ConfigurationError)?;
+        store
+            .validate_profile(&profile)
             .map_err(|_| ConfigurationError)?;
+        let messaging = if let Some(messaging) = config.messaging {
+            store
+                .require_outbound_ready()
+                .map_err(StartupError::Store)?;
+            let limits = outbound::Limits {
+                dedup_lifetime_secs: i64::try_from(messaging.manifest.dedup_lifetime_secs)
+                    .map_err(|_| ManifestError::DedupLifetime)?,
+                max_framed_bytes: messaging.manifest.max_framed_bytes,
+                timeout: Duration::from_millis(messaging.submission_timeout_ms),
+                max_reservations: messaging.max_reservations,
+                max_retained_bytes: messaging.max_retained_bytes,
+            };
+            limits.validate().map_err(StartupError::Store)?;
+            let store_wait_ms: i64 = store
+                .connection
+                .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+                .map_err(|_| ConfigurationError)?;
+            let minimum_budget = verification_timeout_ms
+                .checked_add(u64::try_from(store_wait_ms).map_err(|_| StartupError::RequestBudget)?)
+                .and_then(|value| value.checked_add(messaging.submission_timeout_ms))
+                .ok_or(StartupError::RequestBudget)?;
+            if config.request_timeout_ms < minimum_budget {
+                return Err(StartupError::RequestBudget);
+            }
+            let registered = messaging
+                .xmsg
+                .register()
+                .await
+                .map_err(StartupError::Registration)?;
+            messaging.manifest.check(
+                registered.reply_ttl_secs(),
+                registered.idempotency_ttl_secs(),
+                registered.svc_queue_cap(),
+                // Replace with Registration.max_body_bytes at the final XF4 pin.
+                Some(65536),
+            )?;
+            let endpoint =
+                outbound::Endpoint::from_registered(&registered).map_err(StartupError::Store)?;
+            let bus = registered
+                .node()
+                .ok_or(StartupError::ConnectionConfiguration)?
+                .to_owned();
+            Some(Messaging {
+                _registration: tokio::sync::Mutex::new(registered),
+                endpoint,
+                bus,
+                limits,
+            })
+        } else {
+            None
+        };
         let state = Arc::new(App {
             verifier,
             grant_store: config.grant_store,
@@ -144,6 +249,7 @@ impl Serving {
             issuer,
             scopes,
             challenge,
+            messaging,
         });
         let mut router = Router::new().route("/mcp", any(mcp));
         for path in BTreeSet::from([
@@ -226,23 +332,40 @@ fn auth_response(error: auth::Error, challenge: &HeaderValue) -> Response {
     }
 }
 
-fn policy_response(error: GrantError) -> Response {
+fn policy_response(error: outbound::Error) -> Response {
     match error {
-        GrantError::Denied => StatusCode::FORBIDDEN.into_response(),
+        outbound::Error::Authority(GrantError::Denied) => StatusCode::FORBIDDEN.into_response(),
         _ => unavailable(),
     }
+}
+
+struct CurrentAuthority {
+    grant: Authorization,
+    policy: Policy,
+    store: Store,
 }
 
 async fn authorize_current(
     app: &App,
     identity: Arc<VerifiedIdentity>,
-) -> Result<Authorization, Response> {
+) -> Result<CurrentAuthority, Response> {
     let store_file = app.grant_store.clone();
+    let messaging = app.messaging.is_some();
     let subscriber = tracing::dispatcher::get_default(Clone::clone);
     tokio::task::spawn_blocking(move || {
         tracing::dispatcher::with_default(&subscriber, || {
             let store = Store::open(&store_file)?;
-            store.authorize(&identity)
+            let grant = store.authorize(&identity)?;
+            let policy = if messaging {
+                store.outbound_policy(&grant.grant_id)?
+            } else {
+                Policy::default()
+            };
+            Ok::<_, outbound::Error>(CurrentAuthority {
+                grant,
+                policy,
+                store,
+            })
         })
     })
     .await
@@ -285,8 +408,8 @@ struct Parameters {
 #[serde(deny_unknown_fields)]
 struct Call {
     name: String,
-    #[serde(default, rename = "arguments")]
-    _arguments: Empty,
+    #[serde(default = "empty_object", rename = "arguments")]
+    arguments: Value,
     #[serde(default, rename = "_meta")]
     _metadata: Map<String, Value>,
 }
@@ -366,16 +489,158 @@ fn rpc_error(id: &Value, code: i64, message: &str) -> Response {
         .into_response()
 }
 
-async fn mcp(State(app): State<Arc<App>>, request: Request) -> Response {
-    tokio::time::timeout(
-        Duration::from_millis(app.request_timeout_ms),
-        mcp_request(app, request),
-    )
-    .await
-    .unwrap_or_else(|_| unavailable())
+#[derive(Clone)]
+struct PendingReply {
+    id: Value,
+    request_id: String,
 }
 
-async fn mcp_request(app: Arc<App>, request: Request) -> Response {
+fn tool_result(data: Value) -> Value {
+    json!({"content":[{"type":"text","text":data.to_string()}],
+        "structuredContent":data,"isError":false})
+}
+
+fn pending_response(pending: &PendingReply) -> Response {
+    rpc_result(
+        &pending.id,
+        tool_result(json!({"state":"pending",
+        "request_id":pending.request_id,"retry":"use the same request_id"})),
+    )
+}
+
+fn permission_enabled(app: &App, permission: &Option<outbound::Permission>) -> bool {
+    permission.as_ref().is_some_and(|permission| {
+        !permission.targets.is_empty() && app.verifier.requires_scope(&permission.required_scope)
+    })
+}
+
+fn tools(app: &App, policy: &Policy) -> Value {
+    let mut tools = vec![
+        json!({"name":"xmsg_identity","description":"Read the authenticated gateway identity.",
+        "inputSchema":{"type":"object","properties":{},"additionalProperties":false},
+        "annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false},
+        "securitySchemes":[{"type":"oauth2","scopes":app.scopes}]}),
+    ];
+    if app.messaging.is_some() {
+        for (name, permission, target) in [
+            ("xmsg_send", &policy.send, "to"),
+            ("xmsg_reply", &policy.reply, "message_id"),
+        ] {
+            if !permission_enabled(app, permission) {
+                continue;
+            }
+            tools.push(json!({"name":name,"description":"Submit authorized external-data text with a durable request_id; retry only with that same request_id.",
+                "inputSchema":{"type":"object","properties":{"request_id":{"type":"string","minLength":1,"maxLength":128,"pattern":"^[A-Za-z0-9._:-]+$"},
+                    target:{"type":"string"},"text":{"type":"string"}},
+                    "required":["request_id",target,"text"],"additionalProperties":false},
+                "annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":true,"idempotentHint":true},
+                "securitySchemes":[{"type":"oauth2","scopes":app.scopes}]}));
+        }
+    }
+    json!({"tools":tools})
+}
+
+async fn messaging_call(
+    app: Arc<App>,
+    token: String,
+    id: Value,
+    request: outbound::Request,
+    policy: Policy,
+    mut store: Store,
+    progress: Arc<OnceLock<PendingReply>>,
+) -> Response {
+    let (operation, request_id, permission) = match &request {
+        outbound::Request::Send(args) => (
+            "xmsg_send",
+            args.request_id.as_str().to_owned(),
+            &policy.send,
+        ),
+        outbound::Request::Reply(args) => (
+            "xmsg_reply",
+            args.request_id.as_str().to_owned(),
+            &policy.reply,
+        ),
+    };
+    if !permission_enabled(&app, permission) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    tracing::info!(target: "gateway_dispatch", operation, "dispatch");
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let task_app = app.clone();
+    let subscriber = tracing::dispatcher::get_default(Clone::clone);
+    let work = async move {
+        use tracing::instrument::WithSubscriber;
+        let result = async {
+            let messaging = task_app
+                .messaging
+                .as_ref()
+                .ok_or(outbound::Error::Configuration)?;
+            outbound::dispatch(
+                &mut store,
+                &messaging.endpoint,
+                &task_app.verifier,
+                &token,
+                &messaging.bus,
+                &request,
+                &messaging.limits,
+            )
+            .await
+        }
+        .with_subscriber(subscriber)
+        .await;
+        let _ = send.send(result);
+    };
+    tokio::spawn(work);
+    let pending = PendingReply {
+        id: id.clone(),
+        request_id: request_id.clone(),
+    };
+    let _ = progress.set(pending.clone());
+    let result = match receive.await {
+        Ok(result) => result,
+        Err(_) => return pending_response(&pending),
+    };
+    match result {
+        Ok(Outcome::Pending) => pending_response(&pending),
+        Ok(Outcome::Unknown) => rpc_result(
+            &id,
+            tool_result(json!({"state":"unknown",
+            "request_id":request_id,"reconciliation_required":true})),
+        ),
+        Ok(Outcome::Confirmed(receipt)) => rpc_result(
+            &id,
+            tool_result(json!({"state":"confirmed","request_id":request_id,"receipt":receipt})),
+        ),
+        Err(outbound::Error::Denied | outbound::Error::Authority(GrantError::Denied)) => {
+            StatusCode::FORBIDDEN.into_response()
+        }
+        Err(outbound::Error::Authentication(error)) => auth_response(error, &app.challenge),
+        Err(outbound::Error::Conflict) => rpc_error(&id, -32009, "request_id payload conflict"),
+        Err(outbound::Error::Oversized) => {
+            rpc_error(&id, -32602, "complete outbound text exceeds bound")
+        }
+        Err(_) => unavailable(),
+    }
+}
+
+async fn mcp(State(app): State<Arc<App>>, request: Request) -> Response {
+    let progress = Arc::new(OnceLock::new());
+    tokio::time::timeout(
+        Duration::from_millis(app.request_timeout_ms),
+        mcp_request(app, request, progress.clone()),
+    )
+    .await
+    .unwrap_or_else(|_| match progress.get() {
+        Some(pending) => pending_response(pending),
+        None => unavailable(),
+    })
+}
+
+async fn mcp_request(
+    app: Arc<App>,
+    request: Request,
+    progress: Arc<OnceLock<PendingReply>>,
+) -> Response {
     if !permitted_request(&app, &request) {
         return StatusCode::FORBIDDEN.into_response();
     }
@@ -422,7 +687,11 @@ async fn mcp_request(app: Arc<App>, request: Request) -> Response {
     if now >= identity.expires_at() {
         return auth_response(auth::Error::InvalidToken, &app.challenge);
     }
-    let grant = match authorization {
+    let CurrentAuthority {
+        grant,
+        policy,
+        store,
+    } = match authorization {
         Ok(grant) => grant,
         Err(response) => return response,
     };
@@ -497,12 +766,7 @@ async fn mcp_request(app: Arc<App>, request: Request) -> Response {
             match rpc.method.as_str() {
                 "notifications/initialized" => return StatusCode::ACCEPTED.into_response(),
                 "ping" => json!({}),
-                _ => {
-                    json!({"tools":[{"name":"xmsg_identity","description":"Read the authenticated gateway identity.",
-                    "inputSchema":{"type":"object","properties":{},"additionalProperties":false},
-                    "annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false},
-                    "securitySchemes":[{"type":"oauth2","scopes":app.scopes}]}]})
-                }
+                _ => tools(&app, &policy),
             }
         }
         "tools/call" => {
@@ -510,8 +774,26 @@ async fn mcp_request(app: Arc<App>, request: Request) -> Response {
                 Ok(call) => call,
                 Err(_) => return rpc_error(&id, -32602, "Invalid params"),
             };
+            if matches!(call.name.as_str(), "xmsg_send" | "xmsg_reply") && app.messaging.is_some() {
+                let request = match call.name.as_str() {
+                    "xmsg_send" => {
+                        serde_json::from_value::<outbound::SendArguments>(call.arguments)
+                            .map(outbound::Request::Send)
+                    }
+                    _ => serde_json::from_value::<outbound::ReplyArguments>(call.arguments)
+                        .map(outbound::Request::Reply),
+                };
+                let request = match request {
+                    Ok(request) => request,
+                    Err(_) => return rpc_error(&id, -32602, "Invalid params"),
+                };
+                return messaging_call(app, token, id, request, policy, store, progress).await;
+            }
             if call.name != "xmsg_identity" {
                 return rpc_error(&id, -32004, "Tool not yet available");
+            }
+            if serde_json::from_value::<Empty>(call.arguments).is_err() {
+                return rpc_error(&id, -32602, "Invalid params");
             }
             tracing::info!(target: "gateway_dispatch", operation = "xmsg_identity", "dispatch");
             let data = json!({"service":identity.service(),"subject":identity.subject(),"issuer":identity.issuer(),

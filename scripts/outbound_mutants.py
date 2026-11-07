@@ -122,7 +122,7 @@ CASES = [
     (
         "framed-text-bound",
         "src/outbound.rs",
-        "framed.len() <= self.max_text_bytes",
+        "framed.len() <= self.max_framed_bytes",
         "true",
         "custody_outbound",
         SEND_TEST,

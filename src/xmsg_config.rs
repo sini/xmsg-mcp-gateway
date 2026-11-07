@@ -33,7 +33,8 @@ pub struct DeploymentManifest {
     pub idempotency_ttl_secs: u64,
     pub svc_queue_cap: usize,
     pub dedup_lifetime_secs: u64,
-    pub max_text_bytes: usize,
+    /// Complete framed message including the gateway preamble, in bytes.
+    pub max_framed_bytes: usize,
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -46,7 +47,7 @@ pub enum ManifestError {
     QueueCapacity,
     #[error("dedup lifetime must be positive and no greater than the node's idempotency TTL")]
     DedupLifetime,
-    #[error("complete outbound text bound must be within 1..=65536 bytes")]
+    #[error("complete framed bound must fit within the pinned and effective node byte limits")]
     TextBound,
 }
 
@@ -56,6 +57,7 @@ impl DeploymentManifest {
         effective_reply_ttl: Option<u64>,
         effective_idempotency_ttl: Option<u64>,
         effective_queue_cap: Option<usize>,
+        effective_max_body: Option<usize>,
     ) -> Result<(), ManifestError> {
         if self.reply_ttl_secs == 0 || effective_reply_ttl != Some(self.reply_ttl_secs) {
             return Err(ManifestError::ReplyTtl);
@@ -74,7 +76,10 @@ impl DeploymentManifest {
         {
             return Err(ManifestError::DedupLifetime);
         }
-        if self.max_text_bytes == 0 || self.max_text_bytes > 65536 {
+        if self.max_framed_bytes == 0
+            || self.max_framed_bytes > 65536
+            || effective_max_body.is_none_or(|bound| self.max_framed_bytes > bound)
+        {
             return Err(ManifestError::TextBound);
         }
         Ok(())
@@ -82,10 +87,17 @@ impl DeploymentManifest {
 }
 
 impl XmsgConfig {
-    pub async fn register(&self) -> Result<RegisteredService, ClientError> {
+    pub fn validate(&self) -> Result<(), ClientError> {
+        xmsg::client::validate_service_name(&self.service)
+            .map_err(|_| ClientError::Configuration)?;
         if self.expected_node.trim().is_empty() {
             return Err(ClientError::Configuration);
         }
+        Ok(())
+    }
+
+    pub async fn register(&self) -> Result<RegisteredService, ClientError> {
+        self.validate()?;
         RegisteredService::register(ClientOptions {
             service: self.service.clone(),
             expected_node: Some(self.expected_node.clone()),

@@ -28,7 +28,7 @@ use xmsg_mcp_gateway::{
 fn limits() -> Limits {
     Limits {
         dedup_lifetime_secs: 86400,
-        max_text_bytes: 65536,
+        max_framed_bytes: 65536,
         timeout: std::time::Duration::from_secs(5),
         max_reservations: 1000,
         max_retained_bytes: 64 * 1024 * 1024,

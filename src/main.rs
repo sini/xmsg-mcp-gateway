@@ -49,7 +49,7 @@ enum CommandError {
     #[error("serve obtains its state path only from the owner configuration file")]
     UnexpectedState,
     #[error(transparent)]
-    Configuration(#[from] xmsg_mcp_gateway::serving::ConfigurationError),
+    Configuration(#[from] xmsg_mcp_gateway::serving::StartupError),
     #[error("MCP server failed")]
     Serve(#[source] std::io::Error),
     #[error(transparent)]
