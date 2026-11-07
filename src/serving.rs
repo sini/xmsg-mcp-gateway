@@ -222,8 +222,7 @@ impl Serving {
                 registered.reply_ttl_secs(),
                 registered.idempotency_ttl_secs(),
                 registered.svc_queue_cap(),
-                // Replace with Registration.max_body_bytes at the final XF4 pin.
-                Some(65536),
+                registered.max_body_bytes(),
             )?;
             let endpoint =
                 outbound::Endpoint::from_registered(&registered).map_err(StartupError::Store)?;

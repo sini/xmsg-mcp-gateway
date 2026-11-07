@@ -16,6 +16,7 @@ pub struct Node {
     listener: Option<std::net::TcpListener>,
     notify: Option<tokio::net::UnixDatagram>,
     reply_ttl_secs: u64,
+    max_body_bytes: usize,
 }
 
 impl Drop for Node {
@@ -93,6 +94,7 @@ pub struct Prepared {
     temp: tempfile::TempDir,
     listener: Option<std::net::TcpListener>,
     reply_ttl_secs: u64,
+    max_body_bytes: usize,
 }
 impl Prepared {
     pub fn create(service: &str, user: &str, authority: Option<&Authority>) -> Self {
@@ -147,6 +149,7 @@ impl Prepared {
             temp,
             listener,
             reply_ttl_secs: 604800,
+            max_body_bytes: 65536,
         }
     }
     pub fn peer(&self, other: &Self, grants: serde_json::Value) {
@@ -186,6 +189,7 @@ impl Prepared {
             self.listener.as_ref(),
             notify.is_some(),
             self.reply_ttl_secs,
+            self.max_body_bytes,
         );
         launch.arg("--svc-exe").arg(format!(
             "{}={}",
@@ -199,6 +203,7 @@ impl Prepared {
             listener: self.listener,
             notify,
             reply_ttl_secs: self.reply_ttl_secs,
+            max_body_bytes: self.max_body_bytes,
         };
         node.ready().await;
         node
@@ -211,6 +216,7 @@ fn command(
     listener: Option<&std::net::TcpListener>,
     notify: bool,
     reply_ttl_secs: u64,
+    max_body_bytes: usize,
 ) -> Command {
     let run = directory.join("run");
     let mut command = if listener.is_some() {
@@ -234,6 +240,8 @@ fn command(
         .arg("serve")
         .arg("--reply-ttl")
         .arg(reply_ttl_secs.to_string())
+        .arg("--max-body")
+        .arg(max_body_bytes.to_string())
         .arg("--db-path")
         .arg(directory.join("node.db"))
         .arg("--sessions-dir")
@@ -297,6 +305,17 @@ impl Node {
         prepared.reply_ttl_secs = reply_ttl_secs;
         prepared.launch(binary).await
     }
+    #[allow(dead_code)]
+    pub async fn start_with_max_body(binary: &Path, bytes: usize) -> Self {
+        let mut prepared = Prepared::create("gateway", "gateway", None);
+        prepared.max_body_bytes = bytes;
+        prepared.launch(binary).await
+    }
+    #[allow(dead_code)]
+    pub async fn restart_with_reply_ttl(&mut self, binary: &Path, seconds: u64) {
+        self.reply_ttl_secs = seconds;
+        self.restart(binary).await;
+    }
     pub async fn restart(&mut self, binary: &Path) {
         self.child.kill().unwrap();
         self.child.wait().unwrap();
@@ -312,6 +331,7 @@ impl Node {
             self.listener.as_ref(),
             self.notify.is_some(),
             self.reply_ttl_secs,
+            self.max_body_bytes,
         );
         launch.arg("--svc-exe").arg(format!(
             "{}={}",

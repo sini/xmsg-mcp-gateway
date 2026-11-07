@@ -47,10 +47,12 @@ Dispatch runs in a separate task that owns its store and registration context.
 Handler timeout returns pending with the same request ID; disconnect does not
 cancel the outcome commit. Accepted packets cannot be recalled by disconnect.
 
-The current intermediate pin declares a 65536-byte framed ceiling. Validating it
-against a custom node's reported `max_body_bytes` waits for the final XF4 re-pin;
-that is a remaining construction condition. No compatibility with a smaller node
-body limit is claimed yet. Live activation and exposure gates below still apply.
+The complete framed bound must fit the node's reported `max_body_bytes` as well
+as the gateway's 65536-byte ceiling. A missing report or a smaller effective limit
+refuses startup; the gateway never guesses it from launch arguments. The current
+development pin includes registration health and socket activation, with its
+landing on xmsg main still required before the final gateway pin. Live activation
+and exposure gates below still apply.
 
 ## Owner configuration
 

@@ -251,9 +251,21 @@ CASES.append(
     )
 )
 
+CASES.append(
+    (
+        "startup-reported-body-bound",
+        "src/serving.rs",
+        "registered.max_body_bytes(),",
+        "Some(65536),",
+        "messaging",
+        "reported_body_bound_refuses_an_oversized_deployment_manifest",
+        "configured bound above the effective node body limit reached the router",
+    )
+)
+
 
 def main():
-    if len(CASES) != 23:
+    if len(CASES) != 24:
         raise RuntimeError("wiring mutant inventory drift")
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", choices=[case[0] for case in CASES])

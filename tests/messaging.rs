@@ -127,6 +127,25 @@ async fn reply_ttl_mismatch_refuses_before_router_availability() {
 
 #[tokio::test]
 #[ignore = "requires the revision-verified private daemon in the wiring profile"]
+async fn reported_body_bound_refuses_an_oversized_deployment_manifest() {
+    let node = real_node::Node::start_with_max_body(&real_node::pinned_binary(), 1024).await;
+    let mut fixture = migrated_fixture(&node);
+    fixture.config["messaging"]["manifest"]["max_framed_bytes"] = json!(1024);
+    save(&fixture);
+    drop(fixture.serving().await);
+    fixture.config["messaging"]["manifest"]["max_framed_bytes"] = json!(1025);
+    save(&fixture);
+    match Serving::from_owner_file(&fixture.config_file).await {
+        Err(StartupError::Manifest(ManifestError::TextBound)) => {}
+        Err(error) => panic!("wrong startup refusal: {error}"),
+        Ok(_) => panic!("configured bound above the effective node body limit reached the router"),
+    }
+    cli_refuses(&fixture).await;
+    println!("gateway-wiring-complete:reported-body-bound");
+}
+
+#[tokio::test]
+#[ignore = "requires the revision-verified private daemon in the wiring profile"]
 async fn idempotency_ttl_mismatch_refuses_before_router_availability() {
     manifest_refusal(
         "idempotency_ttl_secs",
