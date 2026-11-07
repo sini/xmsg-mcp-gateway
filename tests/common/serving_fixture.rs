@@ -134,8 +134,8 @@ impl Fixture {
             worker.join().unwrap();
         }
     }
-    pub fn serving(&self) -> Serving {
-        Serving::from_owner_file(&self.config_file).unwrap()
+    pub async fn serving(&self) -> Serving {
+        Serving::from_owner_file(&self.config_file).await.unwrap()
     }
     pub fn call() -> Value {
         json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"xmsg_identity","arguments":{}}})

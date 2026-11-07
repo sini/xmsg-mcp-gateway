@@ -74,7 +74,8 @@ async fn run(cli: Cli) -> Result<(), CommandError> {
             if state.is_some() {
                 return Err(CommandError::UnexpectedState);
             }
-            xmsg_mcp_gateway::serving::Serving::from_owner_file(&config)?
+            xmsg_mcp_gateway::serving::Serving::from_owner_file(&config)
+                .await?
                 .serve()
                 .await
                 .map_err(CommandError::Serve)?;

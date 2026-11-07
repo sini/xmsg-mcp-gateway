@@ -60,7 +60,7 @@ fn resolve_profile_path(directory: &Path, file: &mut PathBuf) {
 }
 
 impl Serving {
-    pub fn from_owner_file(config_file: &Path) -> Result<Self, ConfigurationError> {
+    pub async fn from_owner_file(config_file: &Path) -> Result<Self, ConfigurationError> {
         let mut file = File::open(config_file).map_err(|_| ConfigurationError)?;
         let metadata = file.metadata().map_err(|_| ConfigurationError)?;
         if !metadata.is_file() || metadata.len() > MAX_REQUEST as u64 {
