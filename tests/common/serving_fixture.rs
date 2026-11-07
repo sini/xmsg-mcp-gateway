@@ -155,12 +155,13 @@ impl Drop for Fixture {
 pub struct Probe {
     pub opens: Arc<AtomicUsize>,
     pub dispatches: Arc<AtomicUsize>,
+    pub registrations: Arc<AtomicUsize>,
 }
 impl Subscriber for Probe {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
         matches!(
             metadata.target(),
-            "gateway_policy_store" | "gateway_dispatch"
+            "gateway_policy_store" | "gateway_dispatch" | "gateway_registration"
         )
     }
     fn new_span(&self, _: &Attributes<'_>) -> Id {
@@ -177,6 +178,9 @@ impl Subscriber for Probe {
             }
             "gateway_dispatch" => {
                 self.dispatches.fetch_add(1, Ordering::SeqCst);
+            }
+            "gateway_registration" => {
+                self.registrations.fetch_add(1, Ordering::SeqCst);
             }
             _ => {}
         }

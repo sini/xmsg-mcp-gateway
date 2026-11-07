@@ -15,7 +15,10 @@ mod serving_fixture;
 use axum::http::StatusCode;
 use serde_json::json;
 use std::sync::atomic::Ordering;
+use tracing::instrument::WithSubscriber;
 use xmsg_mcp_gateway::outbound::Receipt;
+use xmsg_mcp_gateway::serving::{Serving, StartupError};
+use xmsg_mcp_gateway::xmsg_config::ManifestError;
 
 fn owner(fixture: &serving_fixture::Fixture, arguments: &[&str]) {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_xmsg-mcp-gateway"))
@@ -61,6 +64,235 @@ fn configure(fixture: &mut serving_fixture::Fixture, node: &real_node::Node) {
         &fixture.config_file,
         &serde_json::to_vec(&fixture.config).unwrap(),
     );
+}
+
+fn migrated_fixture(node: &real_node::Node) -> serving_fixture::Fixture {
+    let mut fixture = serving_fixture::Fixture::new();
+    owner(&fixture, &["migrate-custody"]);
+    owner(&fixture, &["migrate-outbound"]);
+    configure(&mut fixture, node);
+    fixture
+}
+
+fn save(fixture: &serving_fixture::Fixture) {
+    serving_fixture::private_file(
+        &fixture.config_file,
+        &serde_json::to_vec(&fixture.config).unwrap(),
+    );
+}
+
+async fn cli_refuses(fixture: &serving_fixture::Fixture) {
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_xmsg-mcp-gateway"))
+            .kill_on_drop(true)
+            .arg("serve")
+            .arg("--config")
+            .arg(&fixture.config_file)
+            .output(),
+    )
+    .await
+    .expect("invalid startup did not exit")
+    .unwrap();
+    assert!(
+        !result.status.success(),
+        "invalid startup exited successfully"
+    );
+    assert!(
+        !String::from_utf8_lossy(&result.stdout).contains("serving MCP at"),
+        "invalid startup exposed a listener"
+    );
+}
+
+async fn manifest_refusal(field: &str, value: serde_json::Value, expected: ManifestError) {
+    let node = real_node::Node::start(&real_node::pinned_binary()).await;
+    let mut fixture = migrated_fixture(&node);
+    drop(fixture.serving().await);
+    fixture.config["messaging"]["manifest"][field] = value;
+    save(&fixture);
+    match Serving::from_owner_file(&fixture.config_file).await {
+        Err(StartupError::Manifest(actual)) => assert_eq!(actual, expected),
+        Err(error) => panic!("wrong startup refusal: {error}"),
+        Ok(_) => panic!("inconsistent node manifest reached the router: {field}"),
+    }
+    cli_refuses(&fixture).await;
+}
+
+#[tokio::test]
+#[ignore = "requires the revision-verified private daemon in the wiring profile"]
+async fn reply_ttl_mismatch_refuses_before_router_availability() {
+    manifest_refusal("reply_ttl_secs", json!(604799), ManifestError::ReplyTtl).await;
+    println!("gateway-wiring-complete:reply-ttl");
+}
+
+#[tokio::test]
+#[ignore = "requires the revision-verified private daemon in the wiring profile"]
+async fn idempotency_ttl_mismatch_refuses_before_router_availability() {
+    manifest_refusal(
+        "idempotency_ttl_secs",
+        json!(86401),
+        ManifestError::IdempotencyTtl,
+    )
+    .await;
+    println!("gateway-wiring-complete:idempotency-ttl");
+}
+
+#[tokio::test]
+#[ignore = "requires the revision-verified private daemon in the wiring profile"]
+async fn queue_capacity_mismatch_refuses_before_router_availability() {
+    manifest_refusal("svc_queue_cap", json!(101), ManifestError::QueueCapacity).await;
+    println!("gateway-wiring-complete:queue-capacity");
+}
+
+#[tokio::test]
+#[ignore = "requires the revision-verified private daemon in the wiring profile"]
+async fn dedup_lifetime_above_the_node_limit_refuses_startup() {
+    manifest_refusal(
+        "dedup_lifetime_secs",
+        json!(86401),
+        ManifestError::DedupLifetime,
+    )
+    .await;
+    println!("gateway-wiring-complete:dedup-lifetime");
+}
+
+#[tokio::test]
+#[ignore = "requires the revision-verified private daemon in the wiring profile"]
+async fn invalid_service_names_refuse_at_configuration_load() {
+    let node = real_node::Node::start(&real_node::pinned_binary()).await;
+    let mut fixture = migrated_fixture(&node);
+    for service in [
+        "a/b",
+        "550e8400-e29b-41d4-a716-446655440000/child",
+        "with space",
+        "naïve",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "xmsg",
+    ] {
+        fixture.config["messaging"]["xmsg"]["service"] = json!(service);
+        save(&fixture);
+        assert!(
+            matches!(
+                Serving::from_owner_file(&fixture.config_file).await,
+                Err(StartupError::ConnectionConfiguration)
+            ),
+            "invalid name reached registration: {service}"
+        );
+        cli_refuses(&fixture).await;
+    }
+    println!("gateway-wiring-complete:service-name");
+}
+
+#[tokio::test]
+#[ignore = "requires the revision-verified private daemon in the wiring profile"]
+async fn registration_failure_never_degrades_to_identity_only() {
+    let node = real_node::Node::start(&real_node::pinned_binary()).await;
+    let mut fixture = migrated_fixture(&node);
+    fixture.config["messaging"]["xmsg"]["register_socket"] =
+        json!(fixture.keys._directory.path().join("missing.sock"));
+    save(&fixture);
+    assert!(
+        matches!(
+            Serving::from_owner_file(&fixture.config_file).await,
+            Err(StartupError::Registration(_))
+        ),
+        "registration failure reached the router"
+    );
+    cli_refuses(&fixture).await;
+    println!("gateway-wiring-complete:registration-failure");
+}
+
+#[tokio::test]
+#[ignore = "requires the revision-verified private daemon in the wiring profile"]
+async fn messaging_requires_explicit_migration_and_a_complete_budget() {
+    let node = real_node::Node::start(&real_node::pinned_binary()).await;
+    let mut fixture = serving_fixture::Fixture::new();
+    configure(&mut fixture, &node);
+    assert!(matches!(
+        Serving::from_owner_file(&fixture.config_file).await,
+        Err(StartupError::Store(
+            xmsg_mcp_gateway::outbound::Error::MigrationRequired
+        ))
+    ));
+    cli_refuses(&fixture).await;
+    owner(&fixture, &["migrate-custody"]);
+    owner(&fixture, &["migrate-outbound"]);
+    fixture.config["request_timeout_ms"] = json!(10000);
+    save(&fixture);
+    assert!(
+        matches!(
+            Serving::from_owner_file(&fixture.config_file).await,
+            Err(StartupError::RequestBudget)
+        ),
+        "insufficient messaging budget was accepted"
+    );
+    cli_refuses(&fixture).await;
+    println!("gateway-wiring-complete:migration-budget");
+}
+
+#[tokio::test]
+#[ignore = "requires the revision-verified private daemon in the wiring profile"]
+async fn absent_messaging_is_identity_only_and_partial_messaging_is_not() {
+    let node = real_node::Node::start(&real_node::pinned_binary()).await;
+    let mut fixture = serving_fixture::Fixture::new();
+    let absent = serving_fixture::Probe::default();
+    let serving = Serving::from_owner_file(&fixture.config_file)
+        .with_subscriber(absent.clone())
+        .await
+        .unwrap();
+    let (status, _, _) =
+        serving_fixture::request(&serving, "good-token", serving_fixture::Fixture::call()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(absent.registrations.load(Ordering::SeqCst), 0);
+    drop(serving);
+    owner(&fixture, &["migrate-custody"]);
+    owner(&fixture, &["migrate-outbound"]);
+    configure(&mut fixture, &node);
+    let present = serving_fixture::Probe::default();
+    drop(
+        Serving::from_owner_file(&fixture.config_file)
+            .with_subscriber(present.clone())
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        present.registrations.load(Ordering::SeqCst),
+        1,
+        "registration positive control did not fire"
+    );
+    let complete = fixture.config.clone();
+    for field in [
+        "reply_ttl_secs",
+        "idempotency_ttl_secs",
+        "svc_queue_cap",
+        "dedup_lifetime_secs",
+        "max_framed_bytes",
+    ] {
+        fixture.config = complete.clone();
+        fixture.config["messaging"]["manifest"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        save(&fixture);
+        assert!(
+            matches!(
+                Serving::from_owner_file(&fixture.config_file).await,
+                Err(StartupError::Configuration(_))
+            ),
+            "missing messaging value was defaulted: {field}"
+        );
+    }
+    fixture.config = complete;
+    fixture.config["messaging"] = serde_json::Value::Null;
+    save(&fixture);
+    assert!(
+        matches!(
+            Serving::from_owner_file(&fixture.config_file).await,
+            Err(StartupError::Configuration(_))
+        ),
+        "null messaging silently became identity-only"
+    );
+    println!("gateway-wiring-complete:strict-optional-profile");
 }
 
 #[tokio::test]
@@ -125,7 +357,11 @@ async fn real_mcp_send_keeps_request_identity_and_owner_policy() {
     }
     policy(&fixture, "3", json!({"send":null,"reply":null}));
     let (_, listed, _) = serving_fixture::request(&serving, "good-token", discovery).await;
-    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        listed["result"]["tools"].as_array().unwrap().len(),
+        1,
+        "empty policy advertised messaging authority"
+    );
     let mut denied = send;
     denied["params"]["arguments"]["request_id"] = json!("new-denied-operation");
     let (status, _, probe) = serving_fixture::request(&serving, "good-token", denied).await;
@@ -145,6 +381,12 @@ async fn real_mcp_send_keeps_request_identity_and_owner_policy() {
         panic!("wrong receipt vocabulary")
     };
     assert_eq!(delivery.message_id(), receipt.message_id);
+    assert!(
+        delivery
+            .text()
+            .ends_with("untrusted private fixture message"),
+        "handler changed outbound text"
+    );
     mailbox.ack(delivery.message_id()).await.unwrap();
     assert!(
         mailbox.poll(0).await.unwrap().is_none(),
@@ -222,4 +464,291 @@ async fn cancelling_a_handler_does_not_cancel_the_accepted_operation() {
     mailbox.ack(delivery.message_id()).await.unwrap();
     assert!(mailbox.poll(0).await.unwrap().is_none());
     println!("gateway-wiring-complete:handler-cancellation");
+}
+
+#[tokio::test]
+#[ignore = "requires the revision-verified private daemon in the wiring profile"]
+async fn fresh_policy_is_empty_and_cannot_be_changed_by_mcp() {
+    let node = real_node::Node::start(&real_node::pinned_binary()).await;
+    let fixture = migrated_fixture(&node);
+    let serving = fixture.serving().await;
+    let (_, listed, _) = serving_fixture::request(
+        &serving,
+        "good-token",
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}),
+    )
+    .await;
+    assert_eq!(
+        listed["result"]["tools"].as_array().unwrap().len(),
+        1,
+        "empty policy advertised messaging authority"
+    );
+    for (name, arguments) in [
+        (
+            "xmsg_send",
+            json!({"request_id":"empty-policy","to":"gateway@gateway.fixture","text":"must refuse"}),
+        ),
+        ("set_outbound_policy", json!({})),
+    ] {
+        let (status, response, probe) = serving_fixture::request(&serving, "good-token",
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":name,"arguments":arguments}})).await;
+        if name == "xmsg_send" {
+            assert_eq!(status, StatusCode::FORBIDDEN);
+        } else {
+            assert_eq!(response["error"]["code"], -32004);
+        }
+        assert_eq!(probe.dispatches.load(Ordering::SeqCst), 0);
+    }
+    drop(serving);
+    let mut mailbox = node.config.register().await.unwrap();
+    assert!(mailbox.poll(0).await.unwrap().is_none());
+    println!("gateway-wiring-complete:fresh-empty-policy");
+}
+
+#[tokio::test]
+#[ignore = "requires the revision-verified private daemon in the wiring profile"]
+async fn mcp_replies_use_owned_custody_and_the_original_bus_receipt() {
+    use xmsg_mcp_gateway::{custody, grants::Store};
+    let node = real_node::Node::start(&real_node::pinned_binary()).await;
+    let fixture = migrated_fixture(&node);
+    policy(
+        &fixture,
+        "2",
+        json!({"send":null,"reply":{"targets":["gateway@gateway.fixture"],
+        "required_scope":"identity:read"}}),
+    );
+    let mut mailbox = node.config.register().await.unwrap();
+    let original = mailbox
+        .send(
+            mailbox.address().unwrap(),
+            "owned inbound fixture",
+            Some("owned-inbound"),
+        )
+        .await
+        .unwrap();
+    let delivery = mailbox.poll(1).await.unwrap().unwrap();
+    Store::open(&fixture.store_file)
+        .unwrap()
+        .accept_delivery(
+            &custody::Scope {
+                bus_instance: mailbox.node().unwrap().into(),
+                grant_id: "grant".into(),
+            },
+            &mailbox,
+            &delivery,
+            &custody::Limits::default(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
+        )
+        .unwrap();
+    mailbox.ack(delivery.message_id()).await.unwrap();
+    drop(mailbox);
+    let serving = fixture.serving().await;
+    let call = json!({"jsonrpc":"2.0","id":301,"method":"tools/call","params":{
+        "name":"xmsg_reply","arguments":{"request_id":"owned-reply-operation",
+            "message_id":original.message_id,"text":"owned reply"}}});
+    let (status, first, probe) =
+        serving_fixture::request(&serving, "good-token", call.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        first["result"]["structuredContent"]["state"], "confirmed",
+        "owned MCP reply was not confirmed"
+    );
+    assert_eq!(probe.opens.load(Ordering::SeqCst), 2);
+    let mut repeated = call.clone();
+    repeated["id"] = json!(302);
+    let (_, replay, _) = serving_fixture::request(&serving, "good-token", repeated).await;
+    assert_eq!(first["result"], replay["result"]);
+    let mut unknown = call;
+    unknown["params"]["arguments"]["request_id"] = json!("unknown-correlation");
+    unknown["params"]["arguments"]["message_id"] = json!("01ARZ3NDEKTSV4RRFFQ69G5FAV");
+    let (status, _, _) = serving_fixture::request(&serving, "good-token", unknown).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let receipt: Receipt =
+        serde_json::from_value(first["result"]["structuredContent"]["receipt"].clone()).unwrap();
+    let Receipt::Reply(receipt) = receipt else {
+        panic!("reply did not preserve the xmsg reply record")
+    };
+    assert_eq!(receipt.message_id, original.message_id);
+    drop(serving);
+    let mut mailbox = node.config.register().await.unwrap();
+    let delivery = mailbox.poll(1).await.unwrap().unwrap();
+    assert_eq!(
+        receipt.pushed_message_id.as_deref(),
+        Some(delivery.message_id())
+    );
+    assert_eq!(delivery.in_reply_to(), Some(original.message_id.as_str()));
+    mailbox.ack(delivery.message_id()).await.unwrap();
+    assert!(mailbox.poll(0).await.unwrap().is_none());
+    println!("gateway-wiring-complete:owned-reply");
+}
+
+#[tokio::test]
+#[ignore = "requires the revision-verified private daemon in the wiring profile"]
+async fn unconfigured_scopes_do_not_advertise_or_dispatch_messaging() {
+    let node = real_node::Node::start(&real_node::pinned_binary()).await;
+    let fixture = migrated_fixture(&node);
+    policy(
+        &fixture,
+        "2",
+        json!({"send":{"targets":["gateway@gateway.fixture"],
+        "required_scope":"unconfigured:write"},"reply":null}),
+    );
+    let serving = fixture.serving().await;
+    let (_, listed, _) = serving_fixture::request(
+        &serving,
+        "good-token",
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}),
+    )
+    .await;
+    assert_eq!(
+        listed["result"]["tools"].as_array().unwrap().len(),
+        1,
+        "unconfigured scope advertised messaging authority"
+    );
+    let (status, _, probe) = serving_fixture::request(
+        &serving,
+        "good-token",
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"xmsg_send","arguments":{"request_id":"scope-refused",
+                "to":"gateway@gateway.fixture","text":"must refuse"}}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(probe.dispatches.load(Ordering::SeqCst), 0);
+    println!("gateway-wiring-complete:scope-ceiling");
+}
+
+#[tokio::test]
+#[ignore = "requires the revision-verified private daemon in the wiring profile"]
+async fn the_complete_framed_bound_is_used_instead_of_the_payload_length() {
+    let node = real_node::Node::start(&real_node::pinned_binary()).await;
+    let mut fixture = migrated_fixture(&node);
+    policy(
+        &fixture,
+        "2",
+        json!({"send":{"targets":["gateway@gateway.fixture"],
+        "required_scope":"identity:read"},"reply":null}),
+    );
+    fixture.config["messaging"]["manifest"]["max_framed_bytes"] = json!(1);
+    save(&fixture);
+    let serving = fixture.serving().await;
+    let (status, response, _) = serving_fixture::request(
+        &serving,
+        "good-token",
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+            "name":"xmsg_send","arguments":{"request_id":"framed-bound",
+                "to":"gateway@gateway.fixture","text":"x"}}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        response["error"]["code"], -32602,
+        "configured complete framed bound was ignored"
+    );
+    drop(serving);
+    let mut mailbox = node.config.register().await.unwrap();
+    assert!(mailbox.poll(0).await.unwrap().is_none());
+    println!("gateway-wiring-complete:complete-framed-bound");
+}
+
+#[tokio::test]
+#[ignore = "requires the revision-verified private daemon in the wiring profile"]
+async fn handler_deadline_reports_pending_without_cancelling_accepted_work() {
+    use axum::{
+        body::{to_bytes, Body, Bytes},
+        http::Request,
+    };
+    use tower::ServiceExt;
+    let node = real_node::Node::start(&real_node::pinned_binary()).await;
+    let mut fixture = migrated_fixture(&node);
+    policy(
+        &fixture,
+        "2",
+        json!({"send":{"targets":["gateway@gateway.fixture"],
+        "required_scope":"identity:read"},"reply":null}),
+    );
+    fixture.config["request_timeout_ms"] = json!(33000);
+    fixture.config["messaging"]["submission_timeout_ms"] = json!(1000);
+    save(&fixture);
+    let serving = fixture.serving().await;
+    let mut stall = agent_stall::AgentStall::install(&node.config, "send");
+    let send = json!({"jsonrpc":"2.0","id":401,"method":"tools/call","params":{
+        "name":"xmsg_send","arguments":{"request_id":"deadline-operation",
+            "to":"gateway@gateway.fixture","text":"accepted after a slow request body"}}});
+    let body = send.to_string();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let stream = futures_util::stream::once(async move {
+        entered_tx.send(()).unwrap();
+        release_rx.await.unwrap();
+        Ok::<_, std::convert::Infallible>(Bytes::from(body))
+    });
+    let request = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("host", "gateway.example")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer good-token")
+        .body(Body::from_stream(stream))
+        .unwrap();
+    let handler = tokio::spawn(serving.router().oneshot(request));
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    // Spend the real handler budget in its body reader, after observing its first poll.
+    tokio::time::sleep(std::time::Duration::from_millis(32500)).await;
+    release_tx.send(()).unwrap();
+    let accepted = tokio::time::timeout(std::time::Duration::from_secs(3), stall.reached())
+        .await
+        .unwrap();
+    let response = tokio::time::timeout(std::time::Duration::from_secs(3), handler)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let status = response.status();
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 100_000).await.unwrap()).unwrap();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "handler deadline hid its pending request"
+    );
+    assert_eq!(
+        body["result"]["structuredContent"]["state"], "pending",
+        "handler deadline hid its pending request"
+    );
+    assert_eq!(
+        body["result"]["structuredContent"]["request_id"],
+        "deadline-operation"
+    );
+    stall.finish(true).await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let connection = rusqlite::Connection::open(&fixture.store_file).unwrap();
+            let confirmed: bool = connection.query_row(
+                "SELECT state='confirmed' AND receipt IS NOT NULL FROM outbound_reservations WHERE request_id='deadline-operation'",
+                [], |row| row.get(0)).unwrap();
+            if confirmed { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.expect("deadline cancelled the dispatch outcome commit");
+    let (_, replay, _) = serving_fixture::request(&serving, "good-token", send).await;
+    let receipt: Receipt =
+        serde_json::from_value(replay["result"]["structuredContent"]["receipt"].clone()).unwrap();
+    let Receipt::Send(receipt) = receipt else {
+        panic!("wrong receipt vocabulary")
+    };
+    assert_eq!(receipt.message_id, accepted["message_id"]);
+    drop(serving);
+    let mut mailbox = node.config.register().await.unwrap();
+    let delivery = mailbox.poll(1).await.unwrap().unwrap();
+    assert_eq!(delivery.message_id(), receipt.message_id);
+    mailbox.ack(delivery.message_id()).await.unwrap();
+    assert!(mailbox.poll(0).await.unwrap().is_none());
+    println!("gateway-wiring-complete:deadline-pending");
 }

@@ -23,7 +23,10 @@ fn messaging_manifest_requires_every_value_and_rejects_unknown_fields() {
     }
     let mut unknown = valid;
     unknown["mailbox"] = json!("other@node");
-    assert!(serde_json::from_value::<DeploymentManifest>(unknown).is_err());
+    assert!(
+        serde_json::from_value::<DeploymentManifest>(unknown).is_err(),
+        "unknown manifest field accepted"
+    );
     let mut legacy = document();
     legacy["max_text_bytes"] = legacy
         .as_object_mut()
@@ -101,7 +104,8 @@ fn complete_frame_must_fit_the_reported_node_body_bound() {
     for bound in [None, Some(65535), Some(0)] {
         assert_eq!(
             manifest.check(Some(604800), Some(86400), Some(100), bound),
-            Err(ManifestError::TextBound)
+            Err(ManifestError::TextBound),
+            "reported node body limit was ignored"
         );
     }
     manifest

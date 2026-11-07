@@ -192,7 +192,7 @@ def refuse_cached_control(root, *, target, target_dir):
     print(f"copied-control-cached-artifact:refused:{target}", flush=True)
 
 
-def live(executable, binary, revision, *, case=None):
+def live(executable, binary, revision, *, case=None, skip=None):
     env = {
         **os.environ,
         "XMSG_GATEWAY_REQUIRED": "1",
@@ -205,6 +205,8 @@ def live(executable, binary, revision, *, case=None):
     args = [str(executable), "--include-ignored", "--nocapture"]
     if case:
         args.extend([case, "--exact"])
+    if skip:
+        args.extend(["--skip", skip])
     return subprocess.run(
         args, cwd=ROOT, env=env, text=True, capture_output=True, timeout=120
     )

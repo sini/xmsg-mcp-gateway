@@ -34,7 +34,7 @@ fn migration_is_explicit_and_preserves_disabled_authority() {
     assert!(migrated.status.success(), "owner migration command failed");
     assert_eq!(
         String::from_utf8(migrated.stdout).unwrap(),
-        "custody schema migrated; startup remains unavailable\n"
+        "custody schema migrated; worker startup remains unavailable\n"
     );
     let after: i64 = inspect
         .pragma_query_value(None, "user_version", |row| row.get(0))

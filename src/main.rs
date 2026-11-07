@@ -86,11 +86,11 @@ async fn run(cli: Cli) -> Result<(), CommandError> {
         }
         (Some(state), Command::MigrateCustody) => {
             Store::open(&state)?.migrate_custody()?;
-            println!("custody schema migrated; startup remains unavailable");
+            println!("custody schema migrated; worker startup remains unavailable");
         }
         (Some(state), Command::MigrateOutbound) => {
             Store::open(&state)?.migrate_outbound()?;
-            println!("outbound schema migrated; startup remains unavailable");
+            println!("outbound schema migrated");
         }
         (
             Some(state),

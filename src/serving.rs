@@ -217,6 +217,7 @@ impl Serving {
                 .register()
                 .await
                 .map_err(StartupError::Registration)?;
+            tracing::info!(target: "gateway_registration", address = registered.address(), "registered xmsg service");
             messaging.manifest.check(
                 registered.reply_ttl_secs(),
                 registered.idempotency_ttl_secs(),
