@@ -25,7 +25,7 @@ cached = (
 )
 eager = (
     """    let identity = {
-        if let Err(error) = Store::open(&app.grant_store) { return policy_response(error); }
+        if let Err(error) = Store::open(&app.grant_store) { return policy_response(error.into()); }
 """
     + verification
     + """
@@ -75,7 +75,7 @@ CASES = [
     (
         "grant-recheck",
         "store.authorize(&identity)",
-        'Ok(Authorization { grant_id: "cached".into(), revision: 2 })',
+        'Ok::<Authorization, GrantError>(Authorization { grant_id: "cached".into(), revision: 2 })',
         "grant_is_rechecked_after_discovery",
         "disabled grant was accepted",
     ),
@@ -84,6 +84,9 @@ CASES = [
 start = SOURCE.index("async fn mcp(State(app)")
 end = SOURCE.index("\nasync fn mcp_request", start)
 deadline = SOURCE[start:end]
+authority_start = SOURCE.index("async fn mcp_request(")
+authority_end = SOURCE.index("    let token =", authority_start)
+authority = SOURCE[authority_start:authority_end]
 CASES += [
     (
         "post-policy-expiry",
@@ -94,15 +97,15 @@ CASES += [
     ),
     (
         "state-profile",
-        ".and_then(|store| store.validate_profile(&profile))",
-        ".and_then(|_store| Ok(()))",
+        "store\n            .validate_profile(&profile)",
+        "Ok::<(), GrantError>(())",
         "state_cannot_be_reused_for_another_service_resource_or_owner",
         "foreign authority profile was accepted",
     ),
     (
         "body-deadline",
         deadline,
-        "async fn mcp(State(app): State<Arc<App>>, request: Request) -> Response { mcp_request(app, request).await }\n",
+        "async fn mcp(State(app): State<Arc<App>>, request: Request) -> Response { mcp_request(app, request, Arc::new(OnceLock::new())).await }\n",
         "body_read_is_bounded_before_any_credential_or_policy_io",
         "request body deadline was not enforced",
     ),
@@ -115,8 +118,8 @@ CASES += [
     ),
     (
         "http-authority",
-        "async fn mcp_request(app: Arc<App>, request: Request) -> Response {\n    if !permitted_request(&app, &request)",
-        "async fn mcp_request(app: Arc<App>, request: Request) -> Response {\n    if false",
+        authority,
+        authority.replace("if !permitted_request(&app, &request)", "if false"),
         "http_host_origin_body_and_method_guards_hold",
         "untrusted HTTP authority was accepted",
     ),
