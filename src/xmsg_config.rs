@@ -26,6 +26,61 @@ fn default_timeout_ms() -> u64 {
     10_000
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeploymentManifest {
+    pub reply_ttl_secs: u64,
+    pub idempotency_ttl_secs: u64,
+    pub svc_queue_cap: usize,
+    pub dedup_lifetime_secs: u64,
+    pub max_text_bytes: usize,
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ManifestError {
+    #[error("declared reply TTL differs from the registered node's effective limit")]
+    ReplyTtl,
+    #[error("declared idempotency TTL differs from the registered node's effective limit")]
+    IdempotencyTtl,
+    #[error("declared service queue capacity differs from the registered node's effective limit")]
+    QueueCapacity,
+    #[error("dedup lifetime must be positive and no greater than the node's idempotency TTL")]
+    DedupLifetime,
+    #[error("complete outbound text bound must be within 1..=65536 bytes")]
+    TextBound,
+}
+
+impl DeploymentManifest {
+    pub fn check(
+        &self,
+        effective_reply_ttl: Option<u64>,
+        effective_idempotency_ttl: Option<u64>,
+        effective_queue_cap: Option<usize>,
+    ) -> Result<(), ManifestError> {
+        if self.reply_ttl_secs == 0 || effective_reply_ttl != Some(self.reply_ttl_secs) {
+            return Err(ManifestError::ReplyTtl);
+        }
+        if self.idempotency_ttl_secs == 0
+            || effective_idempotency_ttl != Some(self.idempotency_ttl_secs)
+        {
+            return Err(ManifestError::IdempotencyTtl);
+        }
+        if self.svc_queue_cap == 0 || effective_queue_cap != Some(self.svc_queue_cap) {
+            return Err(ManifestError::QueueCapacity);
+        }
+        if self.dedup_lifetime_secs == 0
+            || self.dedup_lifetime_secs > self.idempotency_ttl_secs
+            || self.dedup_lifetime_secs > i64::MAX as u64
+        {
+            return Err(ManifestError::DedupLifetime);
+        }
+        if self.max_text_bytes == 0 || self.max_text_bytes > 65536 {
+            return Err(ManifestError::TextBound);
+        }
+        Ok(())
+    }
+}
+
 impl XmsgConfig {
     pub async fn register(&self) -> Result<RegisteredService, ClientError> {
         if self.expected_node.trim().is_empty() {
