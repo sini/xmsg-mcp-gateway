@@ -1,0 +1,7 @@
+error[E0277]: the trait bound `RequestId: From<Value>` is not satisfied
+ --> tests/ui/request_id_from_rpc.rs:5:31
+  |
+5 |     let _: RequestId = rpc_id.into();
+  |                               ^^^^ the trait `From<Value>` is not implemented for `RequestId`
+  |
+  = note: required for `Value` to implement `Into<RequestId>`

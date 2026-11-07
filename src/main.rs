@@ -22,6 +22,12 @@ enum Command {
     },
     Init,
     MigrateCustody,
+    MigrateOutbound,
+    SetOutboundPolicy {
+        id: String,
+        revision: i64,
+        policy: PathBuf,
+    },
     Enroll {
         id: String,
         binding: PathBuf,
@@ -50,6 +56,8 @@ enum CommandError {
     Grant(#[from] GrantError),
     #[error(transparent)]
     Custody(#[from] xmsg_mcp_gateway::custody::Error),
+    #[error(transparent)]
+    Outbound(#[from] xmsg_mcp_gateway::outbound::Error),
     #[error("cannot read enrollment binding document")]
     ReadBinding(#[source] std::io::Error),
     #[error("invalid enrollment binding document")]
@@ -74,6 +82,24 @@ async fn run(cli: Cli) -> Result<(), CommandError> {
         (Some(state), Command::MigrateCustody) => {
             Store::open(&state)?.migrate_custody()?;
             println!("custody schema migrated; startup remains unavailable");
+        }
+        (Some(state), Command::MigrateOutbound) => {
+            Store::open(&state)?.migrate_outbound()?;
+            println!("outbound schema migrated; startup remains unavailable");
+        }
+        (
+            Some(state),
+            Command::SetOutboundPolicy {
+                id,
+                revision,
+                policy,
+            },
+        ) => {
+            let document = std::fs::read(policy).map_err(CommandError::ReadBinding)?;
+            let policy =
+                serde_json::from_slice(&document).map_err(CommandError::InvalidDocument)?;
+            let next = Store::open(&state)?.set_outbound_policy(&id, revision, &policy)?;
+            println!("outbound policy changed at revision {next}");
         }
         (Some(state), Command::Enroll { id, binding }) => {
             let document = std::fs::read(binding).map_err(CommandError::ReadBinding)?;

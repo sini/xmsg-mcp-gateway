@@ -70,10 +70,19 @@ at the metadata-retention bound. The default global gap budget is 1000 intervals
 (`max_gap_intervals`); exhaustion fails visibly without ACK, independently of the
 refusal budget. Healthy equal-sized poll intervals replace one another instead
 of accumulating a record for every poll.
+Steadily shrinking poll gaps do not replace earlier intervals. With the default
+budget, this can exhaust the gap ledger after roughly 5.8 days of polling,
+without any peer causing the pressure. Once exhausted, receive stops before
+acceptance: nothing is ACKed and the upstream queue can starve until expired
+gap records free capacity.
 A later first poll records process downtime without a synthetic disconnect call.
 Status compares recorded intervals and a currently unobserved/disconnected span
 against the effective reply TTL; an outage count alone never sets uncertainty.
 Sub-TTL gaps do not warn, and old intervals expire.
+The historical warning expires with its gap record at metadata retention
+(default 7 days); shortening retention shortens that warning's visibility.
+An ongoing unobserved gap and known outstanding-message uncertainty are separate
+status inputs.
 
 Status distinguishes offline uncertainty from possible loss of a known outstanding
 message. Known age is a lower bound from first observation, not a fabricated

@@ -165,6 +165,13 @@ impl Verifier {
         })
     }
 
+    pub fn requires_scope(&self, scope: &str) -> bool {
+        self.config
+            .required_scopes
+            .iter()
+            .any(|required| required == scope)
+    }
+
     pub async fn verify(&self, token: &str) -> Result<VerifiedIdentity, Error> {
         if token.is_empty() || token.len() > 16_384 || token.chars().any(char::is_whitespace) {
             return Err(Error::InvalidToken);

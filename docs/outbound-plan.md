@@ -25,8 +25,14 @@ may turn an old request into a fresh send; retention is capacity-bounded and
 requires future explicit reconciliation/archival.
 
 Fresh verification, current policy, owned reply correlation and exact live service
-target checks precede each bounded submission under the durable SQL operation
-guard. Disable waits for the guarded submission to finish. Request framing uses
+target checks precede each bounded submission under a per-service OS file lease.
+Reservation and outcome transactions commit separately; no SQLite transaction
+spans network I/O. Concurrent submitters acquire nonblocking and return pending
+when another process holds the lease. Disable acquires the same lease with a
+bounded wait before committing. Inbound custody never takes this lease. Its file
+is private, rejects symlinks and is never deleted while held. Kernel release after
+a process crash permits recovery with the stored key. The outcome records the
+submission revision and any change observed afterward. Request framing uses
 the actual service address and stable gateway correlation, with no model-selected
 origin. The complete framed text must fit the configured bound and the pinned
 node's default 65536-byte text ceiling; oversize is rejected, never truncated.
@@ -36,6 +42,6 @@ Real private-node tests kill the gateway after reservation/before submission and
 after node acceptance/before confirmation. Recovery must preserve the key,
 original message ID and exactly one receiver delivery. Additional cases cover
 reply receipts and ownership, expired uncertainty without retry, changed payload,
-request-ID requirements, policy/grant/scope checks, oversize, guard ordering and
+request-ID requirements, policy/grant/scope checks, oversize, lease ordering and
 bounded state. Every oracle has a single-site source mutant, plus mandatory
 profile count/marker and missing/early-return controls. No runtime mutant flags.
