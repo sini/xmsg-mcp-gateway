@@ -1,9 +1,11 @@
 use crate::grants::{
     Error as GrantError, Store, CUSTODY_SCHEMA_VERSION, MAX_SUPPORTED_SCHEMA_VERSION,
+    OUTBOUND_SCHEMA_VERSION,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -17,6 +19,10 @@ pub enum Error {
     Oversized,
     #[error("invalid outbound configuration")]
     Configuration,
+    #[error(
+        "outbound request deadline elapsed before a new submission; retry the same request_id"
+    )]
+    Deadline,
     #[error("outbound reservation capacity exhausted")]
     Capacity,
     #[error("outbound store busy; operation not submitted, retry the same request_id")]
@@ -125,7 +131,7 @@ impl Store {
             submission_revision INTEGER, revision_changed INTEGER NOT NULL DEFAULT 0 CHECK(revision_changed IN (0,1)),
             PRIMARY KEY(owner, operation, request_id)
         );")?;
-        tx.pragma_update(None, "user_version", MAX_SUPPORTED_SCHEMA_VERSION)?;
+        tx.pragma_update(None, "user_version", OUTBOUND_SCHEMA_VERSION)?;
         tx.commit()?;
         Ok(())
     }
@@ -134,7 +140,7 @@ impl Store {
         let version: i64 = self
             .connection
             .pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version != MAX_SUPPORTED_SCHEMA_VERSION {
+        if !(OUTBOUND_SCHEMA_VERSION..=MAX_SUPPORTED_SCHEMA_VERSION).contains(&version) {
             return Err(Error::MigrationRequired);
         }
         Ok(())
@@ -350,6 +356,27 @@ impl Reservation {
 }
 
 impl Store {
+    fn reply_target(
+        &self,
+        bus: &str,
+        message_id: &str,
+        sender: &str,
+        identity: &crate::auth::VerifiedIdentity,
+        authority: &crate::grants::Authorization,
+        existing: Option<&Reservation>,
+    ) -> Result<String, Error> {
+        if let Some(reservation) = existing {
+            return Ok(reservation.target.clone());
+        }
+        let origin: Option<String> = self.connection.query_row("SELECT c.origin FROM custody_items c JOIN grants g ON g.id=c.grant_id WHERE c.bus=?1 AND c.upstream_id=?2 AND c.mailbox=?3 AND c.owner=?4 AND g.service=?5 AND g.issuer=?6 AND g.resource=?7 AND c.grant_id=?8 AND c.grant_revision=?9 AND c.text IS NOT NULL AND c.expires_at>?10", params![bus, message_id, sender, identity.subject(), identity.service(), identity.issuer(), identity.resource(), authority.grant_id, authority.revision, now()], |r|r.get(0)).optional()?;
+        let origin: xmsg::client::Origin = serde_json::from_str(&origin.ok_or(Error::Denied)?)?;
+        let name = origin.service.ok_or(Error::Denied)?;
+        if origin.id.is_some() {
+            return Err(Error::Denied);
+        }
+        Ok(format!("{name}@{}", origin.node))
+    }
+
     fn expire_reservation(&self, reservation: &Reservation, limits: &Limits) -> Result<(), Error> {
         let deadline = if now() < reservation.created_at {
             0
@@ -382,12 +409,33 @@ pub async fn dispatch(
     limits: &Limits,
 ) -> Result<Outcome, Error> {
     limits.validate()?;
-    store.connection.busy_timeout(std::time::Duration::ZERO)?;
+    let mut dedicated = Store::open_nonblocking(&store.file)?;
+    dispatch_on_connection(
+        &mut dedicated,
+        service,
+        verifier,
+        token,
+        bus_instance,
+        request,
+        limits,
+    )
+    .await
+}
+
+async fn dispatch_on_connection(
+    store: &mut Store,
+    service: &Endpoint,
+    verifier: &crate::auth::Verifier,
+    token: &str,
+    bus_instance: &str,
+    request: &Request,
+    limits: &Limits,
+) -> Result<Outcome, Error> {
     store.require_outbound_ready()?;
     let started = std::time::Instant::now();
     let identity = tokio::time::timeout(limits.timeout, verifier.verify(token))
         .await
-        .map_err(|_| Error::Transport(xmsg::client::ClientError::Timeout))??;
+        .map_err(|_| Error::Deadline)??;
     let initial_grant = store.authorize(&identity)?;
     let initial_policy = store.outbound_policy(&initial_grant.grant_id)?;
     let initial_permission = initial_policy.permission(request)?;
@@ -421,6 +469,12 @@ pub async fn dispatch(
         }
         return Ok(Outcome::Pending);
     };
+    let (op, id, _) = request.parts();
+    let may_have_submitted = AtomicBool::new(
+        store
+            .reservation(&owner, op, id)?
+            .is_some_and(|row| row.receipt.is_none()),
+    );
     let remaining = limits.timeout.saturating_sub(started.elapsed());
     let result = tokio::time::timeout(
         remaining,
@@ -433,12 +487,16 @@ pub async fn dispatch(
             request,
             limits,
             &owner,
+            &may_have_submitted,
         ),
     )
     .await;
     match result {
         Ok(result) => result,
         Err(_) => {
+            if !may_have_submitted.load(Ordering::Relaxed) {
+                return Err(Error::Deadline);
+            }
             let (op, id, _) = request.parts();
             if store.connection.execute("UPDATE outbound_reservations SET state='unknown' WHERE owner=?1 AND operation=?2 AND request_id=?3 AND receipt IS NULL", params![owner, op, id.as_str()]).is_err() {
                 tracing::debug!(target:"gateway_outbound_pending", "uncertain outcome could not be recorded");
@@ -458,6 +516,7 @@ async fn submit(
     request: &Request,
     limits: &Limits,
     owner: &str,
+    may_have_submitted: &AtomicBool,
 ) -> Result<Outcome, Error> {
     let identity = verifier.verify(token).await?;
     let fresh_owner = crate::custody::fingerprint(&[
@@ -477,23 +536,22 @@ async fn submit(
         return Err(Error::Denied);
     }
     let sender = service.sender.as_str();
+    let existing = store.reservation(owner, op, id)?;
     let (target, correlation) = match request {
         Request::Send(args) => (args.to.clone(), None),
-        Request::Reply(args) => {
-            let origin: Option<String> = store.connection.query_row("SELECT c.origin FROM custody_items c JOIN grants g ON g.id=c.grant_id WHERE c.bus=?1 AND c.upstream_id=?2 AND c.mailbox=?3 AND c.owner=?4 AND g.service=?5 AND g.issuer=?6 AND g.resource=?7 AND c.grant_id=?8 AND c.grant_revision=?9 AND c.text IS NOT NULL AND c.expires_at>?10", params![bus_instance, args.message_id, sender, identity.subject(), identity.service(), identity.issuer(), identity.resource(), authority.grant_id, authority.revision, now()], |r|r.get(0)).optional()?;
-            let origin: xmsg::client::Origin = serde_json::from_str(&origin.ok_or(Error::Denied)?)?;
-            let name = origin.service.ok_or(Error::Denied)?;
-            if origin.id.is_some() {
-                return Err(Error::Denied);
-            }
-            (
-                format!("{name}@{}", origin.node),
-                Some(args.message_id.as_str()),
-            )
-        }
+        Request::Reply(args) => (
+            store.reply_target(
+                bus_instance,
+                &args.message_id,
+                sender,
+                &identity,
+                &authority,
+                existing.as_ref(),
+            )?,
+            Some(args.message_id.as_str()),
+        ),
     };
     let payload_hash = crate::custody::fingerprint(&[op, &target, correlation.unwrap_or(""), text]);
-    let existing = store.reservation(owner, op, id)?;
     if existing
         .as_ref()
         .is_some_and(|reservation| reservation.payload_hash != payload_hash)
@@ -507,15 +565,15 @@ async fn submit(
         if let Some(receipt) = &reservation.receipt {
             return Ok(Outcome::Confirmed(serde_json::from_str(receipt)?));
         }
+        if reservation.expired(limits) {
+            store.expire_reservation(reservation, limits)?;
+            return Ok(Outcome::Unknown);
+        }
         if reservation.sender != sender
             || reservation.grant_id != authority.grant_id
             || reservation.grant_revision != authority.revision
         {
             return Err(Error::Denied);
-        }
-        if reservation.expired(limits) {
-            store.expire_reservation(reservation, limits)?;
-            return Ok(Outcome::Unknown);
         }
     }
     let Some((name, node)) = target.split_once('@') else {
@@ -579,6 +637,19 @@ async fn submit(
     if current.expires_at() <= now() as u64 || store.authorize(&current)? != authority {
         return Err(Error::Denied);
     }
+    if let Request::Reply(args) = request {
+        if store.reply_target(
+            bus_instance,
+            &args.message_id,
+            sender,
+            &current,
+            &authority,
+            None,
+        )? != target
+        {
+            return Err(Error::Denied);
+        }
+    }
     if reservation.expired(limits) {
         store.expire_reservation(&reservation, limits)?;
         return Ok(Outcome::Unknown);
@@ -587,6 +658,7 @@ async fn submit(
         return Err(Error::Oversized);
     }
     let key = reservation.key.clone();
+    may_have_submitted.store(true, Ordering::Relaxed);
     let submitted = match correlation {
         Some(message_id) => service
             .client

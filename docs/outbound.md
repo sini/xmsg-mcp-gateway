@@ -33,7 +33,10 @@ digits and `.`, `_`, `:`, `-`. Missing, null, numeric and unknown arguments refu
 There is no default or conversion from a JSON-RPC value. The dispatcher has no
 JSON-RPC ID input. Reservations are unique on the verified owner profile,
 operation and request ID, with a canonical payload fingerprint. Changed payloads
-conflict. A confirmed duplicate returns the stored original xmsg receipt.
+conflict. A confirmed duplicate returns the stored original xmsg receipt even
+after a policy revision or expiry of its inbound reply correlation, provided
+current authority still permits that operation and target. Expired unresolved
+work becomes unknown before stale acceptance revisions are considered.
 
 The reservation commits as pending before submission. Its stable key and framed
 bytes survive a process crash. Pending means possibly submitted; unknown means
@@ -60,8 +63,9 @@ committing, so no later authorized submission begins after disable commits.
 An in-flight accepted submission cannot be recalled by disabling the grant.
 
 The dispatcher accepts a total asynchronous operation budget of at most 25 seconds
-for verification, discovery and submission. Its SQLite connection uses no busy
-wait. Owner disable/policy changes wait at most 30 seconds for the lease, then
+for verification, discovery and submission. It opens a dedicated SQLite connection
+with no busy wait; the caller's Store retains its own custody wait behavior.
+Owner disable/policy changes wait at most 30 seconds for the lease, then
 fail visibly without changing authority. Synchronous filesystem/database I/O is
 not a hard real-time guarantee. No SQLite transaction spans network I/O, and
 inbound custody commits and ACKs never acquire this lease. Outcome commit records
@@ -71,6 +75,9 @@ refusal with no row or submission; retry uses the same request ID. If the outcom
 commit is busy after xmsg accepted, it returns pending rather than reporting a
 failed send. The existing durable pending row recovers with its stored key and
 original upstream message ID. The schema permits no fabricated failed state.
+An asynchronous deadline before any possible submission is a transient refusal,
+not unknown. A resumed unconfirmed reservation is already possibly submitted;
+its deadline cannot be treated as proof of refusal.
 
 The caller supplies explicit dedup lifetime and reservation count/byte bounds.
 There is no automatic ledger eviction that could forget an old request ID and
@@ -78,13 +85,14 @@ turn a repeat into a fresh send. Exhaustion refuses new reservations; reconcilia
 and archival require a later owner workflow. The actual daemon TTL/queue checks
 remain the prerequisite startup work rather than guessed manifest values.
 
-The mandatory private-node profile runs 11 named cases with completion markers,
+The mandatory private-node profile runs 15 named cases with completion markers,
 missing-fixture and early-return refusals. It covers both process-crash cuts,
 same-ID receipts and payload conflicts, expired uncertainty, held revisions,
 owned replies, disable ordering, inbound progress during stalled acceptance, and
 both SQLite BUSY phases. Portable tests cover the explicit migrations, strict
 request IDs (including a committed trybuild snapshot), per-service lease custody
-and the real owner's 30-second timeout. The 28 single-site source mutants must
+and the real owner's 30-second timeout. The 34 single-site source mutants must
 fail their named assertions; compile failures, cached artifacts and harness
-timeouts do not count as kills. The later serving unit owns the end-to-end MCP
+timeouts do not count as kills. A source control advances the supported schema
+ceiling while requiring outbound schema 3 to remain usable. The later serving unit owns the end-to-end MCP
 JSON-RPC-ID, missing-request-ID and default-empty-policy acceptance cells.

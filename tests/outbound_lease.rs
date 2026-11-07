@@ -2,6 +2,8 @@ use xmsg_mcp_gateway::grants::Store;
 #[allow(dead_code)]
 #[path = "common/custody_crash.rs"]
 mod crash;
+#[path = "common/outbound_observer.rs"]
+mod observer;
 
 #[test]
 fn operation_lease_is_per_service_and_nonblocking() {
@@ -49,10 +51,116 @@ fn operation_lease_is_private_and_refuses_symlinks() {
         "lease file with public permissions was accepted"
     );
     std::fs::set_permissions(lease, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let alias = temp.path().join("lease-alias");
+    std::fs::hard_link(lease, &alias).unwrap();
+    assert!(
+        store.try_operation_lease("gateway").is_err(),
+        "lease with multiple hard links was accepted"
+    );
+    std::fs::remove_file(alias).unwrap();
     let target = temp.path().join("target");
     std::fs::rename(lease, &target).unwrap();
     symlink(&target, lease).unwrap();
     assert!(store.try_operation_lease("gateway").is_err());
+}
+
+#[test]
+fn policy_write_child() {
+    let Ok(document) = std::env::var("POLICY_WRITE_DOCUMENT") else {
+        return;
+    };
+    let document: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(document).unwrap()).unwrap();
+    let marker = std::path::PathBuf::from(document["marker"].as_str().unwrap());
+    tracing::subscriber::set_global_default(observer::AtEvent {
+        target: "gateway_operation_wait",
+        action: move || {
+            std::fs::write(&marker, b"observed lease contention").unwrap();
+        },
+    })
+    .unwrap();
+    let mut store = Store::open(std::path::Path::new(document["state"].as_str().unwrap())).unwrap();
+    let policy: xmsg_mcp_gateway::outbound::Policy =
+        serde_json::from_value(document["policy"].clone()).unwrap();
+    store.set_outbound_policy("grant", 1, &policy).unwrap();
+}
+
+#[test]
+fn owner_policy_write_waits_for_the_same_service_lease() {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("authority.db");
+    let mut store = Store::initialize(&file).unwrap();
+    store
+        .enroll(
+            "grant",
+            &xmsg_mcp_gateway::grants::Binding {
+                service: "gateway".into(),
+                issuer: "issuer".into(),
+                resource: "resource".into(),
+                subject: "owner".into(),
+                hosted_client: "hosted".into(),
+            },
+        )
+        .unwrap();
+    store.migrate_custody().unwrap();
+    store.migrate_outbound().unwrap();
+    let held = store.try_operation_lease("gateway").unwrap().unwrap();
+    let marker = temp.path().join("policy-waiting");
+    let document = temp.path().join("policy-command.json");
+    std::fs::write(&document,serde_json::to_vec(&serde_json::json!({"state":file,"marker":marker,"policy":{"send":{"targets":["receiver@node"],"required_scope":"send:write"},"reply":null}})).unwrap()).unwrap();
+    let log = temp.path().join("policy-child.log");
+    let mut child = crash::Worker(
+        Command::new(std::env::current_exe().unwrap())
+            .args(["policy_write_child", "--exact", "--nocapture"])
+            .env("POLICY_WRITE_DOCUMENT", &document)
+            .stdout(Stdio::null())
+            .stderr(std::fs::File::create(&log).unwrap())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !marker.exists() {
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "policy write bypassed the service lease: {}",
+            std::fs::read_to_string(&log).unwrap()
+        );
+        assert!(
+            Instant::now() < deadline,
+            "policy write never reported lease contention"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let sql = rusqlite::Connection::open(&file).unwrap();
+    let revision: i64 = sql
+        .query_row("SELECT revision FROM grants", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(revision, 1);
+    drop(held);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            assert!(
+                status.success(),
+                "policy child failed: {}",
+                std::fs::read_to_string(&log).unwrap()
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "policy write did not finish after lease release"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let state: (i64, bool) = sql
+        .query_row("SELECT revision,enabled FROM grants", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(state, (2, false));
 }
 
 #[test]

@@ -368,11 +368,15 @@ enum Recovery {
     Expire,
     Disable,
     Reenable,
+    ExpiredReenable,
 }
 
 async fn crash_at(phase: &str, recovery: Recovery) {
-    let expire = recovery == Recovery::Expire;
-    let disable = matches!(recovery, Recovery::Disable | Recovery::Reenable);
+    let expire = matches!(recovery, Recovery::Expire | Recovery::ExpiredReenable);
+    let disable = matches!(
+        recovery,
+        Recovery::Disable | Recovery::Reenable | Recovery::ExpiredReenable
+    );
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
     let binary = real_node::pinned_binary();
@@ -529,7 +533,7 @@ async fn crash_at(phase: &str, recovery: Recovery) {
     }
     from.restart(&binary).await;
     let service = from.config.register().await.unwrap();
-    if recovery == Recovery::Reenable {
+    if matches!(recovery, Recovery::Reenable | Recovery::ExpiredReenable) {
         store.set_enabled("grant", 4, true).unwrap();
     }
     let mut recovery_limits = limits();
@@ -552,7 +556,7 @@ async fn crash_at(phase: &str, recovery: Recovery) {
             matches!(recovered, Err(Error::Denied)),
             "old pending work escaped disable and re-enable"
         );
-    } else if disable {
+    } else if disable && !expire {
         assert!(
             matches!(
                 recovered,
@@ -562,7 +566,7 @@ async fn crash_at(phase: &str, recovery: Recovery) {
         );
     } else if expire {
         assert_eq!(
-            recovered.unwrap(),
+            recovered.expect("expired stale reservation was denied instead of becoming unknown"),
             Outcome::Unknown,
             "expired uncertainty was blindly retried"
         );
@@ -639,6 +643,276 @@ async fn disable_waits_for_the_service_lease_and_prevents_later_submission() {
 async fn pending_work_stays_held_across_disable_and_reenable() {
     crash_at("before", Recovery::Reenable).await;
     println!("gateway-outbound-complete:held-revision");
+}
+
+#[tokio::test]
+#[ignore = "mandatory private-node outbound profile"]
+async fn expired_pending_work_becomes_unknown_even_after_grant_revision_changes() {
+    crash_at("before", Recovery::ExpiredReenable).await;
+    println!("gateway-outbound-complete:expired-stale-revision");
+}
+
+#[tokio::test]
+#[ignore = "mandatory private-node outbound profile"]
+async fn dispatch_does_not_change_the_callers_custody_busy_wait() {
+    let node = real_node::Node::start(&real_node::pinned_binary()).await;
+    let service = node.config.register().await.unwrap();
+    let endpoint = Endpoint::from_registered(&service).unwrap();
+    let (fixture, mut store, verifier) = authority();
+    let operation = request(
+        "denied-request",
+        service.address().unwrap(),
+        "no write policy",
+    );
+    assert!(matches!(
+        dispatch(
+            &mut store,
+            &endpoint,
+            &verifier,
+            "good-token",
+            "private-bus",
+            &operation,
+            &limits()
+        )
+        .await,
+        Err(Error::Denied)
+    ));
+    let file = fixture.store_file.clone();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        let sql = rusqlite::Connection::open(file).unwrap();
+        sql.execute_batch("BEGIN IMMEDIATE").unwrap();
+        ready_tx.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        sql.execute_batch("COMMIT").unwrap();
+    });
+    ready_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    let result = store.record_custody_link(
+        &xmsg_mcp_gateway::custody::Scope {
+            bus_instance: "private-bus".into(),
+            grant_id: "grant".into(),
+        },
+        true,
+        &xmsg_mcp_gateway::custody::Limits::default(),
+        100,
+    );
+    writer.join().unwrap();
+    result.expect("dispatch disabled the caller Store's custody busy wait");
+    println!("gateway-outbound-complete:isolated-connection");
+}
+
+#[tokio::test]
+#[ignore = "mandatory private-node outbound profile"]
+async fn timeout_before_reservation_is_a_transient_refusal_not_unknown() {
+    use std::os::unix::fs::PermissionsExt;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let node = real_node::Node::start(&real_node::pinned_binary()).await;
+    let mut service = node.config.register().await.unwrap();
+    let endpoint = Endpoint::from_registered(&service).unwrap();
+    let (fixture, mut store, verifier) = authority();
+    store
+        .set_outbound_policy(
+            "grant",
+            2,
+            &Policy {
+                send: Some(Permission {
+                    targets: [service.address().unwrap().to_owned()].into(),
+                    required_scope: "send:write".into(),
+                }),
+                reply: None,
+            },
+        )
+        .unwrap();
+    let backend = node
+        .config
+        .agent_socket
+        .with_file_name("agent.backend.sock");
+    std::fs::rename(&node.config.agent_socket, backend).unwrap();
+    let listener = tokio::net::UnixListener::bind(&node.config.agent_socket).unwrap();
+    std::fs::set_permissions(
+        &node.config.agent_socket,
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let proxy = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut socket = BufReader::new(socket);
+        let mut frame = String::new();
+        socket.read_line(&mut frame).await.unwrap();
+        let request: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(request["action"], "list");
+        entered_tx.send(()).unwrap();
+        release_rx.await.unwrap();
+    });
+    let operation = request(
+        "not-submitted",
+        service.address().unwrap(),
+        "must not become unknown",
+    );
+    let mut operation_limits = limits();
+    operation_limits.timeout = std::time::Duration::from_secs(1);
+    let result = dispatch(
+        &mut store,
+        &endpoint,
+        &verifier,
+        "good-token",
+        "private-bus",
+        &operation,
+        &operation_limits,
+    );
+    tokio::pin!(result);
+    tokio::select! {
+        output=&mut result => panic!("deadline case did not reach discovery: {output:?}"),
+        ready=entered_rx => ready.unwrap(),
+    }
+    let output = result.await;
+    release_tx.send(()).unwrap();
+    proxy.await.unwrap();
+    assert!(
+        matches!(output, Err(Error::Deadline)),
+        "pre-reservation timeout was reported as unknown: {output:?}"
+    );
+    let sql = rusqlite::Connection::open(&fixture.store_file).unwrap();
+    let count: i64 = sql
+        .query_row("SELECT COUNT(*) FROM outbound_reservations", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 0);
+    assert!(service.poll(0).await.unwrap().is_none());
+    println!("gateway-outbound-complete:deadline-before-submit");
+}
+
+#[tokio::test]
+#[ignore = "mandatory private-node outbound profile"]
+async fn confirmed_reply_replay_survives_policy_write_and_correlation_expiry() {
+    let binary = real_node::pinned_binary();
+    let ca = real_node::Authority::generate();
+    let from = real_node::Prepared::create("gateway", "gateway", Some(&ca));
+    let to = real_node::Prepared::create("receiver", "receiver", Some(&ca));
+    from.peer(&to, serde_json::json!({}));
+    to.peer(&from, serde_json::json!({}));
+    let from = from.launch(&binary).await;
+    let to = to.launch(&binary).await;
+    let mut service = from.config.register().await.unwrap();
+    let endpoint = Endpoint::from_registered(&service).unwrap();
+    let mut receiver = to.config.register().await.unwrap();
+    let target = receiver.address().unwrap().to_owned();
+    let (fixture, mut store, verifier) = authority();
+    let permission = Permission {
+        targets: [target.clone()].into(),
+        required_scope: "reply:write".into(),
+    };
+    store
+        .set_outbound_policy(
+            "grant",
+            2,
+            &Policy {
+                send: None,
+                reply: Some(permission.clone()),
+            },
+        )
+        .unwrap();
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let scope = xmsg_mcp_gateway::custody::Scope {
+        bus_instance: "private-bus".into(),
+        grant_id: "grant".into(),
+    };
+    let incoming = receiver
+        .send(
+            service.address().unwrap(),
+            "retained reply correlation",
+            Some("replay-correlation"),
+        )
+        .await
+        .unwrap();
+    let delivery = service.poll(1).await.unwrap().unwrap();
+    let custody_limits = xmsg_mcp_gateway::custody::Limits::default();
+    store
+        .accept_delivery(&scope, &service, &delivery, &custody_limits, timestamp)
+        .unwrap();
+    service.ack(delivery.message_id()).await.unwrap();
+    let operation = Request::Reply(ReplyArguments {
+        request_id: RequestId::parse("confirmed-reply").unwrap(),
+        message_id: incoming.message_id,
+        text: "original reply bytes".into(),
+    });
+    let first = dispatch(
+        &mut store,
+        &endpoint,
+        &verifier,
+        "good-token",
+        "private-bus",
+        &operation,
+        &limits(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(first, Outcome::Confirmed(Receipt::Reply(_))));
+    let delivery = receiver.poll(1).await.unwrap().unwrap();
+    receiver.ack(delivery.message_id()).await.unwrap();
+    store
+        .set_outbound_policy(
+            "grant",
+            3,
+            &Policy {
+                send: Some(Permission {
+                    targets: [target].into(),
+                    required_scope: "send:write".into(),
+                }),
+                reply: Some(permission),
+            },
+        )
+        .unwrap();
+    let replay = dispatch(
+        &mut store,
+        &endpoint,
+        &verifier,
+        "good-token",
+        "private-bus",
+        &operation,
+        &limits(),
+    )
+    .await
+    .expect("confirmed reply was denied after a policy write");
+    assert_eq!(replay, first);
+    store
+        .custody_status(
+            &scope,
+            &custody_limits,
+            timestamp + custody_limits.content_retention_secs + 1,
+            604800,
+        )
+        .unwrap();
+    let sql = rusqlite::Connection::open(&fixture.store_file).unwrap();
+    let expired: bool = sql
+        .query_row("SELECT text IS NULL FROM custody_items", [], |r| r.get(0))
+        .unwrap();
+    assert!(expired);
+    let replay = dispatch(
+        &mut store,
+        &endpoint,
+        &verifier,
+        "good-token",
+        "private-bus",
+        &operation,
+        &limits(),
+    )
+    .await
+    .expect("confirmed reply was denied after its correlation expired");
+    assert_eq!(replay, first);
+    assert!(
+        receiver.poll(0).await.unwrap().is_none(),
+        "confirmed reply replay submitted again"
+    );
+    println!("gateway-outbound-complete:confirmed-reply-replay");
 }
 
 #[tokio::test]

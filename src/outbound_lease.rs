@@ -73,6 +73,7 @@ impl Store {
             if let Some(lease) = self.try_operation_lease(service)? {
                 return Ok(lease);
             }
+            tracing::debug!(target:"gateway_operation_wait", "service lease contended");
             if Instant::now() >= deadline {
                 return Err(Error::OperationBusy);
             }

@@ -11,6 +11,7 @@ use thiserror::Error;
 const APPLICATION_ID: i64 = 0x584d4757;
 const SCHEMA_VERSION: i64 = 1;
 pub const CUSTODY_SCHEMA_VERSION: i64 = 2;
+pub const OUTBOUND_SCHEMA_VERSION: i64 = 3;
 pub const MAX_SUPPORTED_SCHEMA_VERSION: i64 = 3;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -74,7 +75,7 @@ impl Store {
             options.mode(0o600);
         }
         options.open(file)?;
-        let mut connection = Self::connect(file)?;
+        let mut connection = Self::connect(file, Duration::from_secs(30))?;
         let tx = connection.transaction()?;
         tx.execute_batch(
             "CREATE TABLE grants (
@@ -100,8 +101,16 @@ impl Store {
     }
 
     pub fn open(file: &Path) -> Result<Self, Error> {
+        Self::open_with_wait(file, Duration::from_secs(30))
+    }
+
+    pub(crate) fn open_nonblocking(file: &Path) -> Result<Self, Error> {
+        Self::open_with_wait(file, Duration::ZERO)
+    }
+
+    fn open_with_wait(file: &Path, wait: Duration) -> Result<Self, Error> {
         tracing::debug!(target: "gateway_policy_store", "open");
-        let connection = Self::connect(file)?;
+        let connection = Self::connect(file, wait)?;
         let application: i64 =
             connection.pragma_query_value(None, "application_id", |r| r.get(0))?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -114,7 +123,7 @@ impl Store {
         if version >= CUSTODY_SCHEMA_VERSION {
             crate::custody::validate_schema(&connection)?;
         }
-        if version == MAX_SUPPORTED_SCHEMA_VERSION {
+        if version >= OUTBOUND_SCHEMA_VERSION {
             crate::outbound::validate_schema(&connection)?;
         }
         Ok(Self {
@@ -123,9 +132,9 @@ impl Store {
         })
     }
 
-    fn connect(file: &Path) -> Result<Connection, Error> {
+    fn connect(file: &Path, wait: Duration) -> Result<Connection, Error> {
         let connection = Connection::open_with_flags(file, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-        connection.busy_timeout(Duration::from_secs(30))?;
+        connection.busy_timeout(wait)?;
         connection.pragma_update(None, "synchronous", "FULL")?;
         Ok(connection)
     }

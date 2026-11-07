@@ -315,12 +315,82 @@ CASES += [
 ]
 
 
+expiry_check = """        if reservation.expired(limits) {
+            store.expire_reservation(reservation, limits)?;
+            return Ok(Outcome::Unknown);
+        }
+"""
+revision_check = """        if reservation.sender != sender
+            || reservation.grant_id != authority.grant_id
+            || reservation.grant_revision != authority.revision
+        {
+            return Err(Error::Denied);
+        }
+"""
+CASES += [
+    (
+        "confirmed-reply-query-order",
+        "src/outbound.rs",
+        "if let Some(reservation) = existing {",
+        "if let Some(reservation) = None::<&Reservation> {",
+        "custody_outbound",
+        "confirmed_reply_replay_survives_policy_write_and_correlation_expiry",
+        "confirmed reply was denied after a policy write",
+    ),
+    (
+        "expired-before-revision",
+        "src/outbound.rs",
+        expiry_check + revision_check,
+        revision_check + expiry_check,
+        "custody_outbound",
+        "expired_pending_work_becomes_unknown_even_after_grant_revision_changes",
+        "expired stale reservation was denied instead of becoming unknown",
+    ),
+    (
+        "caller-busy-wait",
+        "src/outbound.rs",
+        "let mut dedicated = Store::open_nonblocking(&store.file)?;",
+        "store.connection.busy_timeout(std::time::Duration::ZERO)?;\n    let mut dedicated = Store::open_nonblocking(&store.file)?;",
+        "custody_outbound",
+        "dispatch_does_not_change_the_callers_custody_busy_wait",
+        "dispatch disabled the caller Store's custody busy wait",
+    ),
+    (
+        "policy-lease",
+        "src/outbound.rs",
+        "let _lease = self.wait_operation_lease(&service, std::time::Duration::from_secs(30))?;",
+        "let _lease = ();",
+        "outbound_lease",
+        "owner_policy_write_waits_for_the_same_service_lease",
+        "policy write bypassed the service lease",
+    ),
+    (
+        "lease-single-link",
+        "src/outbound_lease.rs",
+        "|| metadata.nlink() != 1",
+        "",
+        "outbound_lease",
+        LEASE_TEST,
+        "lease with multiple hard links was accepted",
+    ),
+    (
+        "deadline-before-submit",
+        "src/outbound.rs",
+        "if !may_have_submitted.load(Ordering::Relaxed) {",
+        "if false {",
+        "custody_outbound",
+        "timeout_before_reservation_is_a_transient_refusal_not_unknown",
+        "pre-reservation timeout was reported as unknown",
+    ),
+]
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", choices=[case[0] for case in CASES])
     parser.add_argument("--list", action="store_true")
     args = parser.parse_args()
-    assert len(CASES) == 28, "outbound mutant inventory drift"
+    assert len(CASES) == 34, "outbound mutant inventory drift"
     for name, filename, old, *_ in CASES:
         assert (ROOT / filename).read_text().count(old) == 1, (
             name,
@@ -381,9 +451,37 @@ def main():
                 print(f"{name}: GREEN baseline / RED intended", flush=True)
             finally:
                 file.write_text(source)
-        assert completed == (1 if args.case else 28), (
+        assert completed == (1 if args.case else 34), (
             "outbound mutant completion mismatch"
         )
+        if not args.case:
+            file = root / "src/grants.rs"
+            original = file.read_text()
+            site = "pub const MAX_SUPPORTED_SCHEMA_VERSION: i64 = 3;"
+            assert original.count(site) == 1, "schema ceiling control needs updating"
+            try:
+                file.write_text(
+                    original.replace(
+                        site, "pub const MAX_SUPPORTED_SCHEMA_VERSION: i64 = 4;", 1
+                    )
+                )
+                forward = run(
+                    root,
+                    "outbound_store",
+                    "migration_is_explicit_and_policy_is_owner_revision_checked",
+                    "src/grants.rs",
+                )
+                assert (
+                    forward.returncode == 0
+                    and "1 passed; 0 failed; 0 ignored" in forward.stdout
+                ), (
+                    "outbound required schema followed the supported ceiling",
+                    forward.stdout,
+                    forward.stderr,
+                )
+            finally:
+                file.write_text(original)
+            print("outbound-schema-floor-control:passed", flush=True)
     print(f"outbound-mutants-complete:{completed}", flush=True)
 
 
