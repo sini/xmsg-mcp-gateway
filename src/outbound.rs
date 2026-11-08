@@ -6,7 +6,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -336,19 +336,7 @@ impl Limits {
 }
 
 fn reservation_times(at: SystemTime, lifetime: i64) -> Result<(i64, i64), Error> {
-    if lifetime <= 0 {
-        return Err(Error::Configuration);
-    }
-    let elapsed = at
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| Error::Configuration)?;
-    let created_at = i64::try_from(elapsed.as_secs()).map_err(|_| Error::Configuration)?;
-    // SQLite keeps whole seconds: floor creation for rollback detection, ceil the retry window.
-    let retry_until = created_at
-        .checked_add(lifetime)
-        .and_then(|deadline| deadline.checked_add(i64::from(elapsed.subsec_nanos() != 0)))
-        .ok_or(Error::Configuration)?;
-    Ok((created_at, retry_until))
+    crate::deadline::window(at, lifetime).map_err(|_| Error::Configuration)
 }
 
 fn now() -> i64 {
@@ -745,7 +733,7 @@ async fn submit(
 #[cfg(test)]
 mod reservation_time_tests {
     use super::*;
-    use std::time::Duration;
+    use std::time::{Duration, UNIX_EPOCH};
 
     #[test]
     fn fractional_reservation_times_preserve_the_complete_lifetime() {

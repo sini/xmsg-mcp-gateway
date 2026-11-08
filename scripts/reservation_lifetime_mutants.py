@@ -31,6 +31,7 @@ UNITS = [
 CASES = [
     (
         "floor-window",
+        "src/deadline.rs",
         "i64::from(elapsed.subsec_nanos() != 0)",
         "0",
         UNITS[0],
@@ -38,6 +39,7 @@ CASES = [
     ),
     (
         "floor-reader-cap",
+        "src/outbound.rs",
         ".saturating_add(1)",
         ".saturating_add(0)",
         UNITS[3],
@@ -45,6 +47,7 @@ CASES = [
     ),
     (
         "extend-stored-window",
+        "src/outbound.rs",
         "self.retry_until.min(",
         "i64::MAX.min(",
         UNITS[3],
@@ -83,20 +86,23 @@ def build_units(root):
 def units():
     source = SOURCE.read_text()
     nonce = uuid.uuid4().hex
-    arms = [("control", source, UNITS, None)]
-    for label, needle, replacement, test, diagnostic in CASES:
-        assert source.count(needle) == 1, ("source site drift", label)
-        arms.append((label, source.replace(needle, replacement, 1), [test], diagnostic))
-    for label, variant, tests, diagnostic in arms:
+    arms = [("control", "src/outbound.rs", source, UNITS, None)]
+    for label, filename, needle, replacement, test, diagnostic in CASES:
+        target = (ROOT / filename).read_text()
+        assert target.count(needle) == 1, ("source site drift", label)
+        arms.append((label, filename, target.replace(needle, replacement, 1), [test], diagnostic))
+    for label, filename, variant, tests, diagnostic in arms:
         with tempfile.TemporaryDirectory(prefix=f"gateway-lifetime-{label}-") as directory:
             root = Path(directory)
             copy_fixture_tree(root)
+            (root / filename).write_text(variant)
+            unit_source = (root / "src/outbound.rs").read_text()
             markers = []
             for test in tests:
                 marker = f"reservation-lifetime-arm:{nonce}:{label}:{test}"
                 markers.append(marker)
-                variant = marked(variant, test, marker)
-            (root / "src/outbound.rs").write_text(variant)
+                unit_source = marked(unit_source, test, marker)
+            (root / "src/outbound.rs").write_text(unit_source)
             executable = build_units(root)
             record(root, executable, label)
             args = [str(executable), UNIT if diagnostic is None else UNIT + tests[0],
