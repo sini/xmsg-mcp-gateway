@@ -127,6 +127,10 @@ async fn run(cli: Cli) -> Result<(), CommandError> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(std::io::stderr)
+        .init();
     if let Err(error) = run(Cli::parse()).await {
         eprintln!("gateway command failed: {error}");
         std::process::exit(1);
