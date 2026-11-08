@@ -15,6 +15,10 @@ from transport_compat import (
 )
 
 MARKERS = [
+    "fractional-pending",
+    "fractional-refusal",
+    "fractional-content",
+    "fractional-tombstone",
     "commit-before-ack",
     "oversized-refusal",
     "conflict-quarantine",
@@ -39,7 +43,7 @@ MARKERS = [
 def require_complete(result):
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert (
-        "18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out" in result.stdout
+        "22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out" in result.stdout
     ), "custody profile count/skip mismatch"
     for marker in MARKERS:
         assert result.stdout.count(f"gateway-custody-complete:{marker}") == 1, (
@@ -56,7 +60,7 @@ def main():
     evidence.mkdir(parents=True, exist_ok=True)
     (evidence / "profile.log").write_text(result.stdout + result.stderr)
     require_complete(result)
-    print("custody profile:18/18, zero ignored, all completion markers", flush=True)
+    print("custody profile:22/22, zero ignored, all completion markers", flush=True)
     missing = live(
         executable,
         None,
@@ -107,7 +111,7 @@ def main():
         "custody missing-binary and early-return controls: expected refusals",
         flush=True,
     )
-    print("custody-checks-complete:18", flush=True)
+    print("custody-checks-complete:22", flush=True)
 
 
 if __name__ == "__main__":

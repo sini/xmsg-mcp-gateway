@@ -51,7 +51,7 @@ jobs:
           assert summaries, "no Rust test summaries"
           counts = [tuple(map(int, row)) for row in summaries]
           assert all(not row[1] and not any(row[3:]) for row in counts), "failed or filtered Rust tests"
-          expected_passed, expected_ignored = (88, 72) if sys.platform == "linux" else (85, 0)
+          expected_passed, expected_ignored = (91, 76) if sys.platform == "linux" else (88, 0)
           assert sum(row[0] for row in counts) == expected_passed, "executed Rust test count mismatch"
           assert sum(row[2] for row in counts) == expected_ignored, "private-node deferral count mismatch"
           print(f"Rust test completion guard: {expected_passed} passed; {expected_ignored} private-node cases run in mandatory transport/custody job")
@@ -74,6 +74,7 @@ jobs:
           python3 scripts/body_mutants.py
           python3 scripts/provider_eof_mutants.py
           python3 scripts/reservation_lifetime_mutants.py
+          python3 scripts/custody_retention_mutants.py
 
   transport:
     runs-on: ubuntu-latest
@@ -103,14 +104,14 @@ jobs:
           revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')
           export XMSG_GATEWAY_BIN="$PWD/.artifacts/transport/$revision/xmsg"
           python3 scripts/custody_checks.py | tee custody-checks.log
-          grep -Fx 'custody-checks-complete:18' custody-checks.log
+          grep -Fx 'custody-checks-complete:22' custody-checks.log
           grep -Fx 'copied-control-cached-artifact:refused:custody_inbound' custody-checks.log
       - name: Custody source mutants
         run: |
           revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')
           export XMSG_GATEWAY_BIN="$PWD/.artifacts/transport/$revision/xmsg"
           python3 scripts/custody_mutants.py | tee custody-mutants.log
-          grep -Fx 'custody-mutants-complete:29' custody-mutants.log
+          grep -Fx 'custody-mutants-complete:33' custody-mutants.log
       - name: Private-node outbound custody and completion controls
         run: |
           revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')

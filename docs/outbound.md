@@ -1,5 +1,11 @@
 # Outbound custody foundation
 
+A configured lifetime L guarantees eligibility for at least L seconds and expires
+observable access before L+1 seconds, using one checked ceiling of the sub-second
+observation instant. Repeated access never extends an existing stored expiry.
+Physical reclaim follows the existing access/heartbeat cadence, which bounds its
+lag; no background purger is introduced.
+
 This library reserves and submits sends and replies using the pinned shared
 xmsg client. The MCP serving configuration and listener do not expose it yet.
 Send/reply tools still return "not yet available". The later startup unit must

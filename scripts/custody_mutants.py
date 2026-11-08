@@ -37,8 +37,8 @@ CASES = [
     ),
     (
         "early-ack",
-        "    let accepted = store.accept_delivery(scope, service, &delivery, limits, now)?;",
-        "    service.ack(delivery.message_id()).await?;\n    let accepted = store.accept_delivery(scope, service, &delivery, limits, now)?;",
+        "    let accepted = store.accept_delivery(scope, service, &delivery, limits, at)?;",
+        "    service.ack(delivery.message_id()).await?;\n    let accepted = store.accept_delivery(scope, service, &delivery, limits, at)?;",
         "failed_transaction_never_acknowledges_or_retains_partial_custody",
         "failed custody transaction ACKed upstream",
     ),
@@ -121,8 +121,8 @@ CASES += [
     ),
     (
         "process-crash-early-ack",
-        "    let accepted = store.accept_delivery(scope, service, &delivery, limits, now)?;",
-        "    service.ack(delivery.message_id()).await?;\n    let accepted = store.accept_delivery(scope, service, &delivery, limits, now)?;",
+        "    let accepted = store.accept_delivery(scope, service, &delivery, limits, at)?;",
+        "    service.ack(delivery.message_id()).await?;\n    let accepted = store.accept_delivery(scope, service, &delivery, limits, at)?;",
         "process_crash_before_commit_leaves_redelivery",
         "process crash lost unacknowledged upstream delivery",
     ),
@@ -165,14 +165,14 @@ CASES += [
 CASES += [
     (
         "idle-maintenance",
-        "            store.record_custody_link(scope, true, limits, now)?;",
+        "            store.record_custody_link(scope, true, limits, at)?;",
         "",
         "idle_poll_enforces_retention_and_observes_connection_changes",
         "idle receive ignored retention",
     ),
     (
         "receive-disconnect",
-        "            store.record_custody_link(scope, false, limits, now)?;",
+        "            store.record_custody_link(scope, false, limits, at)?;",
         "",
         "idle_poll_enforces_retention_and_observes_connection_changes",
         "disconnect was not recorded",
@@ -234,12 +234,43 @@ CASES += [
     ),
 ]
 
+CASES += [
+    (
+        "floor-pending",
+        '        tx.execute("INSERT OR IGNORE INTO custody_pending(bus,upstream_id,first_seen,expires_at) VALUES (?1,?2,?3,?4)", params![scope.bus_instance, delivery.message_id(), now, deadlines.metadata_expires])?;',
+        '        tx.execute("INSERT OR IGNORE INTO custody_pending(bus,upstream_id,first_seen,expires_at) VALUES (?1,?2,?3,?4)", params![scope.bus_instance, delivery.message_id(), now, now + limits.metadata_retention_secs])?;',
+        "pending_metadata_retains_its_complete_fractional_lifetime",
+        "custody_pending: retention window was floored",
+    ),
+    (
+        "floor-refusal",
+        '            tx.execute("INSERT OR IGNORE INTO custody_metadata (bus, upstream_id, fingerprint, origin, size, reason, first_seen, expires_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)", params![scope.bus_instance, delivery.message_id(), hash, origin, bounded_size, reason, now, deadlines.metadata_expires])?;',
+        '            tx.execute("INSERT OR IGNORE INTO custody_metadata (bus, upstream_id, fingerprint, origin, size, reason, first_seen, expires_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)", params![scope.bus_instance, delivery.message_id(), hash, origin, bounded_size, reason, now, now + limits.metadata_retention_secs])?;',
+        "refusal_metadata_retains_its_complete_fractional_lifetime",
+        "custody_metadata: retention window was floored",
+    ),
+    (
+        "floor-content",
+        '        tx.execute("INSERT INTO custody_items (bus,upstream_id,event_id,grant_id,grant_revision,mailbox,owner,origin,text,envelope,in_reply_to,fingerprint,received_at,expires_at,held) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,1)", params![scope.bus_instance, delivery.message_id(), event_id, scope.grant_id, revision, mailbox, owner, origin, delivery.text(), delivery.envelope(), delivery.in_reply_to(), hash, now, deadlines.content_expires])?;',
+        '        tx.execute("INSERT INTO custody_items (bus,upstream_id,event_id,grant_id,grant_revision,mailbox,owner,origin,text,envelope,in_reply_to,fingerprint,received_at,expires_at,held) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,1)", params![scope.bus_instance, delivery.message_id(), event_id, scope.grant_id, revision, mailbox, owner, origin, delivery.text(), delivery.envelope(), delivery.in_reply_to(), hash, now, now + limits.content_retention_secs])?;',
+        "held_content_retains_its_complete_fractional_lifetime",
+        "custody_items: retention window was floored",
+    ),
+    (
+        "floor-tombstone-anchor",
+        '        tx.execute("INSERT INTO custody_items (bus,upstream_id,event_id,grant_id,grant_revision,mailbox,owner,origin,text,envelope,in_reply_to,fingerprint,received_at,expires_at,held) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,1)", params![scope.bus_instance, delivery.message_id(), event_id, scope.grant_id, revision, mailbox, owner, origin, delivery.text(), delivery.envelope(), delivery.in_reply_to(), hash, now, deadlines.content_expires])?;',
+        '        tx.execute("INSERT INTO custody_items (bus,upstream_id,event_id,grant_id,grant_revision,mailbox,owner,origin,text,envelope,in_reply_to,fingerprint,received_at,expires_at,held) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,1)", params![scope.bus_instance, delivery.message_id(), event_id, scope.grant_id, revision, mailbox, owner, origin, delivery.text(), delivery.envelope(), delivery.in_reply_to(), hash, now, now + limits.content_retention_secs])?;',
+        "tombstone_gc_inherits_the_ceiled_content_anchor",
+        "custody_items: retention window was floored",
+    ),
+]
+
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", choices=[case[0] for case in CASES])
     args = parser.parse_args()
-    assert len(CASES) == 29, "custody mutant inventory drift"
+    assert len(CASES) == 33, "custody mutant inventory drift"
     evidence = ROOT / ".artifacts/custody-mutants"
     evidence.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="gateway-custody-mutants-") as directory:
@@ -287,7 +318,7 @@ def main():
                 print(f"{name}: GREEN baseline / RED intended", flush=True)
             finally:
                 file.write_text(SOURCE)
-        assert completed == (1 if args.case else 29)
+        assert completed == (1 if args.case else 33)
     print(f"custody-mutants-complete:{completed}", flush=True)
 
 

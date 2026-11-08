@@ -1,5 +1,11 @@
 # Inbound custody foundation
 
+A configured lifetime L guarantees eligibility for at least L seconds and expires
+observable access before L+1 seconds, using one checked ceiling of the sub-second
+observation instant. Repeated access never extends an existing stored expiry.
+Physical reclaim follows the existing access/heartbeat cadence, which bounds its
+lag; no background purger is introduced.
+
 This unit receives through `xmsg::client::RegisteredService`. It adds no MCP
 messaging, callback dispatcher, outbound submission or worker startup command.
 All accepted messages and outbox occurrences remain held. The first-subscription
@@ -98,8 +104,8 @@ and the session's configured Limits source. The shared service-name validator an
 all other activation gates also
 remain prerequisites.
 
-CI builds revision-verified private daemon fixtures, then requires 18 custody
-cases with zero ignored/filtered tests and all 18 completion markers. The crash
+CI builds revision-verified private daemon fixtures, then requires 22 custody
+cases with zero ignored/filtered tests and all 22 completion markers. The crash
 fixture kills an owned worker process while a content-free tracing subscriber
 stops it immediately before or after the real acceptance commit. It reopens the
 same database and proves redelivery, one stored event, original bytes and durable
@@ -108,7 +114,7 @@ ACK after a further daemon restart. Other cases drive 150 permanent refusals,
 retention, transient failures and mailbox selection. No fleet endpoints or
 credentials are used. Missing-binary and source-edited early-return controls must
 refuse. The source-mutant job rejects compile failures, cached library artifacts,
-timeouts and failures outside the named assertion; all 29 mutants must be killed.
+timeouts and failures outside the named assertion; all 33 mutants must be killed.
 
 The messaging session samples non-consuming health at most one second apart, but
 writes healthy observations only every `min(reply_ttl / 2, 60 seconds)`. Down/up
