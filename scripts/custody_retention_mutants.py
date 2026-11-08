@@ -36,6 +36,73 @@ CASES = [
     ),
 ]
 
+CASES += [
+    (
+        "late-gap",
+        "src/custody.rs",
+        "DELETE FROM custody_gaps WHERE expires_at<=?1",
+        "DELETE FROM custody_gaps WHERE expires_at<?1",
+        "custody::expiry_boundary_tests::gaps_expire_at_the_observed_boundary",
+        "gap remained visible at expiry",
+    ),
+    (
+        "late-pending",
+        "src/custody.rs",
+        "DELETE FROM custody_pending WHERE expires_at<=?1",
+        "DELETE FROM custody_pending WHERE expires_at<?1",
+        "custody::expiry_boundary_tests::pending_ids_expire_at_the_observed_boundary",
+        "pending ID remained visible at expiry",
+    ),
+    (
+        "late-pending-summary",
+        "src/custody.rs",
+        'tx.execute("UPDATE custody_links SET expired_first_seen = (SELECT MIN(first_seen) FROM (SELECT expired_first_seen AS first_seen UNION ALL SELECT first_seen FROM custody_pending WHERE bus = custody_links.bus AND expires_at<=?1)) WHERE EXISTS(SELECT 1 FROM custody_pending WHERE bus=custody_links.bus AND expires_at<=?1)", [now])?;',
+        'tx.execute("UPDATE custody_links SET expired_first_seen = (SELECT MIN(first_seen) FROM (SELECT expired_first_seen AS first_seen UNION ALL SELECT first_seen FROM custody_pending WHERE bus = custody_links.bus AND expires_at<?1)) WHERE EXISTS(SELECT 1 FROM custody_pending WHERE bus=custody_links.bus AND expires_at<?1)", [now])?;',
+        "custody::expiry_boundary_tests::pending_ids_expire_at_the_observed_boundary",
+        "expired pending uncertainty summary missing at expiry",
+    ),
+    (
+        "late-metadata",
+        "src/custody.rs",
+        "DELETE FROM custody_metadata WHERE expires_at <= ?1",
+        "DELETE FROM custody_metadata WHERE expires_at < ?1",
+        "custody::expiry_boundary_tests::refusal_metadata_expires_at_the_observed_boundary",
+        "metadata remained visible at expiry",
+    ),
+    (
+        "late-content",
+        "src/custody.rs",
+        "UPDATE custody_items SET text=NULL, envelope=NULL WHERE text IS NOT NULL AND expires_at<=?1",
+        "UPDATE custody_items SET text=NULL, envelope=NULL WHERE text IS NOT NULL AND expires_at<?1",
+        "custody::expiry_boundary_tests::held_content_expires_at_the_observed_boundary",
+        "content remained visible at expiry",
+    ),
+    (
+        "late-outbox",
+        "src/custody.rs",
+        "UPDATE custody_outbox SET state='expired' WHERE event_id IN (SELECT event_id FROM custody_items WHERE text IS NOT NULL AND expires_at<=?1)",
+        "UPDATE custody_outbox SET state='expired' WHERE event_id IN (SELECT event_id FROM custody_items WHERE text IS NOT NULL AND expires_at<?1)",
+        "custody::expiry_boundary_tests::outbox_expires_at_the_observed_boundary",
+        "outbox remained held at expiry",
+    ),
+    (
+        "late-tombstone",
+        "src/custody.rs",
+        "DELETE FROM custody_items WHERE text IS NULL AND expires_at<=?1",
+        "DELETE FROM custody_items WHERE text IS NULL AND expires_at<?1",
+        "custody::expiry_boundary_tests::tombstones_expire_at_the_observed_cutoff",
+        "tombstone remained visible at cutoff",
+    ),
+    (
+        "late-tombstone-outbox",
+        "src/custody.rs",
+        "DELETE FROM custody_outbox WHERE event_id IN (SELECT event_id FROM custody_items WHERE text IS NULL AND expires_at<=?1)",
+        "DELETE FROM custody_outbox WHERE event_id IN (SELECT event_id FROM custody_items WHERE text IS NULL AND expires_at<?1)",
+        "custody::expiry_boundary_tests::tombstones_expire_at_the_observed_cutoff",
+        "tombstone outbox remained visible at cutoff",
+    ),
+]
+
 
 def main():
     nonce = uuid.uuid4().hex
@@ -73,7 +140,7 @@ def main():
                     assert result.returncode == 101 and diagnostic in output, output
                     assert "0 passed; 1 failed; 0 ignored" in output, output
             print(f"{label}/{arm}: intended result; nonce={nonce}", flush=True)
-    print("custody-retention-mutants-complete:3", flush=True)
+    print("custody-retention-mutants-complete:11", flush=True)
 
 
 if __name__ == "__main__":

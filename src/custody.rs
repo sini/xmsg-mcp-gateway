@@ -659,3 +659,149 @@ mod retention_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod expiry_boundary_tests {
+    use super::*;
+
+    fn boundary(site: &str) {
+        for nanos in [1, 999_999_999] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut store = Store::initialize(&directory.path().join("store.db")).unwrap();
+            store.migrate_custody().unwrap();
+            let limits = Limits {
+                content_retention_secs: 3,
+                metadata_retention_secs: 3,
+                ..Limits::default()
+            };
+            let at = UNIX_EPOCH + Duration::new(100, nanos);
+            let (created, expiry) = crate::deadline::window(at, 3).unwrap();
+            let scope = Scope {
+                bus_instance: "boundary-node".into(),
+                grant_id: "fixture".into(),
+            };
+            store
+                .record_custody_link(&scope, true, &limits, at)
+                .unwrap();
+            // Persisted fixture rows exercise the public maintenance API without a daemon or a Delivery constructor.
+            store
+                .connection
+                .execute(
+                    "INSERT INTO custody_gaps VALUES (?1,99,100,?2)",
+                    params![scope.bus_instance, expiry],
+                )
+                .unwrap();
+            store
+                .connection
+                .execute(
+                    "INSERT INTO custody_pending VALUES (?1,'message',?2,?3)",
+                    params![scope.bus_instance, created, expiry],
+                )
+                .unwrap();
+            store.connection.execute("INSERT INTO custody_metadata VALUES (?1,'message','fingerprint','origin',1,'oversized',?2,?3)", params![scope.bus_instance, created, expiry]).unwrap();
+            store.connection.execute("INSERT INTO custody_items VALUES (?1,'message','event','fixture',1,'gateway','owner','origin','body','envelope',NULL,'fingerprint',?2,?3,1)", params![scope.bus_instance, created, expiry]).unwrap();
+            store
+                .connection
+                .execute("INSERT INTO custody_outbox VALUES ('event','held')", [])
+                .unwrap();
+            let observed = |second: i64| UNIX_EPOCH + Duration::new(second as u64, 999_999_999);
+            let before = store
+                .custody_status(&scope, &limits, observed(expiry - 1), 604800)
+                .unwrap();
+            assert_eq!(
+                (before.pending, before.refusals, before.held_items),
+                (1, 1, 1)
+            );
+            let gap_count = |store: &Store| -> i64 {
+                store
+                    .connection
+                    .query_row("SELECT COUNT(*) FROM custody_gaps", [], |row| row.get(0))
+                    .unwrap()
+            };
+            let outbox = |store: &Store| -> String {
+                store
+                    .connection
+                    .query_row("SELECT state FROM custody_outbox", [], |row| row.get(0))
+                    .unwrap()
+            };
+            assert_eq!(gap_count(&store), 1);
+            assert_eq!(outbox(&store), "held");
+            let expired = store
+                .custody_status(&scope, &limits, observed(expiry), 604800)
+                .unwrap();
+            match site {
+                "gaps" => assert_eq!(gap_count(&store), 0, "gap remained visible at expiry"),
+                "pending" => {
+                    assert_eq!(expired.pending, 0, "pending ID remained visible at expiry");
+                    assert_eq!(
+                        expired.oldest_pending_age_secs,
+                        Some(expiry - created),
+                        "expired pending uncertainty summary missing at expiry"
+                    );
+                }
+                "metadata" => {
+                    assert_eq!(expired.refusals, 0, "metadata remained visible at expiry")
+                }
+                "content" => {
+                    assert_eq!(expired.held_items, 0, "content remained visible at expiry")
+                }
+                "outbox" => assert_eq!(outbox(&store), "expired", "outbox remained held at expiry"),
+                "tombstones" => {
+                    let count = |store: &Store, table: &str| -> i64 {
+                        store
+                            .connection
+                            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                                row.get(0)
+                            })
+                            .unwrap()
+                    };
+                    let cutoff = expiry + limits.metadata_retention_secs;
+                    store
+                        .custody_status(&scope, &limits, observed(cutoff - 1), 604800)
+                        .unwrap();
+                    assert_eq!(count(&store, "custody_items"), 1);
+                    assert_eq!(count(&store, "custody_outbox"), 1);
+                    store
+                        .custody_status(&scope, &limits, observed(cutoff), 604800)
+                        .unwrap();
+                    assert_eq!(
+                        count(&store, "custody_items"),
+                        0,
+                        "tombstone remained visible at cutoff"
+                    );
+                    assert_eq!(
+                        count(&store, "custody_outbox"),
+                        0,
+                        "tombstone outbox remained visible at cutoff"
+                    );
+                }
+                _ => panic!("unknown expiry site"),
+            }
+        }
+    }
+
+    #[test]
+    fn gaps_expire_at_the_observed_boundary() {
+        boundary("gaps");
+    }
+    #[test]
+    fn pending_ids_expire_at_the_observed_boundary() {
+        boundary("pending");
+    }
+    #[test]
+    fn refusal_metadata_expires_at_the_observed_boundary() {
+        boundary("metadata");
+    }
+    #[test]
+    fn held_content_expires_at_the_observed_boundary() {
+        boundary("content");
+    }
+    #[test]
+    fn outbox_expires_at_the_observed_boundary() {
+        boundary("outbox");
+    }
+    #[test]
+    fn tombstones_expire_at_the_observed_cutoff() {
+        boundary("tombstones");
+    }
+}
