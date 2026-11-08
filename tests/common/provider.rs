@@ -181,7 +181,9 @@ fn serve(
     stall: Duration,
     strict_request: bool,
 ) {
-    let (mut tls, request) = read_request(socket, tls, strict_request);
+    let Some((mut tls, request)) = read_request(socket, tls, strict_request) else {
+        return;
+    };
     if strict_request {
         assert_eq!(request, "token=fixture-token&token_type_hint=access_token");
     }
@@ -201,7 +203,7 @@ pub fn read_request(
     socket: TcpStream,
     tls: Arc<rustls::ServerConfig>,
     strict_request: bool,
-) -> (TlsStream, String) {
+) -> Option<(TlsStream, String)> {
     // Accepted sockets inherit the listener's nonblocking flag on macOS.
     socket.set_nonblocking(false).unwrap();
     socket
@@ -213,7 +215,9 @@ pub fn read_request(
     let mut tls = rustls::StreamOwned::new(rustls::ServerConnection::new(tls).unwrap(), socket);
     let mut reader = BufReader::new(&mut tls);
     let mut line = String::new();
-    reader.read_line(&mut line).unwrap();
+    if reader.read_line(&mut line).unwrap() == 0 {
+        return None;
+    }
     if strict_request {
         assert_eq!(line, "POST /introspect HTTP/1.1\r\n");
     }
@@ -221,7 +225,9 @@ pub fn read_request(
     let mut lookup_auth = false;
     loop {
         line.clear();
-        reader.read_line(&mut line).unwrap();
+        if reader.read_line(&mut line).unwrap() == 0 {
+            return None;
+        }
         if line == "\r\n" {
             break;
         }
@@ -243,5 +249,5 @@ pub fn read_request(
         assert!(lookup_auth);
     }
     drop(reader);
-    (tls, String::from_utf8(request).unwrap())
+    Some((tls, String::from_utf8(request).unwrap()))
 }
