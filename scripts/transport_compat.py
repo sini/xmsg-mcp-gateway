@@ -193,7 +193,27 @@ def refuse_cached_control(root, *, target, target_dir):
     print(f"copied-control-cached-artifact:refused:{target}", flush=True)
 
 
-def live(executable, binary, revision, *, case=None, skip=None, baseline=False):
+def timeout_progress(partial, stream):
+    if not partial:
+        return
+    tail = partial[-65_536:]
+    if isinstance(tail, bytes):
+        tail = tail.decode("utf-8", errors="replace")
+    progress = []
+    for line in tail.splitlines():
+        match = re.fullmatch(
+            r"test ([A-Za-z_][A-Za-z_0-9:]*) (?:\.\.\.(?: (ok|FAILED|ignored))?|has been running for over [0-9]+ seconds)",
+            line,
+        )
+        if match and len(match[1]) <= 200:
+            progress.append((match[1], match[2] or "running"))
+    for name, state in progress[-16:]:
+        print(f"live-timeout {stream} test={name} state={state}", flush=True)
+
+
+def live(
+    executable, binary, revision, *, case=None, skip=None, baseline=False, timeout=120
+):
     env = {
         **os.environ,
         "XMSG_GATEWAY_REQUIRED": "1",
@@ -210,9 +230,15 @@ def live(executable, binary, revision, *, case=None, skip=None, baseline=False):
         args.extend(["--skip", skip])
     if baseline:
         args.extend(["--skip", "federation_", "--skip", "socket_activation_"])
-    return subprocess.run(
-        args, cwd=ROOT, env=env, text=True, capture_output=True, timeout=120
-    )
+    try:
+        return subprocess.run(
+            args, cwd=ROOT, env=env, text=True, capture_output=True, timeout=timeout
+        )
+    except subprocess.TimeoutExpired as error:
+        print("live-timeout: suite exceeded its deadline; no retry", flush=True)
+        timeout_progress(error.stdout, "stdout")
+        timeout_progress(error.stderr, "stderr")
+        raise RuntimeError("live test suite timed out") from None
 
 
 def require_complete(result, *, baseline=False):
