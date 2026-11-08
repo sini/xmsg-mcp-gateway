@@ -55,10 +55,13 @@ def require_diagnostic(result, fixture, identity, *, summary):
     if result.stdout.count("live-timeout stdout test=") > 16:
         raise RuntimeError("progress diagnostic is unbounded")
     role = "owned-child" if summary else "owned-root"
-    if (
-        f"{role} pid={child['pid']} name={json.dumps(child['name'])}"
-        not in result.stdout
-    ):
+    prefix = f"live-timeout {role} pid={child['pid']} name="
+    names = [
+        json.loads(line.removeprefix(prefix))
+        for line in result.stdout.splitlines()
+        if line.startswith(prefix)
+    ]
+    if len(names) != 1 or not isinstance(names[0], str) or not names[0]:
         raise RuntimeError("owned child identity diagnostic missing or wrong")
     for line in result.stdout.splitlines():
         if "owned-child" in line and ("--" in line or "time.sleep" in line):
@@ -86,6 +89,20 @@ def main():
             "no-child-identity",
             "for pid, name in owned[:32]:",
             "for pid, name in []:",
+            "owned child identity diagnostic missing or wrong",
+            True,
+        ),
+        (
+            "wrong-owned-pid",
+            "pid={pid} name=",
+            "pid={pid + 1} name=",
+            "owned child identity diagnostic missing or wrong",
+            True,
+        ),
+        (
+            "empty-process-name",
+            "json.dumps(name)",
+            "json.dumps(str())",
             "owned child identity diagnostic missing or wrong",
             True,
         ),
@@ -149,9 +166,8 @@ def main():
                 text += "pid = child.pid\n"
             else:
                 text += "pid = os.getpid()\n"
-            text += "name = subprocess.check_output(['ps', '-p', str(pid), '-o', 'comm='], text=True).strip().rsplit('/', 1)[-1]\n"
             text += "cpu = len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else (getattr(os, 'process_cpu_count', os.cpu_count)() or 1)\n"
-            text += f"open({str(identity)!r}, 'w').write(json.dumps({{'pid':pid,'name':name,'command':sys.argv,'available_cpu_count':cpu}}))\n"
+            text += f"open({str(identity)!r}, 'w').write(json.dumps({{'pid':pid,'command':sys.argv,'available_cpu_count':cpu}}))\n"
             text += (
                 "for i in range(25): print(f'test completed_{i} ... ok', flush=True)\n"
             )
