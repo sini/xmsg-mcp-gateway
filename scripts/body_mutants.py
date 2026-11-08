@@ -23,7 +23,16 @@ LIMIT = "limit_bytes: app.max_request_body_bytes,"
 assert SOURCE.count(LIMIT) == 2
 READ_FAILURE_PROJECTION = "Self::BodyReadFailed => StatusCode::BAD_REQUEST"
 assert SOURCE.count(READ_FAILURE_PROJECTION) == 1
+STREAM_LIMIT = "to_bytes(request.into_body(), app.max_request_body_bytes)"
+assert SOURCE.count(STREAM_LIMIT) == 1
 CASES = [
+    (
+        "unbounded-chunked-body",
+        SOURCE.replace(STREAM_LIMIT, "to_bytes(request.into_body(), usize::MAX)"),
+        "chunked_body_budget_is_enforced_on_the_real_listener",
+        "chunked over-limit body was accepted",
+        True,
+    ),
     (
         "late-length-check",
         MOVED,
