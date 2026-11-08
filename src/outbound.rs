@@ -758,7 +758,8 @@ mod reservation_time_tests {
                     assert_eq!(created_at, seconds as i64);
                     assert_eq!(
                         retry_until,
-                        seconds as i64 + lifetime + i64::from(nanos != 0)
+                        seconds as i64 + lifetime + i64::from(nanos != 0),
+                        "reservation window was floored instead of ceiled"
                     );
                     let remaining = Duration::from_secs(retry_until as u64) - elapsed;
                     assert!(remaining >= Duration::from_secs(lifetime as u64));
@@ -837,11 +838,23 @@ mod reservation_time_tests {
             receipt: None,
             target: String::new(),
         };
-        assert_eq!(reservation.retry_deadline(&limits), 101);
+        assert_eq!(
+            reservation.retry_deadline(&limits),
+            101,
+            "stored retry deadline was extended"
+        );
         limits.dedup_lifetime_secs = 86_400;
-        assert_eq!(reservation.retry_deadline(&limits), 101);
+        assert_eq!(
+            reservation.retry_deadline(&limits),
+            101,
+            "stored retry deadline was extended"
+        );
         reservation.retry_until = 86_501;
-        assert_eq!(reservation.retry_deadline(&limits), 86_501);
+        assert_eq!(
+            reservation.retry_deadline(&limits),
+            86_501,
+            "ceiled retry window was shortened"
+        );
         limits.dedup_lifetime_secs = 1;
         assert_eq!(reservation.retry_deadline(&limits), 102);
         limits.dedup_lifetime_secs = 10;

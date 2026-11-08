@@ -2,6 +2,8 @@
 
 #[path = "common/agent_stall.rs"]
 mod agent_stall;
+#[path = "common/outbound_observer.rs"]
+mod observer;
 #[allow(dead_code)]
 #[path = "common/provider.rs"]
 mod provider;
@@ -1058,50 +1060,95 @@ async fn handler_deadline_reports_pending_without_cancelling_accepted_work() {
 #[tokio::test]
 #[ignore = "requires the revision-verified private daemon in the wiring profile"]
 async fn expired_mcp_uncertainty_requires_reconciliation_without_resubmission() {
+    use axum::body::{to_bytes, Body};
+    use axum::http::Request;
+    use std::future::Future;
+    use std::time::Duration;
+    use tower::ServiceExt;
+
+    async fn step<T>(name: &str, future: impl Future<Output = T>) -> T {
+        tokio::time::timeout(Duration::from_secs(10), future)
+            .await
+            .unwrap_or_else(|_| panic!("expired uncertainty step timed out: {name}"))
+    }
+
     let binary = real_node::pinned_binary();
-    let node = real_node::Node::start(&binary).await;
+    let node = step("daemon startup", real_node::Node::start(&binary)).await;
     let mut fixture = migrated_fixture(&node);
-    fixture.config["messaging"]["manifest"]["dedup_lifetime_secs"] = json!(1);
+    fixture.config["messaging"]["manifest"]["dedup_lifetime_secs"] = json!(3600);
     save(&fixture);
     policy(
         &fixture,
         "2",
         json!({"send":{"targets":["gateway@gateway.fixture"],"required_scope":"identity:read"},"reply":null}),
     );
-    let serving = std::sync::Arc::new(fixture.serving().await);
+    let serving = std::sync::Arc::new(step("gateway startup", fixture.serving()).await);
     let call = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"xmsg_send","arguments":{"request_id":"expire-uncertainty","to":"gateway@gateway.fixture","text":"accepted once"}}});
     let mut stall = agent_stall::AgentStall::install(&node.config, "send");
     let task_serving = serving.clone();
     let task_call = call.clone();
-    let task = tokio::spawn(async move {
-        serving_fixture::request(&task_serving, "good-token", task_call).await
-    });
-    let accepted = stall.reached().await;
-    let original = accepted["message_id"].as_str().unwrap().to_owned();
-    stall.finish(false).await;
-    assert_eq!(task.await.unwrap().0, StatusCode::OK);
-    let database = rusqlite::Connection::open(&fixture.store_file).unwrap();
-    let retry_until: i64 = database
-        .query_row(
-            "SELECT retry_until FROM outbound_reservations WHERE request_id='expire-uncertainty'",
-            [],
-            |row| row.get(0),
+    let mut task = tokio::spawn(async move {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("host", "gateway.example")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer good-token")
+            .body(Body::from(task_call.to_string()))
+            .unwrap();
+        let response = step(
+            "initial request",
+            task_serving
+                .router()
+                .oneshot(request)
+                .with_subscriber(observer::AtEvent {
+                    target: "gateway_outbound_reserved",
+                    // Exercise slow work after reservation without exhausting the acceptance window.
+                    action: || std::thread::sleep(Duration::from_millis(2100)),
+                }),
         )
+        .await
         .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    while std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        < retry_until as u64
-    {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "reservation did not expire"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    let (status, result, _) = serving_fixture::request(&serving, "good-token", call).await;
+        let status = response.status();
+        let body = step(
+            "initial response body",
+            to_bytes(response.into_body(), 100_000),
+        )
+        .await
+        .unwrap();
+        (
+            status,
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        )
+    });
+    let accepted = step("upstream acceptance", async {
+        tokio::select! {
+            biased;
+            accepted = stall.reached() => accepted,
+            outcome = &mut task => panic!(
+                "expired uncertainty: initial request completed before upstream acceptance: {outcome:?}"
+            ),
+        }
+    })
+    .await;
+    let original = accepted["message_id"].as_str().unwrap().to_owned();
+    step("drop accepted response", stall.finish(false)).await;
+    assert_eq!(
+        step("initial handler completion", task).await.unwrap().0,
+        StatusCode::OK
+    );
+
+    // Age fixture data only after the real daemon has accepted the original message.
+    let database = rusqlite::Connection::open(&fixture.store_file).unwrap();
+    assert_eq!(database.execute(
+        "UPDATE outbound_reservations SET retry_until=created_at WHERE request_id='expire-uncertainty' AND state='unknown' AND receipt IS NULL",
+        [],
+    ).unwrap(), 1);
+    let (status, result, _) = step(
+        "expired replay",
+        serving_fixture::request(&serving, "good-token", call),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let unknown = &result["result"]["structuredContent"];
     assert_eq!(unknown["state"], "unknown");
@@ -1111,12 +1158,24 @@ async fn expired_mcp_uncertainty_requires_reconciliation_without_resubmission() 
     );
     assert!(unknown.get("retry").is_none());
     drop(serving);
-    tokio::task::yield_now().await;
-    let mut receiver = node.config.register().await.unwrap();
-    let delivery = receiver.poll(0).await.unwrap().unwrap();
+    let mut receiver = step("receiver registration", node.config.register())
+        .await
+        .unwrap();
+    let delivery = step("original delivery", receiver.poll(0))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(delivery.message_id(), original);
-    receiver.ack(delivery.message_id()).await.unwrap();
-    assert!(receiver.poll(0).await.unwrap().is_none());
+    step(
+        "original acknowledgement",
+        receiver.ack(delivery.message_id()),
+    )
+    .await
+    .unwrap();
+    assert!(step("no resubmission", receiver.poll(0))
+        .await
+        .unwrap()
+        .is_none());
     println!("gateway-wiring-complete:expired-unknown");
 }
 
