@@ -541,7 +541,24 @@ async fn crash_at(phase: &str, recovery: Recovery) {
     let mut recovery_limits = limits();
     if expire {
         recovery_limits.dedup_lifetime_secs = 1;
-        tokio::time::sleep(Duration::from_millis(1100)).await;
+        let retry_until: i64 = inspect.query_row(
+            "SELECT MIN(retry_until, created_at + ?1 + 1) FROM outbound_reservations WHERE request_id='crash-request'",
+            [recovery_limits.dedup_lifetime_secs],
+            |row| row.get(0),
+        ).unwrap();
+        let retry_until = u64::try_from(retry_until).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                < retry_until
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("shortened reservation retry window did not expire");
     }
     let recovered = dispatch(
         &mut store,

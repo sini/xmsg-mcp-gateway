@@ -46,6 +46,13 @@ requires reconciliation; it never authorizes a blind new send. These states do
 not promise exactly-once execution or recipient processing. Send and reply
 receipts preserve xmsg's fields and outcome vocabulary, including stored replies.
 
+Retry deadlines round the reservation time plus the configured lifetime up to a
+whole second, so a fractional creation time cannot shorten that lifetime. Stored
+creation times remain floored for clock-rollback detection. Existing reservations
+keep their recorded deadline; changing the rounding never extends an old row.
+The boundary guard pins the reviewed upstream retention rule and must be reviewed
+again when the xmsg pin changes.
+
 An endpoint captures the address and AgentClient only from a RegisteredService.
 The registration handle stays alive for the operation; its separate poll/ACK
 channel can continue while outbound AgentClient I/O waits. The fixed external
