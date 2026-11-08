@@ -140,8 +140,8 @@ CASES = [
     (
         "submit-before-reserve-commit",
         "src/outbound.rs",
-        "            let timestamp = now();\n            let tx = store",
-        "            let timestamp = now();\n            service.client.send(&target, &framed_text, Some(&key)).await?;\n            let tx = store",
+        "            let (timestamp, retry_until) =\n                reservation_times(SystemTime::now(), limits.dedup_lifetime_secs)?;\n            let tx = store",
+        "            let (timestamp, retry_until) =\n                reservation_times(SystemTime::now(), limits.dedup_lifetime_secs)?;\n            service.client.send(&target, &framed_text, Some(&key)).await?;\n            let tx = store",
         "custody_outbound",
         BEFORE,
         "reserved work submitted before crash cut",
