@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TEST = "header_deadline_is_absolute_and_excludes_body"
 IDLE = "idle_keepalive_is_bounded_by_the_next_header_deadline"
 ACCEPT = "accept_errors_recover_after_descriptor_exhaustion"
+SHUTDOWN = "shutdown_is_not_delayed_by_accept_backoff"
 SOURCE = (ROOT / "src/serving.rs").read_text()
 accept_start = SOURCE.index(
     "                        Err(error) => {",
@@ -22,7 +23,12 @@ accept_start = SOURCE.index(
 )
 accept_end = SOURCE.index("\n                    };", accept_start)
 CASES = [
-    ("control", None, None, [(TEST, None), (IDLE, None), (ACCEPT, None)]),
+    (
+        "control",
+        None,
+        None,
+        [(TEST, None), (IDLE, None), (ACCEPT, None), (SHUTDOWN, None)],
+    ),
     (
         "deadline-disabled",
         "builder.header_read_timeout(deadline);",
@@ -50,6 +56,15 @@ CASES = [
         [
             (ACCEPT, "server terminated on recoverable accept error"),
         ],
+    ),
+    (
+        "uninterruptible-backoff",
+        """                            tokio::select! {
+                                _ = &mut shutdown => break Ok(()),
+                                _ = tokio::time::sleep(Duration::from_secs(1)) => {},
+                            }""",
+        "                            tokio::time::sleep(Duration::from_secs(1)).await;",
+        [(SHUTDOWN, "shutdown delayed by accept-error backoff")],
     ),
 ]
 

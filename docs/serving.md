@@ -262,10 +262,16 @@ rather than a separate idle deadline.
 `cargo test --test header_timeout` exercises this bound through the real CLI and
 listener, including a delayed-body positive control. Run
 `python3 scripts/header_timeout_mutants.py` to fresh-build the control and source
-mutants that disable the header deadline, remove its diagnostic, or make accept
-errors fatal. The driver requires the intended slow-header, idle keep-alive,
+mutants that disable the header deadline, remove its diagnostic, make accept
+errors fatal, or prevent shutdown from interrupting accept-error backoff. The driver requires the intended slow-header, idle keep-alive,
 diagnostic and descriptor-exhaustion assertions to reject their mutants. It
 records source, library, app and test hashes plus an executed nonce per arm.
 The descriptor-exhaustion cell runs on Linux with `prlimit` available; it holds
 100 connections against a 64-descriptor limit, then releases them and requires
 normal requests to succeed again.
+
+The Linux `shutdown_is_not_delayed_by_accept_backoff` cell confirms accept
+backoff through stderr under the same descriptor pressure, releases the held
+clients and sends SIGTERM to its owned CLI process. Shutdown must succeed within
+750 ms, below the one-second backoff; replacing the shutdown select with an
+uninterruptible sleep must fail that cell.

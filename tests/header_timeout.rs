@@ -250,16 +250,8 @@ async fn idle_keepalive_is_bounded_by_the_next_header_deadline() {
 }
 
 #[cfg(target_os = "linux")]
-#[tokio::test]
-async fn accept_errors_recover_after_descriptor_exhaustion() {
-    let mut fixture = Fixture::new();
-    fixture.config["header_read_timeout_ms"] = serde_json::json!(60000);
-    fixture.config["max_connections"] = serde_json::json!(1000);
-    fixture::private_file(
-        &fixture.config_file,
-        &serde_json::to_vec(&fixture.config).unwrap(),
-    );
-    let (mut child, address) = listener(&fixture, true).await;
+async fn descriptor_pressure(fixture: &Fixture) -> (tokio::process::Child, String, Vec<TcpStream>) {
+    let (mut child, address) = listener(fixture, true).await;
     normal(&address).await;
     let mut logs = BufReader::new(child.stderr.take().unwrap()).lines();
     let mut held = Vec::new();
@@ -294,6 +286,25 @@ async fn accept_errors_recover_after_descriptor_exhaustion() {
         child.try_wait().unwrap().is_none(),
         "server terminated on recoverable accept error"
     );
+    (child, address, held)
+}
+
+#[cfg(target_os = "linux")]
+fn pressure_configuration(fixture: &mut Fixture) {
+    fixture.config["header_read_timeout_ms"] = serde_json::json!(60000);
+    fixture.config["max_connections"] = serde_json::json!(1000);
+    fixture::private_file(
+        &fixture.config_file,
+        &serde_json::to_vec(&fixture.config).unwrap(),
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn accept_errors_recover_after_descriptor_exhaustion() {
+    let mut fixture = Fixture::new();
+    pressure_configuration(&mut fixture);
+    let (mut child, address, held) = descriptor_pressure(&fixture).await;
     drop(held);
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -328,4 +339,30 @@ async fn accept_errors_recover_after_descriptor_exhaustion() {
     normal(&address).await;
     child.kill().await.unwrap();
     child.wait().await.unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn shutdown_is_not_delayed_by_accept_backoff() {
+    let mut fixture = Fixture::new();
+    pressure_configuration(&mut fixture);
+    let (mut child, _, held) = descriptor_pressure(&fixture).await;
+    drop(held);
+    let pid = child
+        .id()
+        .expect("owned gateway process exited before SIGTERM");
+    let started = Instant::now();
+    assert_eq!(
+        unsafe { libc::kill(pid.try_into().unwrap(), libc::SIGTERM) },
+        0
+    );
+    let status = tokio::time::timeout(Duration::from_millis(750), child.wait())
+        .await
+        .expect("shutdown delayed by accept-error backoff")
+        .unwrap();
+    assert!(status.success(), "gateway shutdown failed: {status}");
+    eprintln!(
+        "accept-backoff shutdown elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
 }
