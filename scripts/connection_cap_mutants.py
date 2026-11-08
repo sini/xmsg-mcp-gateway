@@ -93,7 +93,7 @@ def arm(root, name):
 
 def main():
     with tempfile.TemporaryDirectory(prefix="gateway-cap-mutants-") as directory:
-        for name in ("control", "bypass"):
+        for name in ("control", "bypass", "missing-reason"):
             root = Path(directory) / name
             root.mkdir()
             for file in ("Cargo.toml", "Cargo.lock"):
@@ -108,6 +108,12 @@ def main():
                 file.write_text(
                     original.replace(old, "Semaphore::new(Semaphore::MAX_PERMITS)", 1)
                 )
+            elif name == "missing-reason":
+                file = root / "src/serving.rs"
+                original = file.read_text()
+                old = 'tracing::warn!(target: "gateway_transport", reason = ?ConnectionCapacityRefusal, "connection refused");'
+                assert original.count(old) == 1, "cap reason mutation site changed"
+                file.write_text(original.replace(old, "", 1))
             code, output = arm(root, name)
             if name == "control":
                 assert code == 0 and "1 passed; 0 failed" in output, output
@@ -115,9 +121,14 @@ def main():
                 assert (
                     code == 101
                     and f"test {TEST} ... FAILED" in output
-                    and "connection cap failed to promptly refuse N+1" in output
+                    and (
+                        "connection cap failed to promptly refuse N+1"
+                        if name == "bypass"
+                        else "missing production cap reason"
+                    )
+                    in output
                 ), output
-    print("1/1 connection cap mutant killed", flush=True)
+    print("2/2 connection cap mutants killed", flush=True)
 
 
 if __name__ == "__main__":
