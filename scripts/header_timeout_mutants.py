@@ -30,6 +30,7 @@ def main():
                 tree,
                 ignore=shutil.ignore_patterns(
                     ".git",
+                    ".artifacts",
                     "target",
                     ".worktrees",
                     "__pycache__",
@@ -45,10 +46,20 @@ def main():
             if mutant:
                 text = text.replace(needle, "builder.header_read_timeout(None);", 1)
             source.write_text(text + f"\n// Build receipt: {nonce}\n")
-            target = tree / "target"
-            environment = dict(
-                os.environ, CARGO_TARGET_DIR=str(target), GW_H1_NONCE=nonce
+            test = tree / "tests/header_timeout.rs"
+            entry = f"async fn {TEST}() {{"
+            original = test.read_text()
+            assert original.count(entry) == 1
+            test.write_text(
+                original.replace(
+                    entry,
+                    entry + f'\n    eprintln!("header-timeout nonce={nonce}");',
+                    1,
+                )
             )
+            target = tree / "target"
+            environment = dict(os.environ, CARGO_TARGET_DIR=str(target))
+            environment.pop("GW_H1_NONCE", None)
             build = subprocess.run(
                 [
                     "cargo",
