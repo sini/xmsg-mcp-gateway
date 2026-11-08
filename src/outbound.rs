@@ -6,6 +6,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -334,6 +335,22 @@ impl Limits {
     }
 }
 
+fn reservation_times(at: SystemTime, lifetime: i64) -> Result<(i64, i64), Error> {
+    if lifetime <= 0 {
+        return Err(Error::Configuration);
+    }
+    let elapsed = at
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| Error::Configuration)?;
+    let created_at = i64::try_from(elapsed.as_secs()).map_err(|_| Error::Configuration)?;
+    // SQLite keeps whole seconds: floor creation for rollback detection, ceil the retry window.
+    let retry_until = created_at
+        .checked_add(lifetime)
+        .and_then(|deadline| deadline.checked_add(i64::from(elapsed.subsec_nanos() != 0)))
+        .ok_or(Error::Configuration)?;
+    Ok((created_at, retry_until))
+}
+
 fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -356,8 +373,12 @@ struct Reservation {
 
 impl Reservation {
     fn retry_deadline(&self, limits: &Limits) -> i64 {
-        self.retry_until
-            .min(self.created_at.saturating_add(limits.dedup_lifetime_secs))
+        // Stored deadlines also cap old rows; the ceiling allowance never extends them.
+        self.retry_until.min(
+            self.created_at
+                .saturating_add(limits.dedup_lifetime_secs)
+                .saturating_add(1),
+        )
     }
 
     fn expired(&self, limits: &Limits) -> bool {
@@ -633,7 +654,8 @@ async fn submit(
             if !limits.text_fits(&framed_text) {
                 return Err(Error::Oversized);
             }
-            let timestamp = now();
+            let (timestamp, retry_until) =
+                reservation_times(SystemTime::now(), limits.dedup_lifetime_secs)?;
             let tx = store
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -643,7 +665,7 @@ async fn submit(
             {
                 return Err(Error::Capacity);
             }
-            tx.execute("INSERT INTO outbound_reservations (owner,operation,request_id,payload_hash,sender,grant_id,grant_revision,idempotency_key,target,correlation,framed_text,created_at,retry_until,state) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'pending')", params![owner,op,id.as_str(),payload_hash,sender,authority.grant_id,authority.revision,key,target,correlation,framed_text,timestamp,timestamp.saturating_add(limits.dedup_lifetime_secs)])?;
+            tx.execute("INSERT INTO outbound_reservations (owner,operation,request_id,payload_hash,sender,grant_id,grant_revision,idempotency_key,target,correlation,framed_text,created_at,retry_until,state) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'pending')", params![owner,op,id.as_str(),payload_hash,sender,authority.grant_id,authority.revision,key,target,correlation,framed_text,timestamp,retry_until])?;
             tx.commit()?;
             store
                 .reservation(owner, op, id)?
@@ -717,5 +739,115 @@ async fn submit(
         Ok(outcome) => Ok(outcome),
         Err(_error) if accepted => Ok(Outcome::Pending),
         Err(_) => Ok(Outcome::Unknown),
+    }
+}
+
+#[cfg(test)]
+mod reservation_time_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn fractional_reservation_times_preserve_the_complete_lifetime() {
+        for seconds in [0, 1, 1_728_000_000] {
+            for nanos in [0, 1, 999_999_999] {
+                for lifetime in [1, 86_400] {
+                    let elapsed = Duration::new(seconds, nanos);
+                    let (created_at, retry_until) =
+                        reservation_times(UNIX_EPOCH + elapsed, lifetime).unwrap();
+                    assert_eq!(created_at, seconds as i64);
+                    assert_eq!(
+                        retry_until,
+                        seconds as i64 + lifetime + i64::from(nanos != 0)
+                    );
+                    let remaining = Duration::from_secs(retry_until as u64) - elapsed;
+                    assert!(remaining >= Duration::from_secs(lifetime as u64));
+                    assert!(remaining < Duration::from_secs(lifetime as u64 + 1));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn full_ttl_windows_end_by_the_pinned_nodes_first_purge_tick() {
+        let revision = include_str!("../ci/xmsg-pin.toml")
+            .lines()
+            .find_map(|line| line.strip_prefix("revision = "))
+            .expect("missing reviewed xmsg revision");
+        assert_eq!(
+            revision, "\"7d9d1ed3f7c37c3433a95c65570892736fd914ab\"",
+            "review the node's idempotency retention boundary after a pin change"
+        );
+        // Reviewed xmsg 7d9d1ed storage.rs:1088–1102 keeps created_at >= now - TTL;
+        // purge_idempotency_keys at 1255–1264 removes only created_at < now - TTL.
+        for nanos in [1, 999_999_999] {
+            for ttl in [1, 86_400] {
+                let (created_at, retry_until) =
+                    reservation_times(UNIX_EPOCH + Duration::new(1_728_000_000, nanos), ttl)
+                        .unwrap();
+                for acceptance_delay in [0, 1] {
+                    let node_accepted_floor = created_at + acceptance_delay;
+                    let node_first_purge_tick = node_accepted_floor + ttl + 1;
+                    assert!(retry_until <= node_first_purge_tick);
+                    assert_eq!(retry_until + acceptance_delay, node_first_purge_tick);
+                    assert!(node_accepted_floor >= (retry_until - 1) - ttl);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unrepresentable_reservation_windows_are_configuration_refusals() {
+        assert_eq!(
+            reservation_times(UNIX_EPOCH, i64::MAX).unwrap(),
+            (0, i64::MAX)
+        );
+        for (at, lifetime) in [
+            (UNIX_EPOCH, 0),
+            (UNIX_EPOCH, -1),
+            (UNIX_EPOCH - Duration::from_nanos(1), 1),
+            (UNIX_EPOCH + Duration::from_secs(1), i64::MAX),
+            (UNIX_EPOCH + Duration::from_nanos(1), i64::MAX),
+        ] {
+            assert!(matches!(
+                reservation_times(at, lifetime),
+                Err(Error::Configuration)
+            ));
+        }
+    }
+
+    #[test]
+    fn retry_deadlines_preserve_stored_windows_and_reduce_with_limits() {
+        let mut limits = Limits {
+            dedup_lifetime_secs: 1,
+            max_framed_bytes: 1,
+            timeout: Duration::from_secs(1),
+            max_reservations: 1,
+            max_retained_bytes: 1,
+        };
+        let mut reservation = Reservation {
+            key: String::new(),
+            payload_hash: String::new(),
+            sender: String::new(),
+            grant_id: String::new(),
+            grant_revision: 1,
+            framed_text: String::new(),
+            created_at: 100,
+            retry_until: 101,
+            receipt: None,
+            target: String::new(),
+        };
+        assert_eq!(reservation.retry_deadline(&limits), 101);
+        limits.dedup_lifetime_secs = 86_400;
+        assert_eq!(reservation.retry_deadline(&limits), 101);
+        reservation.retry_until = 86_501;
+        assert_eq!(reservation.retry_deadline(&limits), 86_501);
+        limits.dedup_lifetime_secs = 1;
+        assert_eq!(reservation.retry_deadline(&limits), 102);
+        limits.dedup_lifetime_secs = 10;
+        assert_eq!(reservation.retry_deadline(&limits), 111);
+        reservation.created_at = i64::MAX - 1;
+        reservation.retry_until = i64::MAX;
+        assert_eq!(reservation.retry_deadline(&limits), i64::MAX);
     }
 }
