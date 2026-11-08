@@ -378,7 +378,7 @@ impl Serving {
                                 | std::io::ErrorKind::ConnectionReset) {
                                 continue;
                             }
-                            tracing::warn!(kind = ?error.kind(), "accept failed; retrying");
+                            tracing::warn!(error = %error, kind = ?error.kind(), "accept failed; retrying");
                             tokio::select! {
                                 _ = &mut shutdown => break Ok(()),
                                 _ = tokio::time::sleep(Duration::from_secs(1)) => {},
