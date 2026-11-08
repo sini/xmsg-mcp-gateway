@@ -2016,6 +2016,8 @@ dependencies = [
  "axum",
  "clap",
  "futures-util",
+ "hyper",
+ "hyper-util",
  "libc",
  "rcgen",
  "reqwest",

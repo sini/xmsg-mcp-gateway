@@ -232,3 +232,16 @@ SIGTERM and Ctrl-C drain HTTP handlers and detached dispatch tasks before stoppi
 the registration owner. A healthy stop writes a final observation and disconnect
 record, so a clean restart measures the stopped interval without the normal
 coalescing over-estimate. A failure to persist that observation exits visibly.
+
+`header_read_timeout_ms` defaults to 5000 and accepts integers from 1 through
+60000. Each HTTP/1 request must complete its headers within this absolute deadline;
+receiving another byte does not renew it. Expiry closes the connection with the
+typed `TransportRefusal::HeaderReadTimeout` reason. Completed headers release the
+deadline, so it does not limit request body delivery or response work.
+
+`cargo test --test header_timeout` exercises this bound through the real CLI and
+listener, including a delayed-body positive control. Run
+`python3 scripts/header_timeout_mutants.py` under the project's heavy-run lock to
+fresh-build the control and a source mutant that disables the header deadline;
+the driver requires that mutant to fail the slow-header assertion and records
+source, library, app and test artifact hashes plus an executed nonce.
