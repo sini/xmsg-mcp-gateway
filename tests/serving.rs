@@ -384,7 +384,12 @@ async fn body_read_is_bounded_before_any_credential_or_policy_io() {
 async fn http_host_origin_body_and_method_guards_hold() {
     use axum::body::Body;
     use axum::http::Request;
-    let fixture = Fixture::new();
+    let mut fixture = Fixture::new();
+    fixture.config["max_request_body_bytes"] = json!(65536);
+    fixture::private_file(
+        &fixture.config_file,
+        &serde_json::to_vec(&fixture.config).unwrap(),
+    );
     let serving = fixture.serving().await;
     for (host, origin) in [
         ("foreign.example", None),

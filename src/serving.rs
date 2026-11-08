@@ -21,7 +21,11 @@ use crate::outbound::{self, Outcome, Policy};
 use crate::session;
 use crate::xmsg_config::{DeploymentManifest, ManifestError, XmsgConfig};
 
-const MAX_REQUEST: usize = 65_536;
+const MAX_OWNER_FILE: usize = 65_536;
+
+fn default_max_request_body_bytes() -> usize {
+    1_048_576
+}
 const VERSIONS: [&str; 3] = ["2025-03-26", "2025-06-18", "2025-11-25"];
 
 #[derive(Debug, thiserror::Error)]
@@ -44,6 +48,8 @@ pub enum StartupError {
     RequestBudget,
     #[error("bus link ledger is unavailable")]
     BusLedger,
+    #[error("request body budget must cover six times the complete framed bound plus 16384 bytes")]
+    RequestBodyBudget,
 }
 
 impl From<session::Error> for StartupError {
@@ -84,6 +90,8 @@ struct Configuration {
     bind: SocketAddr,
     grant_store: PathBuf,
     request_timeout_ms: u64,
+    #[serde(default = "default_max_request_body_bytes")]
+    max_request_body_bytes: usize,
     allowed_hosts: Vec<String>,
     allowed_origins: Vec<String>,
     verifier: VerifierConfig,
@@ -96,6 +104,7 @@ struct App {
     verifier: Verifier,
     grant_store: PathBuf,
     request_timeout_ms: u64,
+    max_request_body_bytes: usize,
     allowed_hosts: Vec<String>,
     allowed_origins: Vec<String>,
     resource: String,
@@ -121,7 +130,7 @@ impl Serving {
     pub async fn from_owner_file(config_file: &Path) -> Result<Self, StartupError> {
         let mut file = File::open(config_file).map_err(|_| ConfigurationError)?;
         let metadata = file.metadata().map_err(|_| ConfigurationError)?;
-        if !metadata.is_file() || metadata.len() > MAX_REQUEST as u64 {
+        if !metadata.is_file() || metadata.len() > MAX_OWNER_FILE as u64 {
             return Err(ConfigurationError.into());
         }
         #[cfg(unix)]
@@ -133,10 +142,10 @@ impl Serving {
         }
         let mut raw = Vec::new();
         file.by_ref()
-            .take(MAX_REQUEST as u64 + 1)
+            .take(MAX_OWNER_FILE as u64 + 1)
             .read_to_end(&mut raw)
             .map_err(|_| ConfigurationError)?;
-        if raw.len() > MAX_REQUEST {
+        if raw.len() > MAX_OWNER_FILE {
             return Err(ConfigurationError.into());
         }
         let mut config: Configuration =
@@ -158,6 +167,7 @@ impl Serving {
         }
         if !config.bind.ip().is_loopback()
             || config.allowed_hosts.is_empty()
+            || config.max_request_body_bytes == 0
             || config.request_timeout_ms == 0
             || config.request_timeout_ms > 60_000
             || config
@@ -171,6 +181,17 @@ impl Serving {
                 .any(|scope| scope == "identity:read")
         {
             return Err(ConfigurationError.into());
+        }
+        if let Some(messaging) = &config.messaging {
+            let minimum = messaging
+                .manifest
+                .max_framed_bytes
+                .checked_mul(6)
+                .and_then(|bytes| bytes.checked_add(16_384))
+                .ok_or(StartupError::RequestBodyBudget)?;
+            if config.max_request_body_bytes < minimum {
+                return Err(StartupError::RequestBodyBudget);
+            }
         }
         let mut metadata_url =
             reqwest::Url::parse(&config.verifier.resource).map_err(|_| ConfigurationError)?;
@@ -246,6 +267,7 @@ impl Serving {
             allowed_hosts: config.allowed_hosts,
             allowed_origins: config.allowed_origins,
             request_timeout_ms: config.request_timeout_ms,
+            max_request_body_bytes: config.max_request_body_bytes,
             resource,
             issuer,
             scopes,
@@ -708,8 +730,17 @@ async fn mcp_request(
     }
     let method = request.method().clone();
     let headers = request.headers().clone();
+    if method == Method::POST
+        && headers
+            .get(header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .is_some_and(|length| length > app.max_request_body_bytes as u64)
+    {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    }
     let raw = if method == Method::POST {
-        match to_bytes(request.into_body(), MAX_REQUEST).await {
+        match to_bytes(request.into_body(), app.max_request_body_bytes).await {
             Ok(raw) => raw,
             Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
         }
