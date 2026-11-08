@@ -111,8 +111,8 @@ CASES += [
     ),
     (
         "body-bound",
-        "const MAX_REQUEST: usize = 65_536;",
-        "const MAX_REQUEST: usize = 1_048_576;",
+        "to_bytes(request.into_body(), app.max_request_body_bytes)",
+        "to_bytes(request.into_body(), usize::MAX)",
         "http_host_origin_body_and_method_guards_hold",
         "oversized MCP request was accepted",
     ),

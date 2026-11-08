@@ -153,7 +153,15 @@ listener. Origins must be explicitly listed when an Origin header is present.
 
 ## Request enforcement
 
-The handler bounds the request body at 64 KiB and the handler, once headers are
+The optional `max_request_body_bytes` defaults to 1,048,576 bytes and must be positive.
+An advertised Content-Length above this bound receives 413 before body reading;
+streaming requests retain the same byte ceiling. The owner-file read bound stays
+64 KiB independently. With messaging configured, startup requires
+`max_request_body_bytes >= 6 * max_framed_bytes + 16384`, using checked arithmetic.
+The envelope allowance assumes typical id/_meta sizes; larger metadata counts
+against max_request_body_bytes.
+
+The handler bounds the request body at that limit and the handler, once headers are
 parsed, at the configured deadline (1–60000 ms). This covers body reading,
 verification, policy lookup and dispatch. It does not bound the HTTP header phase
 or idle keep-alive connections. After reading the body, each request obtains a
@@ -197,7 +205,7 @@ before such activation:
   admit another request. Source mutants removing each timer or the cap must turn
   its named oracle red.
 - **P5 — declared oversized bodies:** with headers declaring a Content-Length
-  above 64 KiB and no body bytes sent, return 413 promptly, before the handler
+  above the configured request-body limit and no body bytes sent, return 413 promptly, before the handler
   deadline, with zero provider requests, store opens or dispatches. A permitted
   declared length and complete valid request must succeed. Removing the early
   length check must fail the named oracle; waiting for the handler deadline is
