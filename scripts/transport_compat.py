@@ -1,10 +1,12 @@
 """Build revision-verified private daemon fixtures and require real compatibility."""
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import tomllib
@@ -211,6 +213,53 @@ def timeout_progress(partial, stream):
         print(f"live-timeout {stream} test={name} state={state}", flush=True)
 
 
+def invocation_evidence(args):
+    """Return and emit provenance for the exact argv passed to the test process."""
+    if hasattr(os, "sched_getaffinity"):
+        available = len(os.sched_getaffinity(0))
+    else:
+        available = getattr(os, "process_cpu_count", os.cpu_count)() or 1
+    with Path(args[0]).open("rb") as executable:
+        digest = hashlib.file_digest(executable, "sha256").hexdigest()
+    evidence = {
+        "command": [str(argument) for argument in args],
+        "available_cpu_count": available,
+        "test_binary_sha256": digest,
+    }
+    print("live-invocation " + json.dumps(evidence, sort_keys=True), flush=True)
+    return evidence
+
+
+def owned_processes(process):
+    # The new session/group contains only this invocation and its descendants.
+    result = subprocess.run(
+        ["ps", "-o", "pid=,comm=", "-g", str(process.pid)],
+        text=True,
+        capture_output=True,
+        timeout=2,
+    )
+    if result.returncode not in (0, 1):
+        raise RuntimeError("owned process identity query failed")
+    owned = []
+    for line in result.stdout.splitlines():
+        pid, name = line.strip().split(None, 1)
+        owned.append((int(pid), Path(name).name))
+    return owned
+
+
+def report_timeout(error, owned, root_pid):
+    summary_seen = any(
+        re.search(rb"(?m)^test result: (?:ok|FAILED)\. [0-9]+ passed;", partial)
+        for partial in (error.stdout or b"", error.stderr or b"")
+    )
+    print(f"live-timeout summary-seen={str(summary_seen).lower()}", flush=True)
+    for pid, name in owned[:32]:
+        role = "owned-root" if pid == root_pid else "owned-child"
+        print(f"live-timeout {role} pid={pid} name={json.dumps(name)}", flush=True)
+    timeout_progress(error.stdout, "stdout")
+    timeout_progress(error.stderr, "stderr")
+
+
 def live(
     executable, binary, revision, *, case=None, skip=None, baseline=False, timeout=120
 ):
@@ -230,23 +279,48 @@ def live(
         args.extend(["--skip", skip])
     if baseline:
         args.extend(["--skip", "federation_", "--skip", "socket_activation_"])
+    invocation_evidence(args)
+    process = subprocess.Popen(
+        args,
+        cwd=ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
     try:
-        return subprocess.run(
-            args, cwd=ROOT, env=env, text=True, capture_output=True, timeout=timeout
-        )
+        stdout, stderr = process.communicate(timeout=timeout)
+        return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
     except subprocess.TimeoutExpired as error:
-        print("live-timeout: suite exceeded its deadline; no retry", flush=True)
-        timeout_progress(error.stdout, "stdout")
-        timeout_progress(error.stderr, "stderr")
+        try:
+            try:
+                owned = owned_processes(process)
+            except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired):
+                owned = []
+                print("live-timeout owned-inspection=unavailable", flush=True)
+            report_timeout(error, owned, process.pid)
+        finally:
+            # start_new_session made this launch-captured process group ours.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                process.communicate(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.stdout.close()
+                process.stderr.close()
+                process.wait(timeout=2)
         raise RuntimeError("live test suite timed out") from None
 
 
 def require_complete(result, *, baseline=False):
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert (
-            "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out"
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out"
         if baseline
-            else "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
+        else "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
     ) in result.stdout, "mandatory live case count/skip mismatch"
     for marker in MARKERS:
         if baseline and (
