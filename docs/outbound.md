@@ -6,10 +6,21 @@ observation instant. Repeated access never extends an existing stored expiry.
 Physical reclaim follows the existing access/heartbeat cadence, which bounds its
 lag; no background purger is introduced.
 
-This library reserves and submits sends and replies using the pinned shared
-xmsg client. The MCP serving configuration and listener do not expose it yet.
-Send/reply tools still return "not yet available". The later startup unit must
-wire the real registration limits and run the end-to-end MCP request-ID cells.
+The Rust listener exposes this library through `xmsg_send` and `xmsg_reply` when
+an owner-file `messaging` profile is configured and the verifier scopes and
+owner-set grant policy permit each operation. Without that section the listener
+serves identity only. Invalid or incomplete messaging configuration refuses
+startup; it does not fall back to identity-only serving. Registration, effective
+node limits and explicit schema migrations are checked before readiness. See the
+[current messaging profile](serving.md#optional-messaging-profile).
+
+Real-node MCP behavior is covered by
+[`real_mcp_send_keeps_request_identity_and_owner_policy`](../tests/messaging.rs),
+[`mcp_replies_use_owned_custody_and_the_original_bus_receipt`](../tests/messaging.rs)
+and [`absent_messaging_is_identity_only_and_partial_messaging_is_not`](../tests/messaging.rs).
+These local cells do not select a live deployment, start an inbound worker or
+implement Rust Events. The [deployment boundaries](serving.md#deployment-boundaries)
+remain in force.
 
 The owner runs `migrate-custody` (schema 1 to 2), then `migrate-outbound`
 (2 to 3), each with `--state FILE`. Opening state never migrates it. Outbound

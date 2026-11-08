@@ -54,6 +54,13 @@ address. Explicit custody and outbound migrations are required before messaging.
 Only the owner CLI/store changes per-grant policy. Empty policy advertises no
 messaging tools and refuses messaging calls.
 
+The real-node cells
+[`real_mcp_send_keeps_request_identity_and_owner_policy`](../tests/messaging.rs),
+[`mcp_replies_use_owned_custody_and_the_original_bus_receipt`](../tests/messaging.rs)
+and [`absent_messaging_is_identity_only_and_partial_messaging_is_not`](../tests/messaging.rs)
+cover configured sends, owned replies and the identity-only/invalid-profile
+boundary respectively.
+
 The handler budget must cover initial verification, the store's actual SQLite
 busy wait and the submission deadline, within the existing 60-second ceiling.
 The dispatcher uses a dedicated connection with a 250 ms SQLite busy wait for each
@@ -104,7 +111,7 @@ Relative state, lookup-secret and root-certificate paths resolve against its
 containing directory. The current listener binds only loopback; it accepts OAuth
 credentials and has no local bearer/no-authentication mode.
 
-Example `.state/serving.json`, with every provider/client/owner value replaced by
+Example identity-only `.state/serving.json`, with every provider/client/owner value replaced by
 the values from the actual provider setup:
 
 ```json
@@ -186,9 +193,21 @@ verification. The order fixture requires 401/zero opens for an invalid credentia
 with unavailable state, 503/one open for a valid credential with unavailable state,
 and success/one open for a valid credential with available state.
 
-This listener is an implementation unit, not evidence of hosted OAuth, tunnel or
-federation compatibility. The live provider/broker and deployment choices, queued
-custody, callbacks, and actual xmsg operations retain their separate gates.
+## Deployment boundaries
+
+The private-node profiles establish local MCP send/reply behavior, not live
+hosted OAuth, tunnel or federated deployment compatibility. The owner still must
+select the OAuth authority/provider or broker, deployment identities and grants,
+and hosted workspace/tunnel setup and credential custody before that rollout.
+Handling traffic received before first enable and selecting a shared authentication contract
+or packaging remain owner decisions before those affected features are built.
+Historical material visibility and history changes are separate owner decisions;
+this runtime implementation selects neither.
+
+The listener starts no inbound receiving worker and exposes no Rust Events or
+callback dispatcher. Inbound content stays held until the reviewed release/replay
+policy is selected and implemented. Local send/reply acceptance does not bypass
+these decisions or the exposure preconditions below.
 
 
 ## Activation preconditions and next serving unit

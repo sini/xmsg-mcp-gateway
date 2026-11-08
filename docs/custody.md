@@ -6,10 +6,13 @@ observation instant. Repeated access never extends an existing stored expiry.
 Physical reclaim follows the existing access/heartbeat cadence, which bounds its
 lag; no background purger is introduced.
 
-This unit receives through `xmsg::client::RegisteredService`. It adds no MCP
-messaging, callback dispatcher, outbound submission or worker startup command.
-All accepted messages and outbox occurrences remain held. The first-subscription
-policy has no default, and disable/re-enable never rebinds an old acceptance.
+Inbound acceptance uses `xmsg::client::RegisteredService` through the explicit
+`receive_one` library call. The Rust listener separately supports configured MCP
+send/reply through the [outbound layer](outbound.md); it starts no inbound receiving
+worker or callback dispatcher. All accepted inbound messages and outbox
+occurrences remain held. The first-subscription policy has no default, and
+disable/re-enable never rebinds an old acceptance. Those owner decisions and
+[deployment boundaries](serving.md#deployment-boundaries) remain open.
 
 Run the owner command `xmsg-mcp-gateway --state FILE migrate-custody` to migrate
 an existing authority database from schema 1 to 2. Migration is explicit and
@@ -20,7 +23,9 @@ closed. `receive_one` checks readiness before polling and returns
 `MigrationRequired` for v1 without consuming or acknowledging a message.
 There is no NixOS custody startup hook in this foundation: deployment must run
 the separate owner migration command explicitly before a future worker can start.
-The existing `serve` command still exposes only the earlier identity surface.
+The current configured versus identity-only `serve` behavior is documented and
+linked to its real-node acceptance cells in the
+[messaging profile](serving.md#optional-messaging-profile).
 The existing grant Store and its FULL-synchronous SQLite connection are
 reused; there is no second storage implementation.
 
@@ -100,9 +105,9 @@ The status library accepts an effective reply TTL for this comparison. Messaging
 startup now validates reply TTL, idempotency TTL, service queue capacity and body
 bound against the actual registration, including the dedup lifetime comparison.
 Inbound worker activation remains a separate unit: it must reuse that registration
-and the session's configured Limits source. The shared service-name validator and
-all other activation gates also
-remain prerequisites.
+and the session's configured Limits source. Messaging configuration already uses
+the shared service-name validator; this does not complete the remaining inbound
+activation gates.
 
 CI builds revision-verified private daemon fixtures, then requires 22 custody
 cases with zero ignored/filtered tests and all 22 completion markers. The crash

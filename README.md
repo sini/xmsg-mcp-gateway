@@ -1,12 +1,24 @@
 # xmsg-mcp-gateway
 
-The Rust gateway currently serves OAuth-protected MCP identity reads and durable local grants. The Python reference provides synthetic Events. Federated messaging is being integrated through the gateway’s dedicated xmsg node and service identity.
+The Rust gateway serves OAuth-protected MCP identity reads with durable local
+grants and optional `xmsg_send` / `xmsg_reply` tools. Messaging uses a dedicated
+xmsg node and service identity. The Python reference provides synthetic Events;
+Events and an inbound receiving worker remain unavailable in the Rust listener.
 
 The Python reference’s authenticated Streamable HTTP endpoint is `/mcp`. It offers one tool,
 `xmsg_identity`, and `events/list`, `events/subscribe`, `events/unsubscribe` for
 `xmsg.message.received.v1`. There are no messaging or discovery tools.
 
-The Rust [identity listener](docs/serving.md) runs with `cargo run --locked -- serve --config FILE`. Its owner file supplies provider credentials and profile settings; messaging and Events remain unavailable in Rust until their acceptance gates pass.
+The Rust [MCP listener](docs/serving.md) runs with
+`cargo run --locked -- serve --config FILE`. Its owner file supplies provider
+credentials and profile settings. Without a `messaging` section it serves identity
+only. With messaging configured, explicit migrations, node registration and limit
+checks finish before readiness. Tool advertising and dispatch also require the
+configured scopes and owner-set grant policy. An invalid profile refuses startup
+instead of falling back to identity-only use.
+Local acceptance does not authorize a hosted deployment: the
+[pending owner decisions and exposure gates](docs/serving.md#deployment-boundaries)
+still apply.
 
 ## Rust grant-store foundation
 
@@ -14,8 +26,9 @@ The Rust library and local owner CLI persist disabled enrollment, exact service 
 issuer / resource / subject / hosted-client bindings, and revision-checked enable
 and disable operations. The [outbound custody foundation](docs/outbound.md) adds
 durable send/reply reservations and a per-service operation lease shared with
-owner policy and disable commands. Serving integration, runtime ceilings, rebind
-and audit/replay remain pending. The identity listener provides 401/403/503 mapping.
+owner policy and disable commands. The listener integrates these operations with
+request and retention bounds and 401/403/503 mapping. Inbound worker activation,
+release of held work, rebind and audit/replay retain their separate gates.
 The Python reference uses its separate state store.
 
 Build with the toolchain in `rust-toolchain.toml` and the committed Cargo lockfile:
@@ -48,7 +61,7 @@ closed; initialization is explicit and never overwrites an existing store.
 
 The Rust token-verification boundary is described in [verified-token foundation](docs/verified-identity.md). The identity listener consumes this boundary.
 
-## Local setup
+## Python reference setup
 
 Requires Linux, Python 3.12 or newer, and uv. This uses a fresh repository, not a
 worktree of the infrastructure or fleet repositories.
@@ -78,7 +91,7 @@ subscription filters. Progress token types are validated, but metadata is otherw
 progress notifications are emitted. Idle/backoff worker ticks do not introspect tokens;
 a due delivery rechecks authorization before reserving its attempt and sending.
 
-## Configuration and OAuth
+## Python reference configuration and OAuth
 
 Use `config.oauth.example.toml` as the field reference. Save the real configuration
 and generated credentials under `.state/`. Run:
@@ -113,7 +126,7 @@ encrypted. The local key is outside the database, in the private state directory
 This protects a copied database, not a compromised OS account. Back up the state
 directory and key together. Do not enable raw HTTP or proxy credential logging.
 
-## Local administration and custody
+## Python reference administration and custody
 
 Admin commands are executable only through the local CLI; no HTTP admin trigger
 exists. One invocation emits one occurrence; reuse its occurrence ID to retry the
@@ -129,9 +142,10 @@ uv run phase1 --state .state reset-binding
 
 The verifier ID identifies a local-test fixture credential. `revoke` explicitly
 refuses OAuth credentials: revoking one access-token digest cannot disable a
-refreshed token. Revoke OAuth authorization at the provider; durable local service
-grant disablement belongs to the next implementation phase. Unknown revoke or
-retry IDs exit nonzero. An already initiated request cannot be recalled.
+refreshed token. Revoke OAuth authorization at the provider. The Python reference
+does not use the Rust grant store; Rust service grants are disabled through the
+owner CLI described above. Unknown revoke or retry IDs exit nonzero. An already
+initiated request cannot be recalled.
 
 The worker holds the operation lock across online introspection and callback
 submission. Each network operation has a bounded resolver/request budget, so
@@ -177,6 +191,8 @@ Responses are bounded to 64 KiB. Requests are capped at 64 KiB, event bodies at
 
 ## Owner steps: private tunnel
 
+These hosted feasibility steps apply to the Python reference server. They do not
+activate the Rust listener's pending deployment or Events features.
 No tunnel or endpoint has been created by this project.
 
 1. Resolve the authorization-provider compatibility checks in the [provider setup guide](docs/provider-setup.md). Configure

@@ -44,18 +44,19 @@ The source-IP case uses an observed loopback address outside the admitted range;
 pinned node's enforcement code must each make the corresponding negative cell
 fail after its positive control passes. Build errors and timeouts are failures
 of the mutation run, never accepted kills. Fixtures use no fleet credentials or
-network endpoints. Until XR4, the gateway uses the configured plain service name
-without a complete validity check. From XR4 onward, service-name validity will be
-enforced through xmsg's shared validator; the follow-up gateway unit must re-pin
-to that export and call it at configuration load, before transport.
+network endpoints. Service-name validity is enforced through xmsg's shared
+validator at configuration load, before transport. The real-node
+[`invalid_service_names_refuse_at_configuration_load`](../tests/messaging.rs)
+cell covers that path.
 
-This unit exposes no MCP messaging, subscriptions or custody. It does not wire
-transport settings into the serving configuration. Discovery filtering and
-per-operation dispatch policy belong to serving integration. Restart redelivery
-here measures the node/client seam; it does not establish gateway durable custody
-or its crash guarantees. Custody must still check TTL against actual pinned node
-configuration, durably quarantine before ACK, define unbound-item treatment and
-bound refusal retention with message-age loss warnings.
+The transport layer supplies the shared client boundary. The
+[serving profile](serving.md#optional-messaging-profile) now wires it into configured
+MCP send/reply, with discovery filtering and per-operation owner policy. Without
+messaging configuration the listener opens no xmsg socket and serves identity
+only. Restart redelivery in this transport profile measures the node/client seam;
+it does not establish gateway durable custody or its crash guarantees. Those have
+separate [inbound](custody.md) and [outbound](outbound.md) acceptance profiles.
 
-Live activation remains blocked by the owner choices recorded in the reviewed
-contract and by the serving exposure preconditions in [serving.md](serving.md).
+Subscriptions, an inbound receiving worker and Rust Events remain outside the
+current listener. Live deployment still requires the
+[owner decisions and serving exposure preconditions](serving.md#deployment-boundaries).

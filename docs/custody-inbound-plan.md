@@ -3,8 +3,10 @@
 This unit adds durable inbound acceptance, deduplication, quarantine, bounded
 content-free refusal records and explicit ACK integration through xmsg::client.
 It reuses the existing grant Store and rusqlite transaction boundary. It does
-not expose a worker startup command, MCP messaging, outbound submission or a
-callback dispatcher.
+not expose a worker startup command or callback dispatcher. Configured MCP
+send/reply is implemented separately by the [serving profile](serving.md#optional-messaging-profile)
+and [outbound layer](outbound.md). That does not activate this inbound worker or
+release held inbound work.
 
 The implementation must preserve existing authority during an explicit schema
 migration. Opening state does not migrate it, recreate it or enroll authority.
@@ -40,10 +42,15 @@ Acceptance oracles use isolated real-node fixtures, not fleet services:
 - Each safety oracle has a single-site source mutant. Build errors, absent tests
   and timeouts never count as kills.
 
-Startup and Q1 remain pending the upstream effective-limits capability. The
-registration response must report reply_ttl_secs, idempotency_ttl_secs and
-svc_queue_cap from values actually in force. The gateway will compare its windows
-against those values after re-pinning; it will not parse daemon arguments or
-copy the manifest into a second purported source of truth. Each reported limit
-needs its own acceptance cell and mutant in that follow-up. No activation is
-permitted in the meantime.
+Messaging startup now compares its manifest against reply TTL, idempotency TTL,
+service queue capacity and body bounds reported by the actual registration. It
+also checks the gateway retry lifetime against the node's deduplication TTL.
+The [serving profile](serving.md#optional-messaging-profile) describes those checks
+and their acceptance cells; the gateway does not derive effective limits from
+daemon arguments or treat its manifest as the node's source of truth.
+
+Inbound worker activation remains pending. It must reuse the validated
+registration and the session's configured custody limits, and preserve the
+[owner-decision boundaries](serving.md#deployment-boundaries). The implemented
+outbound startup checks do not select a first-subscription policy or authorize
+release of held inbound work.
