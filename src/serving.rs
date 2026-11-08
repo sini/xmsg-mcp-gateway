@@ -3,8 +3,10 @@ use std::fs::File;
 use std::io::Read;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::Semaphore;
 
 use axum::body::to_bytes;
 use axum::extract::{Request, State};
@@ -86,6 +88,8 @@ struct Configuration {
     bind: SocketAddr,
     grant_store: PathBuf,
     request_timeout_ms: u64,
+    #[serde(default = "default_max_connections")]
+    max_connections: usize,
     allowed_hosts: Vec<String>,
     allowed_origins: Vec<String>,
     verifier: VerifierConfig,
@@ -117,11 +121,20 @@ struct App {
     messaging: Option<Messaging>,
 }
 
+fn default_max_connections() -> usize {
+    128
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("connection capacity exhausted")]
+pub struct ConnectionCapacityRefusal;
+
 pub struct Serving {
     header_read_timeout: Duration,
     state: Arc<App>,
     router: Router,
     bind: SocketAddr,
+    max_connections: usize,
 }
 
 fn resolve_profile_path(directory: &Path, file: &mut PathBuf) {
@@ -173,6 +186,8 @@ impl Serving {
             || config.allowed_hosts.is_empty()
             || config.header_read_timeout_ms == 0
             || config.header_read_timeout_ms > 60_000
+            || config.max_connections == 0
+            || config.max_connections > Semaphore::MAX_PERMITS
             || config.request_timeout_ms == 0
             || config.request_timeout_ms > 60_000
             || config
@@ -280,6 +295,7 @@ impl Serving {
             router: router.with_state(state.clone()),
             state,
             bind: config.bind,
+            max_connections: config.max_connections,
         })
     }
 
@@ -293,6 +309,7 @@ impl Serving {
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         let listener = tokio::net::TcpListener::bind(self.bind).await?;
         println!("serving MCP at {}", listener.local_addr()?);
+        let permits = Arc::new(Semaphore::new(self.max_connections));
         let shutdown = async move {
             #[cfg(unix)]
             tokio::select! {
@@ -314,10 +331,19 @@ impl Serving {
                         Ok(accepted) => accepted,
                         Err(error) => break Err(error),
                     };
+                    let permit = match permits.clone().try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            tracing::debug!(reason = %ConnectionCapacityRefusal, "connection refused");
+                            drop(socket);
+                            continue;
+                        }
+                    };
                     let router = self.router.clone();
                     let deadline = self.header_read_timeout;
                     let mut stopped = stopped.clone();
                     connections.spawn(async move {
+                        let _permit = permit;
                         let mut builder = hyper::server::conn::http1::Builder::new();
                         builder.timer(hyper_util::rt::TokioTimer::new());
                         builder.header_read_timeout(deadline);

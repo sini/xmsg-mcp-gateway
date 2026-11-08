@@ -13,6 +13,15 @@ Without a messaging section, serving opens no xmsg socket. The identity
 result describes the verified OAuth service profile and grant revision; it claims
 no bus registration or node address.
 
+The optional owner-file `max_connections` defaults to 128 and must be a positive
+integer no larger than the runtime semaphore capacity. The bound covers complete
+TCP connections, including idle sockets and HTTP keepalive, rather than individual
+requests. At capacity the listener promptly closes excess sockets before spawning
+a handler; admitted connections remain usable. Closing an admitted connection
+releases its slot. Capacity refusals have the typed `ConnectionCapacityRefusal`
+reason and never include request content. Invalid values refuse startup with
+`StartupError::Configuration`.
+
 ## Optional messaging profile
 
 The owner-file constructor is asynchronous: registration, manifest validation and
