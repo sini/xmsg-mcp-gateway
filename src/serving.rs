@@ -127,7 +127,7 @@ impl IntoResponse for TransportRefusal {
             Self::BodyTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             Self::BodyReadFailed => StatusCode::BAD_REQUEST,
         };
-        tracing::debug!(reason = ?self, "transport refused");
+        tracing::warn!(target: "gateway_transport", reason = ?self, "transport refused");
         let mut response = status.into_response();
         // Preserve the domain refusal for response middleware and metrics.
         response.extensions_mut().insert(self);
@@ -376,7 +376,7 @@ impl Serving {
                     let permit = match permits.clone().try_acquire_owned() {
                         Ok(permit) => permit,
                         Err(_) => {
-                            tracing::debug!(reason = %ConnectionCapacityRefusal, "connection refused");
+                            tracing::warn!(target: "gateway_transport", reason = ?ConnectionCapacityRefusal, "connection refused");
                             drop(socket);
                             continue;
                         }
