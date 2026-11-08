@@ -155,7 +155,8 @@ listener. Origins must be explicitly listed when an Origin header is present.
 
 The optional `max_request_body_bytes` defaults to 1,048,576 bytes and must be positive.
 An advertised Content-Length above this bound receives 413 before body reading;
-streaming requests retain the same byte ceiling. The owner-file read bound stays
+streaming requests retain the same byte ceiling. An unreadable body receives 400;
+only a size violation receives 413. The owner-file read bound stays
 64 KiB independently. With messaging configured, startup requires
 `max_request_body_bytes >= 6 * max_framed_bytes + 16384`, using checked arithmetic.
 The envelope allowance assumes typical id/_meta sizes; larger metadata counts

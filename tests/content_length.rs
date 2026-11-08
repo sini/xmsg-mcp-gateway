@@ -100,19 +100,72 @@ async fn exact_limit_valid_padded_rpc_is_accepted() {
 #[tokio::test]
 async fn streaming_body_keeps_the_configured_bound() {
     use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+    use xmsg_mcp_gateway::serving::TransportRefusal;
     let mut fixture = serving_fixture::Fixture::new();
     fixture.config["max_request_body_bytes"] = json!(256);
     save(&fixture);
     let serving = fixture.serving().await;
-    let request = Request::builder()
-        .method("POST")
-        .uri("/mcp")
-        .header("host", "gateway.example")
-        .header("authorization", "Bearer good-token")
-        .body(Body::from(vec![b' '; 257]))
+    for declared in [false, true] {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("host", "gateway.example")
+            .header("authorization", "Bearer good-token");
+        if declared {
+            request = request.header("content-length", "257");
+        }
+        let response = serving
+            .router()
+            .oneshot(request.body(Body::from(vec![b' '; 257])).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            response.extensions().get::<TransportRefusal>(),
+            Some(&TransportRefusal::BodyTooLarge { limit_bytes: 256 }),
+            "body refusal lost its configured limit"
+        );
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+            "typed body refusal projected to the wrong status"
+        );
+    }
+    assert_eq!(fixture.requests.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn body_read_failure_is_not_an_oversized_body() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+    use xmsg_mcp_gateway::serving::TransportRefusal;
+    let fixture = serving_fixture::Fixture::new();
+    let serving = fixture.serving().await;
+    let unreadable = Body::from_stream(futures_util::stream::once(async {
+        Err::<axum::body::Bytes, _>(std::io::Error::other("fixture body read failure"))
+    }));
+    let response = serving
+        .router()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header("host", "gateway.example")
+                .header("authorization", "Bearer good-token")
+                .body(unreadable)
+                .unwrap(),
+        )
+        .await
         .unwrap();
-    let (status, _, _) = serving_fixture::raw_request(&serving, request).await;
-    assert_eq!(status, axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        response.extensions().get::<TransportRefusal>(),
+        Some(&TransportRefusal::BodyReadFailed)
+    );
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::BAD_REQUEST,
+        "body read failure was classified as too large"
+    );
     assert_eq!(fixture.requests.load(Ordering::SeqCst), 0);
 }
 

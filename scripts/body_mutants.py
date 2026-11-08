@@ -17,6 +17,12 @@ LATE = SOURCE.index(
 MOVED = SOURCE[:EARLY_START] + SOURCE[EARLY_END:LATE] + EARLY + SOURCE[LATE:]
 BOUND = "if config.max_request_body_bytes < minimum {"
 assert SOURCE.count(BOUND) == 1
+PROJECTION = "Self::BodyTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE"
+assert SOURCE.count(PROJECTION) == 1
+LIMIT = "limit_bytes: app.max_request_body_bytes,"
+assert SOURCE.count(LIMIT) == 2
+READ_FAILURE_PROJECTION = "Self::BodyReadFailed => StatusCode::BAD_REQUEST"
+assert SOURCE.count(READ_FAILURE_PROJECTION) == 1
 CASES = [
     (
         "late-length-check",
@@ -30,6 +36,32 @@ CASES = [
         SOURCE.replace(BOUND, "if false && config.max_request_body_bytes < minimum {"),
         "insufficient_escaped_body_budget_is_a_typed_startup_refusal",
         "insufficient escaped request budget was accepted or refused for the wrong reason",
+        False,
+    ),
+    (
+        "wrong-body-status",
+        SOURCE.replace(
+            PROJECTION, "Self::BodyTooLarge { .. } => StatusCode::BAD_REQUEST"
+        ),
+        "streaming_body_keeps_the_configured_bound",
+        "typed body refusal projected to the wrong status",
+        False,
+    ),
+    (
+        "wrong-body-limit",
+        SOURCE.replace(LIMIT, "limit_bytes: 0,"),
+        "streaming_body_keeps_the_configured_bound",
+        "body refusal lost its configured limit",
+        False,
+    ),
+    (
+        "body-read-failure-as-too-large",
+        SOURCE.replace(
+            READ_FAILURE_PROJECTION,
+            "Self::BodyReadFailed => StatusCode::PAYLOAD_TOO_LARGE",
+        ),
+        "body_read_failure_is_not_an_oversized_body",
+        "body read failure was classified as too large",
         False,
     ),
 ]
@@ -79,7 +111,7 @@ def main():
                         and reason in result.stdout
                     ), result
             print(f"{name}/{arm}: intended result", flush=True)
-    print("2/2 body mutants killed", flush=True)
+    print(f"{len(CASES)}/{len(CASES)} body mutants killed", flush=True)
 
 
 if __name__ == "__main__":

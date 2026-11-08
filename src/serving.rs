@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::error::Error as _;
 use std::fs::File;
 use std::io::Read;
 use std::net::SocketAddr;
@@ -109,10 +110,29 @@ fn default_header_read_timeout_ms() -> u64 {
     5_000
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum TransportRefusal {
     #[error("request headers exceeded their read deadline")]
     HeaderReadTimeout,
+    #[error("request body exceeds the configured {limit_bytes}-byte limit")]
+    BodyTooLarge { limit_bytes: usize },
+    #[error("request body could not be read")]
+    BodyReadFailed,
+}
+
+impl IntoResponse for TransportRefusal {
+    fn into_response(self) -> Response {
+        let status = match self {
+            Self::HeaderReadTimeout => StatusCode::REQUEST_TIMEOUT,
+            Self::BodyTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::BodyReadFailed => StatusCode::BAD_REQUEST,
+        };
+        tracing::debug!(reason = ?self, "transport refused");
+        let mut response = status.into_response();
+        // Preserve the domain refusal for response middleware and metrics.
+        response.extensions_mut().insert(self);
+        response
+    }
 }
 
 struct App {
@@ -820,12 +840,27 @@ async fn mcp_request(
             .and_then(|value| value.parse::<u64>().ok())
             .is_some_and(|length| length > app.max_request_body_bytes as u64)
     {
-        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+        return TransportRefusal::BodyTooLarge {
+            limit_bytes: app.max_request_body_bytes,
+        }
+        .into_response();
     }
     let raw = if method == Method::POST {
         match to_bytes(request.into_body(), app.max_request_body_bytes).await {
             Ok(raw) => raw,
-            Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+            Err(error) => {
+                let refusal = if error
+                    .source()
+                    .is_some_and(|source| source.is::<http_body_util::LengthLimitError>())
+                {
+                    TransportRefusal::BodyTooLarge {
+                        limit_bytes: app.max_request_body_bytes,
+                    }
+                } else {
+                    TransportRefusal::BodyReadFailed
+                };
+                return refusal.into_response();
+            }
         }
     } else {
         axum::body::Bytes::new()
