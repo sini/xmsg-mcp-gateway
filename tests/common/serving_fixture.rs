@@ -85,8 +85,11 @@ impl Fixture {
             while !worker_stopped.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((socket, _)) => {
-                        let (mut stream, request) =
-                            provider::read_request(socket, tls.clone(), true);
+                        let Some((mut stream, request)) =
+                            provider::read_request(socket, tls.clone(), true)
+                        else {
+                            continue;
+                        };
                         worker_requests.fetch_add(1, Ordering::SeqCst);
                         let token = request
                             .strip_prefix("token=")
@@ -138,7 +141,7 @@ impl Fixture {
     pub fn stop_provider(&mut self) {
         self.stopped.store(true, Ordering::SeqCst);
         if let Some(worker) = self.worker.take() {
-            worker.join().unwrap();
+            join_provider(worker);
         }
     }
     pub async fn serving(&self) -> Serving {
@@ -153,9 +156,23 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         self.stopped.store(true, Ordering::SeqCst);
         if let Some(worker) = self.worker.take() {
-            worker.join().unwrap();
+            join_provider(worker);
         }
     }
+}
+
+fn join_provider(worker: thread::JoinHandle<()>) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while !worker.is_finished() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "serving provider fixture worker did not exit within 3 seconds"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    worker
+        .join()
+        .expect("serving provider fixture worker panicked");
 }
 
 #[derive(Clone, Default)]
