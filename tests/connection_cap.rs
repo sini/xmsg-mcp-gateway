@@ -12,21 +12,26 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use xmsg_mcp_gateway::serving::{Serving, StartupError};
 
-async fn metadata(socket: &mut TcpStream) {
+const REQUEST_SECRET: &str = "cap-request-secret-must-not-reach-stderr";
+
+async fn metadata(socket: &mut TcpStream) -> std::io::Result<()> {
     socket
         .write_all(
-            b"GET /.well-known/oauth-protected-resource HTTP/1.1\r\nHost: gateway.example\r\n\r\n",
+            format!("GET /.well-known/oauth-protected-resource HTTP/1.1\r\nHost: gateway.example\r\nX-Request-Secret: {REQUEST_SECRET}\r\n\r\n").as_bytes(),
         )
-        .await
-        .unwrap();
+        .await?;
     let mut reader = BufReader::new(socket);
     let mut line = String::new();
-    reader.read_line(&mut line).await.unwrap();
+    if reader.read_line(&mut line).await? == 0 {
+        return Err(std::io::ErrorKind::UnexpectedEof.into());
+    }
     assert!(line.starts_with("HTTP/1.1 200"), "metadata control: {line}");
     let mut length = None;
     loop {
         line.clear();
-        reader.read_line(&mut line).await.unwrap();
+        if reader.read_line(&mut line).await? == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
         if line == "\r\n" {
             break;
         }
@@ -35,9 +40,10 @@ async fn metadata(socket: &mut TcpStream) {
         }
     }
     let mut body = vec![0; length.unwrap()];
-    reader.read_exact(&mut body).await.unwrap();
+    reader.read_exact(&mut body).await?;
     let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["resource"], "https://gateway.example/mcp");
+    Ok(())
 }
 
 #[tokio::test]
@@ -57,6 +63,7 @@ async fn connection_cap_bounds_idle_and_keepalive_and_releases_slots() {
         .arg("--config")
         .arg(&fixture.config_file)
         .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .unwrap();
@@ -71,6 +78,7 @@ async fn connection_cap_bounds_idle_and_keepalive_and_releases_slots() {
     let mut keepalive = TcpStream::connect(address).await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), metadata(&mut keepalive))
         .await
+        .unwrap()
         .unwrap();
     let mut excess = TcpStream::connect(address).await.unwrap();
     let mut byte = [0];
@@ -82,22 +90,45 @@ async fn connection_cap_bounds_idle_and_keepalive_and_releases_slots() {
     );
     tokio::time::timeout(Duration::from_secs(2), metadata(&mut idle))
         .await
+        .unwrap()
         .unwrap();
     tokio::time::timeout(Duration::from_secs(2), metadata(&mut keepalive))
         .await
+        .unwrap()
         .unwrap();
     drop(idle);
-    // Wait for the remote FIN to retire the old connection, then require a full response.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let mut replacement = TcpStream::connect(address).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(2), metadata(&mut replacement))
-        .await
-        .unwrap();
-    drop(replacement);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let mut attempts = tokio::time::interval(Duration::from_millis(10));
+        loop {
+            attempts.tick().await;
+            let mut replacement = TcpStream::connect(address).await.unwrap();
+            if metadata(&mut replacement).await.is_ok() {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("released connection slot did not admit a replacement before the deadline");
     drop(keepalive);
     drop(excess);
     child.kill().await.unwrap();
     child.wait().await.unwrap();
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .await
+        .unwrap();
+    assert!(
+        stderr.contains("ConnectionCapacityRefusal"),
+        "missing production cap reason: {stderr}"
+    );
+    assert!(
+        !stderr.contains(REQUEST_SECRET),
+        "request secret leaked to stderr"
+    );
 }
 
 #[tokio::test]
