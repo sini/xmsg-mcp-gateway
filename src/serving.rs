@@ -3,8 +3,14 @@ use std::fs::File;
 use std::io::Read;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+use axum::serve::Listener;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use axum::body::to_bytes;
 use axum::extract::{Request, State};
@@ -84,6 +90,8 @@ struct Configuration {
     bind: SocketAddr,
     grant_store: PathBuf,
     request_timeout_ms: u64,
+    #[serde(default = "default_max_connections")]
+    max_connections: usize,
     allowed_hosts: Vec<String>,
     allowed_origins: Vec<String>,
     verifier: VerifierConfig,
@@ -105,10 +113,85 @@ struct App {
     messaging: Option<Messaging>,
 }
 
+fn default_max_connections() -> usize {
+    128
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("connection capacity exhausted")]
+pub struct ConnectionCapacityRefusal;
+
+struct CappedListener {
+    listener: tokio::net::TcpListener,
+    permits: Arc<Semaphore>,
+}
+
+struct AdmittedConnection {
+    socket: tokio::net::TcpStream,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl Listener for CappedListener {
+    type Io = AdmittedConnection;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            let (socket, address) = Listener::accept(&mut self.listener).await;
+            match self.permits.clone().try_acquire_owned() {
+                Ok(permit) => {
+                    return (
+                        AdmittedConnection {
+                            socket,
+                            _permit: permit,
+                        },
+                        address,
+                    )
+                }
+                Err(_) => {
+                    tracing::debug!(reason = %ConnectionCapacityRefusal, "connection refused");
+                    drop(socket);
+                }
+            }
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.listener.local_addr()
+    }
+}
+
+impl AsyncRead for AdmittedConnection {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.socket).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for AdmittedConnection {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.socket).poll_write(cx, buf)
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.socket).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.socket).poll_shutdown(cx)
+    }
+}
+
 pub struct Serving {
     state: Arc<App>,
     router: Router,
     bind: SocketAddr,
+    max_connections: usize,
 }
 
 fn resolve_profile_path(directory: &Path, file: &mut PathBuf) {
@@ -158,6 +241,8 @@ impl Serving {
         }
         if !config.bind.ip().is_loopback()
             || config.allowed_hosts.is_empty()
+            || config.max_connections == 0
+            || config.max_connections > Semaphore::MAX_PERMITS
             || config.request_timeout_ms == 0
             || config.request_timeout_ms > 60_000
             || config
@@ -264,6 +349,7 @@ impl Serving {
             router: router.with_state(state.clone()),
             state,
             bind: config.bind,
+            max_connections: config.max_connections,
         })
     }
 
@@ -277,6 +363,10 @@ impl Serving {
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         let listener = tokio::net::TcpListener::bind(self.bind).await?;
         println!("serving MCP at {}", listener.local_addr()?);
+        let listener = CappedListener {
+            listener,
+            permits: Arc::new(Semaphore::new(self.max_connections)),
+        };
         let result = axum::serve(listener, self.router)
             .with_graceful_shutdown(async move {
                 #[cfg(unix)]
