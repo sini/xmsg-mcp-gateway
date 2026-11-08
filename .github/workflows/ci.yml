@@ -36,6 +36,9 @@ jobs:
           rustup toolchain install "$version" --profile minimal --component rustfmt,clippy
           rustup default "$version"
       - run: cargo fmt --all -- --check
+      - name: Portable live-runner diagnostics
+        if: runner.os == 'macOS'
+        run: python3 scripts/timeout_diagnostics_checks.py
       - name: Rust tests and completion counts
         run: |
           cargo test --locked -j 4 2>&1 | tee cargo-tests.log

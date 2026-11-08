@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 
 from artifact_evidence import record
-from transport_compat import ROOT, build_test, copy_fixture_tree
+from transport_compat import ROOT, build_test, copy_fixture_tree, invocation_evidence
 
 TEST = "clean_tls_eof_during_headers_releases_provider_fixture"
 REFUSAL = "serving provider fixture worker did not exit within 3 seconds"
@@ -27,8 +27,10 @@ def main():
             (root / "tests/common/provider.rs").write_text(text)
             executable = Path(build_test(root, target="provider_eof"))
             record(root, executable, arm)
+            args = [str(executable), "--nocapture"]
+            invocation_evidence(args)
             result = subprocess.run(
-                [str(executable), "--nocapture"],
+                args,
                 cwd=root,
                 capture_output=True,
                 text=True,

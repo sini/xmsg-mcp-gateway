@@ -11,6 +11,7 @@ import uuid
 from pathlib import Path
 
 from artifact_evidence import NONCE, record
+from transport_compat import invocation_evidence
 
 ROOT = Path(__file__).resolve().parents[1]
 CASES = [
@@ -233,8 +234,10 @@ def run_marked(root, target, test, changed_source, *, test_timeout, test_args, a
             raise RuntimeError("intended subprocess application was cached or missing")
         app = Path(apps[0]["executable"])
         record(root, app, f"application/{test}", directories=("src",))
+    args = [executables[0]["executable"], test, "--exact", "--show-output", *test_args]
+    invocation_evidence(args)
     result = subprocess.run(
-        [executables[0]["executable"], test, "--exact", "--show-output", *test_args],
+        args,
         cwd=root,
         env=env,
         capture_output=True,

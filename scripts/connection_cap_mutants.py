@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 
 from artifact_evidence import NONCE, record
+from transport_compat import invocation_evidence
 
 ROOT = Path(__file__).resolve().parents[1]
 TEST = "connection_cap_bounds_idle_and_keepalive_and_releases_slots"
@@ -74,8 +75,10 @@ def arm(root, name):
     for kind, (receipt, file) in selected.items():
         assert receipt.get("fresh") is False, (name, kind, "cached artifact")
         record(root, file, f"connection-cap/{name}/{kind}")
+    args = [str(selected["test"][1]), TEST, "--exact", "--nocapture"]
+    invocation_evidence(args)
     result = subprocess.run(
-        [str(selected["test"][1]), TEST, "--exact", "--nocapture"],
+        args,
         cwd=root,
         env=env,
         capture_output=True,

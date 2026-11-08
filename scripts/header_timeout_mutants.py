@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 
 from artifact_evidence import record
+from transport_compat import invocation_evidence
 
 ROOT = Path(__file__).resolve().parents[1]
 TEST = "header_deadline_is_absolute_and_excludes_body"
@@ -157,8 +158,10 @@ def main():
             record(tree, Path(executable), label)
             results = []
             for name, diagnostic in cells:
+                args = [executable, "--exact", name, "--nocapture"]
+                invocation_evidence(args)
                 result = subprocess.run(
-                    [executable, "--exact", name, "--nocapture"],
+                    args,
                     cwd=tree,
                     env=environment,
                     capture_output=True,
