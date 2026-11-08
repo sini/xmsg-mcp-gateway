@@ -111,9 +111,11 @@ fn default_header_read_timeout_ms() -> u64 {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("request headers exceeded their read deadline")]
+pub struct HeaderReadTimeout;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum TransportRefusal {
-    #[error("request headers exceeded their read deadline")]
-    HeaderReadTimeout,
     #[error("request body exceeds the configured {limit_bytes}-byte limit")]
     BodyTooLarge { limit_bytes: usize },
     #[error("request body could not be read")]
@@ -123,7 +125,6 @@ pub enum TransportRefusal {
 impl IntoResponse for TransportRefusal {
     fn into_response(self) -> Response {
         let status = match self {
-            Self::HeaderReadTimeout => StatusCode::REQUEST_TIMEOUT,
             Self::BodyTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             Self::BodyReadFailed => StatusCode::BAD_REQUEST,
         };
@@ -371,7 +372,19 @@ impl Serving {
                 accepted = listener.accept() => {
                     let (socket, _) = match accepted {
                         Ok(accepted) => accepted,
-                        Err(error) => break Err(error),
+                        Err(error) => {
+                            if matches!(error.kind(), std::io::ErrorKind::ConnectionRefused
+                                | std::io::ErrorKind::ConnectionAborted
+                                | std::io::ErrorKind::ConnectionReset) {
+                                continue;
+                            }
+                            tracing::warn!(kind = ?error.kind(), "accept failed; retrying");
+                            tokio::select! {
+                                _ = &mut shutdown => break Ok(()),
+                                _ = tokio::time::sleep(Duration::from_secs(1)) => {},
+                            }
+                            continue;
+                        }
                     };
                     let permit = match permits.clone().try_acquire_owned() {
                         Ok(permit) => permit,
@@ -403,7 +416,7 @@ impl Serving {
                         };
                         if let Err(error) = outcome {
                             if error.is_timeout() {
-                                let reason = TransportRefusal::HeaderReadTimeout;
+                                let reason = HeaderReadTimeout;
                                 tracing::warn!(target: "gateway_transport", reason = ?reason, "transport refused");
                             }
                         }
@@ -411,6 +424,7 @@ impl Serving {
                 }
             }
         };
+        drop(listener);
         let _ = stopping.send(true);
         while connections.join_next().await.is_some() {}
         {

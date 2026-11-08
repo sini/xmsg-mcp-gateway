@@ -62,7 +62,7 @@ async fn header_deadline_is_absolute_and_excludes_body() {
     normal(address).await;
     let mut socket = TcpStream::connect(address).await.unwrap();
     socket
-        .write_all(b"POST /mcp HTTP/1.1\r\nHost: gateway.example\r\nX-Drip: ")
+        .write_all(b"POST /mcp HTTP/1.1\r\nHost: gateway.example\r\nAuthorization: Bearer header-secret-token\r\nX-Drip: ")
         .await
         .unwrap();
     let started = Instant::now();
@@ -113,6 +113,29 @@ async fn header_deadline_is_absolute_and_excludes_body() {
     normal(address).await;
     child.kill().await.unwrap();
     child.wait().await.unwrap();
+    let mut logs = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut logs)
+        .await
+        .unwrap();
+    assert!(
+        logs.contains("HeaderReadTimeout"),
+        "header timeout reason was not emitted: {logs}"
+    );
+    for secret in [
+        "header-secret-token",
+        "good-token",
+        "tools/call",
+        "xmsg_identity",
+    ] {
+        assert!(
+            !logs.contains(secret),
+            "transport logs exposed request data: {logs}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -139,4 +162,170 @@ async fn header_deadline_configuration_is_typed_and_optional() {
             Err(xmsg_mcp_gateway::serving::StartupError::Configuration(_))
         ));
     }
+}
+
+async fn listener(fixture: &Fixture, limited_descriptors: bool) -> (tokio::process::Child, String) {
+    let mut command = if limited_descriptors {
+        let mut command = tokio::process::Command::new("prlimit");
+        command.args([
+            "--nofile=64:64",
+            "--",
+            env!("CARGO_BIN_EXE_xmsg-mcp-gateway"),
+        ]);
+        command
+    } else {
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_xmsg-mcp-gateway"))
+    };
+    let mut child = command
+        .args(["serve", "--config"])
+        .arg(&fixture.config_file)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let ready = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    (
+        child,
+        ready.strip_prefix("serving MCP at ").unwrap().to_owned(),
+    )
+}
+
+#[tokio::test]
+async fn idle_keepalive_is_bounded_by_the_next_header_deadline() {
+    let mut fixture = Fixture::new();
+    fixture.config["header_read_timeout_ms"] = serde_json::json!(300);
+    fixture::private_file(
+        &fixture.config_file,
+        &serde_json::to_vec(&fixture.config).unwrap(),
+    );
+    let (mut child, address) = listener(&fixture, false).await;
+    let mut socket = BufReader::new(TcpStream::connect(&address).await.unwrap());
+    let started = Instant::now();
+    socket
+        .get_mut()
+        .write_all(
+            b"GET /.well-known/oauth-protected-resource HTTP/1.1\r\nHost: gateway.example\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    let mut status = String::new();
+    socket.read_line(&mut status).await.unwrap();
+    assert!(status.starts_with("HTTP/1.1 200 OK"), "{status}");
+    let mut length = None;
+    loop {
+        let mut line = String::new();
+        assert!(socket.read_line(&mut line).await.unwrap() > 0);
+        if line == "\r\n" {
+            break;
+        }
+        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+            length = Some(value.trim().parse::<usize>().unwrap());
+        }
+    }
+    let mut body = vec![0; length.expect("metadata must have a bounded body")];
+    socket.read_exact(&mut body).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap()["resource"],
+        fixture.binding.resource
+    );
+    let mut byte = [0];
+    let closed = tokio::time::timeout(Duration::from_millis(1500), socket.read(&mut byte)).await;
+    assert!(
+        matches!(closed, Ok(Ok(0))),
+        "idle keep-alive exceeded next-header deadline: {closed:?}"
+    );
+    assert!(
+        started.elapsed() >= Duration::from_millis(200),
+        "idle keep-alive closed before header deadline"
+    );
+    normal(&address).await;
+    child.kill().await.unwrap();
+    child.wait().await.unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn accept_errors_recover_after_descriptor_exhaustion() {
+    let mut fixture = Fixture::new();
+    fixture.config["header_read_timeout_ms"] = serde_json::json!(60000);
+    fixture.config["max_connections"] = serde_json::json!(1000);
+    fixture::private_file(
+        &fixture.config_file,
+        &serde_json::to_vec(&fixture.config).unwrap(),
+    );
+    let (mut child, address) = listener(&fixture, true).await;
+    normal(&address).await;
+    let mut logs = BufReader::new(child.stderr.take().unwrap()).lines();
+    let mut held = Vec::new();
+    for _ in 0..100 {
+        let connected = tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(&address))
+            .await
+            .unwrap();
+        match connected {
+            Ok(socket) => held.push(socket),
+            Err(error) => {
+                let exited = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
+                assert!(
+                    matches!(exited, Ok(Ok(_))),
+                    "connection failed while server remained alive: {error}"
+                );
+                panic!("server terminated on recoverable accept error: {error}");
+            }
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            tokio::select! {
+                exited = child.wait() => panic!("server terminated on recoverable accept error: {exited:?}"),
+                line = logs.next_line() => {
+                    let line = line.unwrap().expect("server terminated on recoverable accept error");
+                    if line.contains("accept failed; retrying") { break; }
+                }
+            }
+        }
+    }).await.expect("descriptor exhaustion did not exercise accept recovery");
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "server terminated on recoverable accept error"
+    );
+    drop(held);
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(1))
+        .build()
+        .unwrap();
+    let recovered = tokio::time::timeout(Duration::from_secs(6), async {
+        loop {
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "server terminated on recoverable accept error"
+            );
+            if let Ok(response) = client
+                .get(format!(
+                    "http://{address}/.well-known/oauth-protected-resource"
+                ))
+                .send()
+                .await
+            {
+                if response.status() == reqwest::StatusCode::OK {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        recovered.is_ok(),
+        "listener did not recover after descriptor release"
+    );
+    normal(&address).await;
+    child.kill().await.unwrap();
+    child.wait().await.unwrap();
 }

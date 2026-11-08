@@ -164,10 +164,10 @@ against max_request_body_bytes.
 
 The handler bounds the request body at that limit and the handler, once headers are
 parsed, at the configured deadline (1–60000 ms). This covers body reading,
-verification, policy lookup and dispatch. It does not bound the HTTP header phase
-or idle keep-alive connections. After reading the body, each request obtains a
-fresh verified identity from the configured provider and reads the current grant
-from the store. SQL runs off the async reactor with tracing context preserved.
+verification, policy lookup and dispatch. The separate `header_read_timeout_ms`
+bounds HTTP header reads, including the next header read while a keep-alive
+connection is idle. After reading the body, each request obtains a fresh verified
+identity from the configured provider and reads the current grant from the store. SQL runs off the async reactor with tracing context preserved.
 Expiry is checked again after the policy read, so waiting on a store lock cannot
 carry an expired credential into dispatch. No identity is cached per session or
 connection.
@@ -193,18 +193,18 @@ custody, callbacks, and actual xmsg operations retain their separate gates.
 
 ## Activation preconditions and next serving unit
 
-P1 and P5 block exposure beyond the current local loopback use, including exposure
-through a tunnel even when the listener still binds loopback. They must pass
-before such activation:
+P1 is met by the header deadline and connection cap below. P5 remains an
+activation precondition for exposure beyond local loopback use, including exposure
+through a tunnel even when the listener still binds loopback:
 
-- **P1 — connection admission and lifetime:** enforce a header-read deadline, an
-  idle keep-alive deadline and a connection cap. Real TCP oracles send partial
-  headers and park an idle keep-alive connection; both must close within their
-  configured bounds. Occupying the cap must prevent additional admitted work,
-  with zero additional provider requests, store opens or dispatches. A complete
-  authenticated request below the cap must succeed, and releasing a slot must
-  admit another request. Source mutants removing each timer or the cap must turn
-  its named oracle red.
+- **P1 — connection admission and lifetime (met):** `header_read_timeout_ms`
+  bounds partial headers and idle keep-alive through the next request's header
+  deadline; `max_connections` bounds admitted sockets. The real CLI cells
+  `header_deadline_is_absolute_and_excludes_body` and
+  `idle_keepalive_is_bounded_by_the_next_header_deadline` in
+  `tests/header_timeout.rs` pin both lifetimes. The connection-cap cells in
+  `tests/connection_cap.rs` cover refusal, continued service and slot release.
+  Source mutants removing the deadline or cap must fail their named cells.
 - **P5 — declared oversized bodies:** with headers declaring a Content-Length
   above the configured request-body limit and no body bytes sent, return 413 promptly, before the handler
   deadline, with zero provider requests, store opens or dispatches. A permitted
@@ -254,12 +254,18 @@ coalescing over-estimate. A failure to persist that observation exits visibly.
 `header_read_timeout_ms` defaults to 5000 and accepts integers from 1 through
 60000. Each HTTP/1 request must complete its headers within this absolute deadline;
 receiving another byte does not renew it. Expiry closes the connection with the
-typed `TransportRefusal::HeaderReadTimeout` reason. Completed headers release the
-deadline, so it does not limit request body delivery or response work.
+typed `HeaderReadTimeout` reason on stderr. Completed headers release the
+deadline, so it does not limit request body delivery or response work. Hyper
+re-arms it for the next request, bounding idle keep-alive with the same setting
+rather than a separate idle deadline.
 
 `cargo test --test header_timeout` exercises this bound through the real CLI and
 listener, including a delayed-body positive control. Run
-`python3 scripts/header_timeout_mutants.py` under the project's heavy-run lock to
-fresh-build the control and a source mutant that disables the header deadline;
-the driver requires that mutant to fail the slow-header assertion and records
-source, library, app and test artifact hashes plus an executed nonce.
+`python3 scripts/header_timeout_mutants.py` to fresh-build the control and source
+mutants that disable the header deadline, remove its diagnostic, or make accept
+errors fatal. The driver requires the intended slow-header, idle keep-alive,
+diagnostic and descriptor-exhaustion assertions to reject their mutants. It
+records source, library, app and test hashes plus an executed nonce per arm.
+The descriptor-exhaustion cell runs on Linux with `prlimit` available; it holds
+100 connections against a 64-descriptor limit, then releases them and requires
+normal requests to succeed again.
