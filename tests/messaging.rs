@@ -841,10 +841,7 @@ async fn mcp_replies_use_owned_custody_and_the_original_bus_receipt() {
             &mailbox,
             &delivery,
             &custody::Limits::default(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64,
+            std::time::SystemTime::now(),
         )
         .unwrap();
     mailbox.ack(delivery.message_id()).await.unwrap();

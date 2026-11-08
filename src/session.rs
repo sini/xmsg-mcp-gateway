@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use tokio::sync::{watch, Notify};
 use tracing::instrument::WithSubscriber;
@@ -88,17 +88,9 @@ fn observation_interval(reply_ttl_secs: u64) -> Duration {
         .min(Duration::from_secs(60))
 }
 
-fn timestamp() -> Result<i64, Error> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|time| i64::try_from(time.as_secs()).ok())
-        .ok_or(Error::Ledger)
-}
-
-fn record(store: &mut Store, bus: &str, connected: bool) -> Result<(), Error> {
+fn record(store: &mut Store, bus: &str, connected: bool, at: SystemTime) -> Result<(), Error> {
     store
-        .record_bus_link(bus, connected, &custody::Limits::default(), timestamp()?)
+        .record_bus_link(bus, connected, &custody::Limits::default(), at)
         .map_err(|_| Error::Ledger)
 }
 
@@ -111,7 +103,7 @@ async fn record_link(
     let observed_at = tokio::time::Instant::now();
     tokio::task::spawn_blocking(move || {
         let mut store = Store::open(&file).map_err(|_| Error::Ledger)?;
-        record(&mut store, &record_bus, connected)
+        record(&mut store, &record_bus, connected, SystemTime::now())
     })
     .await
     .map_err(|_| Error::Ledger)??;
@@ -130,7 +122,7 @@ impl Session {
         let snapshot = Arc::new(Snapshot::from_registered(&registered)?);
         let bus = snapshot.bus.clone();
         let initial_observation = tokio::time::Instant::now();
-        tokio::task::spawn_blocking(move || record(&mut store, &bus, true))
+        tokio::task::spawn_blocking(move || record(&mut store, &bus, true, SystemTime::now()))
             .await
             .map_err(|_| Error::Ledger)??;
         registered.health().map_err(Error::Registration)?;
@@ -294,6 +286,35 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::UNIX_EPOCH;
+
+    #[test]
+    fn production_bus_observations_preserve_fractional_retention() {
+        for nanos in [1, 999_999_999] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut store = Store::initialize(&directory.path().join("store.db")).unwrap();
+            store.migrate_custody().unwrap();
+            record(
+                &mut store,
+                "node",
+                true,
+                UNIX_EPOCH + Duration::from_secs(100),
+            )
+            .unwrap();
+            let at = UNIX_EPOCH + Duration::new(101, nanos);
+            record(&mut store, "node", false, at).unwrap();
+            let expiry: i64 = store
+                .connection
+                .query_row("SELECT expires_at FROM custody_gaps", [], |row| row.get(0))
+                .unwrap();
+            let remaining = (UNIX_EPOCH + Duration::from_secs(expiry as u64))
+                .duration_since(at)
+                .unwrap();
+            let lifetime = custody::Limits::default().metadata_retention_secs as u64;
+            assert!(remaining >= Duration::from_secs(lifetime));
+            assert!(remaining < Duration::from_secs(lifetime + 1));
+        }
+    }
 
     #[test]
     fn coalesced_observations_overestimate_downtime_by_at_most_the_interval() {
@@ -310,10 +331,17 @@ mod tests {
             let mut store = Store::initialize(&directory.path().join("store.db")).unwrap();
             store.migrate_custody().unwrap();
             let limits = custody::Limits::default();
-            store.record_bus_link("node", true, &limits, 100).unwrap();
+            store
+                .record_bus_link("node", true, &limits, UNIX_EPOCH + Duration::from_secs(100))
+                .unwrap();
             let true_downtime = 25;
             store
-                .record_bus_link("node", true, &limits, 100 + age + true_downtime)
+                .record_bus_link(
+                    "node",
+                    true,
+                    &limits,
+                    UNIX_EPOCH + Duration::from_secs((100 + age + true_downtime) as u64),
+                )
                 .unwrap();
             let gap: i64 = store
                 .connection

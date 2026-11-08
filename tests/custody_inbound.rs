@@ -1,5 +1,8 @@
 #![cfg(target_os = "linux")]
 
+#[path = "common/custody_time.rs"]
+mod custody_time;
+
 #[allow(dead_code)]
 #[path = "common/real_node.rs"]
 mod real_node;
@@ -43,7 +46,13 @@ async fn commit_before_ack_preserves_the_original_event_across_restart() {
         .unwrap();
     let delivery = service.poll(1).await.unwrap().unwrap();
     let first = store
-        .accept_delivery(&scope, &service, &delivery, &Limits::default(), 100)
+        .accept_delivery(
+            &scope,
+            &service,
+            &delivery,
+            &Limits::default(),
+            custody_time::at(100),
+        )
         .unwrap();
     let Acceptance::Stored { event_id } = first else {
         panic!("first delivery was not stored")
@@ -67,7 +76,13 @@ async fn commit_before_ack_preserves_the_original_event_across_restart() {
     let again = service.poll(1).await.unwrap().unwrap();
     assert_eq!(again.message_id(), sent.message_id);
     let repeated = store
-        .accept_delivery(&scope, &service, &again, &Limits::default(), 101)
+        .accept_delivery(
+            &scope,
+            &service,
+            &again,
+            &Limits::default(),
+            custody_time::at(101),
+        )
         .unwrap();
     assert_eq!(repeated, Acceptance::Duplicate { event_id });
     service.ack(again.message_id()).await.unwrap();
@@ -125,9 +140,15 @@ async fn oversized_refusal_is_durable_content_free_before_ack() {
         .await
         .unwrap();
     assert_eq!(
-        xmsg_mcp_gateway::custody::receive_one(&mut store, &mut service, &scope, &limits, 100)
-            .await
-            .unwrap(),
+        xmsg_mcp_gateway::custody::receive_one(
+            &mut store,
+            &mut service,
+            &scope,
+            &limits,
+            custody_time::at(100)
+        )
+        .await
+        .unwrap(),
         Some(Acceptance::Refused)
     );
     drop(store);
@@ -180,7 +201,13 @@ async fn conflict_is_quarantined_before_the_upstream_ack() {
         .unwrap();
     let delivery = service.poll(1).await.unwrap().unwrap();
     store
-        .accept_delivery(&scope, &service, &delivery, &Limits::default(), 100)
+        .accept_delivery(
+            &scope,
+            &service,
+            &delivery,
+            &Limits::default(),
+            custody_time::at(100),
+        )
         .unwrap();
     drop(service);
     let node_db = node
@@ -210,7 +237,7 @@ async fn conflict_is_quarantined_before_the_upstream_ack() {
             &mut service,
             &scope,
             &Limits::default(),
-            101
+            custody_time::at(101)
         )
         .await
         .unwrap(),
@@ -268,7 +295,7 @@ async fn failed_transaction_never_acknowledges_or_retains_partial_custody() {
                 &mut service,
                 &scope,
                 &Limits::default(),
-                100
+                custody_time::at(100)
             )
             .await,
             Err(xmsg_mcp_gateway::custody::Error::MigrationRequired)
@@ -289,7 +316,7 @@ async fn failed_transaction_never_acknowledges_or_retains_partial_custody() {
             &mut service,
             &scope,
             &Limits::default(),
-            100
+            custody_time::at(100)
         )
         .await
         .is_err(),
@@ -349,7 +376,7 @@ async fn permanent_refusals_do_not_starve_valid_traffic() {
                 &mut service,
                 &scope,
                 &limits,
-                100 + index
+                custody_time::at(100 + index)
             )
             .await
             .unwrap(),
@@ -390,9 +417,15 @@ async fn permanent_refusals_do_not_starve_valid_traffic() {
         "permanent refusals retained upstream queue slots"
     );
     assert!(matches!(
-        xmsg_mcp_gateway::custody::receive_one(&mut store, &mut service, &scope, &limits, 251)
-            .await
-            .unwrap(),
+        xmsg_mcp_gateway::custody::receive_one(
+            &mut store,
+            &mut service,
+            &scope,
+            &limits,
+            custody_time::at(251)
+        )
+        .await
+        .unwrap(),
         Some(Acceptance::Stored { .. })
     ));
     let persisted = rusqlite::Connection::open(&db).unwrap();
@@ -436,7 +469,7 @@ async fn retention_redacts_content_without_rebinding_the_tombstone() {
         .unwrap();
     let delivery = service.poll(1).await.unwrap().unwrap();
     let first = store
-        .accept_delivery(&scope, &service, &delivery, &limits, 100)
+        .accept_delivery(&scope, &service, &delivery, &limits, custody_time::at(100))
         .unwrap();
     let Acceptance::Stored { event_id } = first else {
         panic!("not stored")
@@ -446,7 +479,7 @@ async fn retention_redacts_content_without_rebinding_the_tombstone() {
     store.set_enabled("grant", 3, true).unwrap();
     assert_eq!(
         store
-            .accept_delivery(&scope, &service, &delivery, &limits, 102)
+            .accept_delivery(&scope, &service, &delivery, &limits, custody_time::at(102))
             .unwrap(),
         Acceptance::Duplicate { event_id }
     );
@@ -476,7 +509,7 @@ async fn retention_redacts_content_without_rebinding_the_tombstone() {
     assert!(
         matches!(
             store
-                .accept_delivery(&scope, &service, &delivery, &limits, 106)
+                .accept_delivery(&scope, &service, &delivery, &limits, custody_time::at(106))
                 .unwrap(),
             Acceptance::Stored { .. }
         ),
@@ -536,7 +569,13 @@ async fn mailbox_is_derived_from_the_registered_handle_not_configuration() {
         .unwrap();
     let delivery = service.poll(1).await.unwrap().unwrap();
     store
-        .accept_delivery(&scope, &service, &delivery, &Limits::default(), 100)
+        .accept_delivery(
+            &scope,
+            &service,
+            &delivery,
+            &Limits::default(),
+            custody_time::at(100),
+        )
         .unwrap();
     let inspected = rusqlite::Connection::open(&db).unwrap();
     let (mailbox, owner, snapshot): (String, String, i64) = inspected
@@ -595,7 +634,7 @@ fn custody_crash_child() {
                 &mut service,
                 &scope,
                 &Limits::default(),
-                100,
+                custody_time::at(100),
             )
             .await
             .unwrap();
@@ -690,7 +729,13 @@ async fn crash_at(phase: &str) {
         grant_id: "grant".into(),
     };
     let accepted = store
-        .accept_delivery(&scope, &service, &delivery, &Limits::default(), 101)
+        .accept_delivery(
+            &scope,
+            &service,
+            &delivery,
+            &Limits::default(),
+            custody_time::at(101),
+        )
         .unwrap();
     match (phase, accepted) {
         ("before", Acceptance::Stored { .. }) => {}
@@ -772,7 +817,7 @@ async fn repeated_conflicts_do_not_starve_valid_traffic() {
                 &mut service,
                 &scope,
                 &Limits::default(),
-                100
+                custody_time::at(100)
             )
             .await
             .unwrap(),
@@ -785,7 +830,7 @@ async fn repeated_conflicts_do_not_starve_valid_traffic() {
                 &mut service,
                 &scope,
                 &Limits::default(),
-                101
+                custody_time::at(101)
             )
             .await
             .unwrap(),
@@ -819,14 +864,14 @@ async fn repeated_conflicts_do_not_starve_valid_traffic() {
             &mut service,
             &scope,
             &Limits::default(),
-            102
+            custody_time::at(102)
         )
         .await
         .unwrap(),
         Some(Acceptance::Stored { .. })
     ));
     let status = store
-        .custody_status(&scope, &Limits::default(), 102, 604800)
+        .custody_status(&scope, &Limits::default(), custody_time::at(102), 604800)
         .unwrap();
     assert_eq!(status.quarantines, 150);
     assert_eq!(status.pending, 0, "confirmed ACKs retained pending IDs");
@@ -856,9 +901,15 @@ async fn transient_capacity_and_failed_refusal_persistence_keep_redelivery() {
         .send(service.address().unwrap(), "first", Some("first-capacity"))
         .await
         .unwrap();
-    xmsg_mcp_gateway::custody::receive_one(&mut store, &mut service, &scope, &limits, 100)
-        .await
-        .unwrap();
+    xmsg_mcp_gateway::custody::receive_one(
+        &mut store,
+        &mut service,
+        &scope,
+        &limits,
+        custody_time::at(100),
+    )
+    .await
+    .unwrap();
     let second = service
         .send(
             service.address().unwrap(),
@@ -868,9 +919,15 @@ async fn transient_capacity_and_failed_refusal_persistence_keep_redelivery() {
         .await
         .unwrap();
     assert_eq!(
-        xmsg_mcp_gateway::custody::receive_one(&mut store, &mut service, &scope, &limits, 101)
-            .await
-            .unwrap(),
+        xmsg_mcp_gateway::custody::receive_one(
+            &mut store,
+            &mut service,
+            &scope,
+            &limits,
+            custody_time::at(101)
+        )
+        .await
+        .unwrap(),
         Some(Acceptance::Deferred)
     );
     drop(service);
@@ -887,9 +944,15 @@ async fn transient_capacity_and_failed_refusal_persistence_keep_redelivery() {
         .await
         .unwrap();
     assert!(
-        xmsg_mcp_gateway::custody::receive_one(&mut store, &mut service, &scope, &limits, 102)
-            .await
-            .is_err(),
+        xmsg_mcp_gateway::custody::receive_one(
+            &mut store,
+            &mut service,
+            &scope,
+            &limits,
+            custody_time::at(102)
+        )
+        .await
+        .is_err(),
         "metadata capacity was not bounded"
     );
     drop(service);
@@ -926,7 +989,7 @@ async fn transient_capacity_and_failed_refusal_persistence_keep_redelivery() {
                 &mut service,
                 &scope,
                 &expanded,
-                103
+                custody_time::at(103)
             )
             .await
             .unwrap(),
@@ -934,7 +997,7 @@ async fn transient_capacity_and_failed_refusal_persistence_keep_redelivery() {
         ));
     }
     let status = store
-        .custody_status(&scope, &expanded, 104, 604800)
+        .custody_status(&scope, &expanded, custody_time::at(104), 604800)
         .unwrap();
     assert_eq!(status.refusals, 0, "transient deferral became a refusal");
     let inspect = rusqlite::Connection::open(&db).unwrap();
@@ -975,15 +1038,23 @@ async fn metadata_retention_and_status_survive_restart_without_fake_loss_ids() {
         )
         .await
         .unwrap();
-    xmsg_mcp_gateway::custody::receive_one(&mut store, &mut service, &scope, &limits, 100)
-        .await
-        .unwrap();
+    xmsg_mcp_gateway::custody::receive_one(
+        &mut store,
+        &mut service,
+        &scope,
+        &limits,
+        custody_time::at(100),
+    )
+    .await
+    .unwrap();
     store
-        .record_custody_link(&scope, false, &limits, 101)
+        .record_custody_link(&scope, false, &limits, custody_time::at(101))
         .unwrap();
     drop(store);
     let mut store = Store::open(&db).unwrap();
-    let before = store.custody_status(&scope, &limits, 109, 3).unwrap();
+    let before = store
+        .custody_status(&scope, &limits, custody_time::at(109), 3)
+        .unwrap();
     assert_eq!(before.refusals, 1, "refusal expired before retention bound");
     assert_eq!(before.pending, 0);
     assert!(
@@ -994,14 +1065,16 @@ async fn metadata_retention_and_status_survive_restart_without_fake_loss_ids() {
         !before.possible_known_loss,
         "downtime invented known message loss"
     );
-    let expired = store.custody_status(&scope, &limits, 110, 3).unwrap();
+    let expired = store
+        .custody_status(&scope, &limits, custody_time::at(110), 3)
+        .unwrap();
     assert_eq!(expired.refusals, 0, "refusal retention did not expire");
     assert_eq!(
         expired.expired_metadata, 1,
         "metadata expiry counter missing"
     );
     store
-        .record_custody_link(&scope, true, &limits, 110)
+        .record_custody_link(&scope, true, &limits, custody_time::at(110))
         .unwrap();
     service
         .send(
@@ -1021,23 +1094,27 @@ async fn metadata_retention_and_status_survive_restart_without_fake_loss_ids() {
                 metadata_retention_secs: 10,
                 ..Limits::default()
             },
-            111,
+            custody_time::at(111),
         )
         .unwrap();
     store
-        .record_custody_link(&scope, false, &limits, 115)
+        .record_custody_link(&scope, false, &limits, custody_time::at(115))
         .unwrap();
     store
-        .record_custody_link(&scope, true, &limits, 116)
+        .record_custody_link(&scope, true, &limits, custody_time::at(116))
         .unwrap();
-    let aged = store.custody_status(&scope, &limits, 116, 3).unwrap();
+    let aged = store
+        .custody_status(&scope, &limits, custody_time::at(116), 3)
+        .unwrap();
     assert_eq!(aged.oldest_pending_age_secs, Some(5));
     assert!(
         aged.possible_known_loss,
         "known message age did not drive possible loss"
     );
     assert_eq!(aged.pending, 1);
-    let forgotten = store.custody_status(&scope, &limits, 121, 3).unwrap();
+    let forgotten = store
+        .custody_status(&scope, &limits, custody_time::at(121), 3)
+        .unwrap();
     assert_eq!(
         forgotten.pending, 0,
         "known pending IDs were not retention-bounded"
@@ -1082,9 +1159,15 @@ async fn refusal_metadata_is_bounded_and_failed_audit_never_acks() {
         )
         .await
         .unwrap();
-    xmsg_mcp_gateway::custody::receive_one(&mut store, &mut service, &scope, &limits, 100)
-        .await
-        .unwrap();
+    xmsg_mcp_gateway::custody::receive_one(
+        &mut store,
+        &mut service,
+        &scope,
+        &limits,
+        custody_time::at(100),
+    )
+    .await
+    .unwrap();
     let second = service
         .send(
             service.address().unwrap(),
@@ -1094,9 +1177,15 @@ async fn refusal_metadata_is_bounded_and_failed_audit_never_acks() {
         .await
         .unwrap();
     assert!(
-        xmsg_mcp_gateway::custody::receive_one(&mut store, &mut service, &scope, &limits, 101)
-            .await
-            .is_err(),
+        xmsg_mcp_gateway::custody::receive_one(
+            &mut store,
+            &mut service,
+            &scope,
+            &limits,
+            custody_time::at(101)
+        )
+        .await
+        .is_err(),
         "refusal metadata count bound missing"
     );
     drop(service);
@@ -1108,7 +1197,9 @@ async fn refusal_metadata_is_bounded_and_failed_audit_never_acks() {
         "failed refusal persistence ACKed upstream"
     );
     assert_eq!(delivery.unwrap().message_id(), second.message_id);
-    let status = store.custody_status(&scope, &limits, 102, 604800).unwrap();
+    let status = store
+        .custody_status(&scope, &limits, custody_time::at(102), 604800)
+        .unwrap();
     assert_eq!(status.refusals, 1);
     assert_eq!(status.pending, 0);
     println!("gateway-custody-complete:metadata-bound");
@@ -1141,9 +1232,15 @@ async fn refusal_and_offline_uncertainty_outlive_real_upstream_expiry() {
             )
             .await
             .unwrap();
-        xmsg_mcp_gateway::custody::receive_one(&mut store, &mut service, &scope, &limits, 100)
-            .await
-            .unwrap();
+        xmsg_mcp_gateway::custody::receive_one(
+            &mut store,
+            &mut service,
+            &scope,
+            &limits,
+            custody_time::at(100),
+        )
+        .await
+        .unwrap();
         drop(service);
         drop(store);
         if reply_ttl == 1 {
@@ -1175,13 +1272,19 @@ async fn refusal_and_offline_uncertainty_outlive_real_upstream_expiry() {
         );
         let mut store = Store::open(&db).unwrap();
         assert_eq!(
-            xmsg_mcp_gateway::custody::receive_one(&mut store, &mut service, &scope, &limits, 104)
-                .await
-                .unwrap(),
+            xmsg_mcp_gateway::custody::receive_one(
+                &mut store,
+                &mut service,
+                &scope,
+                &limits,
+                custody_time::at(104)
+            )
+            .await
+            .unwrap(),
             None
         );
         let status = store
-            .custody_status(&scope, &limits, 104, reply_ttl as i64)
+            .custody_status(&scope, &limits, custody_time::at(104), reply_ttl as i64)
             .unwrap();
         assert_eq!(
             status.refusals, 1,
@@ -1226,9 +1329,15 @@ async fn a_delivery_larger_than_total_capacity_is_a_permanent_refusal() {
         .await
         .unwrap();
     assert_eq!(
-        xmsg_mcp_gateway::custody::receive_one(&mut store, &mut service, &scope, &limits, 100)
-            .await
-            .unwrap(),
+        xmsg_mcp_gateway::custody::receive_one(
+            &mut store,
+            &mut service,
+            &scope,
+            &limits,
+            custody_time::at(100)
+        )
+        .await
+        .unwrap(),
         Some(Acceptance::Refused),
         "unfit delivery was treated as transient"
     );
@@ -1262,9 +1371,15 @@ async fn aggregate_byte_capacity_is_transient_and_preserves_redelivery() {
         .await
         .unwrap();
     assert!(matches!(
-        xmsg_mcp_gateway::custody::receive_one(&mut store, &mut service, &scope, &limits, 100)
-            .await
-            .unwrap(),
+        xmsg_mcp_gateway::custody::receive_one(
+            &mut store,
+            &mut service,
+            &scope,
+            &limits,
+            custody_time::at(100)
+        )
+        .await
+        .unwrap(),
         Some(Acceptance::Stored { .. })
     ));
     let second = service
@@ -1276,9 +1391,15 @@ async fn aggregate_byte_capacity_is_transient_and_preserves_redelivery() {
         .await
         .unwrap();
     assert_eq!(
-        xmsg_mcp_gateway::custody::receive_one(&mut store, &mut service, &scope, &limits, 101)
-            .await
-            .unwrap(),
+        xmsg_mcp_gateway::custody::receive_one(
+            &mut store,
+            &mut service,
+            &scope,
+            &limits,
+            custody_time::at(101)
+        )
+        .await
+        .unwrap(),
         Some(Acceptance::Deferred),
         "aggregate byte capacity was not enforced"
     );
@@ -1318,13 +1439,25 @@ async fn idle_poll_enforces_retention_and_observes_connection_changes() {
         )
         .await
         .unwrap();
-    xmsg_mcp_gateway::custody::receive_one(&mut store, &mut service, &scope, &limits, 100)
-        .await
-        .unwrap();
+    xmsg_mcp_gateway::custody::receive_one(
+        &mut store,
+        &mut service,
+        &scope,
+        &limits,
+        custody_time::at(100),
+    )
+    .await
+    .unwrap();
     assert_eq!(
-        xmsg_mcp_gateway::custody::receive_one(&mut store, &mut service, &scope, &limits, 102)
-            .await
-            .unwrap(),
+        xmsg_mcp_gateway::custody::receive_one(
+            &mut store,
+            &mut service,
+            &scope,
+            &limits,
+            custody_time::at(102)
+        )
+        .await
+        .unwrap(),
         None
     );
     let inspect = rusqlite::Connection::open(&db).unwrap();
@@ -1335,11 +1468,15 @@ async fn idle_poll_enforces_retention_and_observes_connection_changes() {
         .unwrap();
     assert_eq!(retained, 0, "idle receive ignored retention");
     node.restart(&binary).await;
-    assert!(
-        xmsg_mcp_gateway::custody::receive_one(&mut store, &mut service, &scope, &limits, 104)
-            .await
-            .is_err()
-    );
+    assert!(xmsg_mcp_gateway::custody::receive_one(
+        &mut store,
+        &mut service,
+        &scope,
+        &limits,
+        custody_time::at(104)
+    )
+    .await
+    .is_err());
     let disconnected: Option<i64> = inspect
         .query_row("SELECT disconnected_at FROM custody_links", [], |row| {
             row.get(0)
@@ -1349,9 +1486,15 @@ async fn idle_poll_enforces_retention_and_observes_connection_changes() {
     drop(service);
     let mut service = node.config.register().await.unwrap();
     assert_eq!(
-        xmsg_mcp_gateway::custody::receive_one(&mut store, &mut service, &scope, &limits, 105)
-            .await
-            .unwrap(),
+        xmsg_mcp_gateway::custody::receive_one(
+            &mut store,
+            &mut service,
+            &scope,
+            &limits,
+            custody_time::at(105)
+        )
+        .await
+        .unwrap(),
         None
     );
     let (connected, reconnected): (bool, Option<i64>) = inspect
@@ -1363,13 +1506,27 @@ async fn idle_poll_enforces_retention_and_observes_connection_changes() {
         .unwrap();
     assert!(connected, "reconnected handle was not recorded");
     assert_eq!(reconnected, Some(105));
-    xmsg_mcp_gateway::custody::receive_one(&mut store, &mut service, &scope, &limits, 106)
-        .await
+    xmsg_mcp_gateway::custody::receive_one(
+        &mut store,
+        &mut service,
+        &scope,
+        &limits,
+        custody_time::at(106),
+    )
+    .await
+    .unwrap();
+    xmsg_mcp_gateway::custody::receive_one(
+        &mut store,
+        &mut service,
+        &scope,
+        &limits,
+        custody_time::at(108),
+    )
+    .await
+    .unwrap();
+    let status = store
+        .custody_status(&scope, &limits, custody_time::at(108), 3)
         .unwrap();
-    xmsg_mcp_gateway::custody::receive_one(&mut store, &mut service, &scope, &limits, 108)
-        .await
-        .unwrap();
-    let status = store.custody_status(&scope, &limits, 108, 3).unwrap();
     assert!(
         !status.offline_uncertainty,
         "expired gaps latched uncertainty"
@@ -1379,10 +1536,185 @@ async fn idle_poll_enforces_retention_and_observes_connection_changes() {
         ..limits.clone()
     };
     assert!(
-        xmsg_mcp_gateway::custody::receive_one(&mut store, &mut service, &scope, &bounded, 109)
-            .await
-            .is_err(),
+        xmsg_mcp_gateway::custody::receive_one(
+            &mut store,
+            &mut service,
+            &scope,
+            &bounded,
+            custody_time::at(109)
+        )
+        .await
+        .is_err(),
         "gap interval budget was not bounded"
     );
     println!("gateway-custody-complete:idle-maintenance");
+}
+
+async fn fractional_retention_site(table: &str, tombstone: bool) {
+    use std::time::{Duration, UNIX_EPOCH};
+    async fn step<T>(name: &str, future: impl std::future::Future<Output = T>) -> T {
+        tokio::time::timeout(Duration::from_secs(10), future)
+            .await
+            .unwrap_or_else(|_| panic!("fractional custody retention: {name} timed out"))
+    }
+    let binary = real_node::pinned_binary();
+    let node = step("start node", real_node::Node::start(&binary)).await;
+    let mut service = step("register", node.config.register()).await.unwrap();
+    let address = service.address().unwrap().to_owned();
+    step(
+        "send",
+        service.send(&address, "retained body", Some("fractional-retention")),
+    )
+    .await
+    .unwrap();
+    let delivery = step("poll", service.poll(1)).await.unwrap().unwrap();
+    for nanos in [1, 999_999_999] {
+        for lifetime in [1, 86_400] {
+            let directory = tempfile::tempdir().unwrap();
+            let db = directory.path().join("authority.db");
+            let mut store = authority(&db);
+            store.migrate_custody().unwrap();
+            let scope = Scope {
+                bus_instance: "fractional-node".into(),
+                grant_id: "grant".into(),
+            };
+            let mut limits = Limits {
+                content_retention_secs: lifetime,
+                metadata_retention_secs: if tombstone { 2 } else { lifetime },
+                max_item_bytes: if table == "custody_metadata" {
+                    1
+                } else {
+                    Limits::default().max_item_bytes
+                },
+                ..Limits::default()
+            };
+            let at = UNIX_EPOCH + Duration::new(100, nanos);
+            let accepted = store
+                .accept_delivery(&scope, &service, &delivery, &limits, at)
+                .unwrap();
+            if table == "custody_metadata" {
+                assert_eq!(accepted, Acceptance::Refused);
+            } else {
+                assert!(matches!(accepted, Acceptance::Stored { .. }));
+            }
+            let connection = rusqlite::Connection::open(&db).unwrap();
+            let query = format!("SELECT expires_at FROM {table}");
+            let expiry: i64 = connection.query_row(&query, [], |row| row.get(0)).unwrap();
+            let remaining = (UNIX_EPOCH + Duration::from_secs(expiry as u64))
+                .duration_since(at)
+                .unwrap();
+            assert!(
+                remaining >= Duration::from_secs(lifetime as u64),
+                "{table}: retention window was floored"
+            );
+            assert!(
+                remaining < Duration::from_secs(lifetime as u64 + 1),
+                "{table}: retention exceeds rounding allowance"
+            );
+            if !tombstone {
+                limits.content_retention_secs += 10;
+                limits.metadata_retention_secs += 10;
+                store
+                    .accept_delivery(
+                        &scope,
+                        &service,
+                        &delivery,
+                        &limits,
+                        at + Duration::from_nanos(1),
+                    )
+                    .unwrap();
+                let repeated: i64 = connection.query_row(&query, [], |row| row.get(0)).unwrap();
+                assert_eq!(repeated, expiry, "{table}: repeat extended stored expiry");
+                limits.content_retention_secs -= 10;
+                limits.metadata_retention_secs -= 10;
+            }
+            let before = at + Duration::from_secs(lifetime as u64);
+            store
+                .custody_status(&scope, &limits, before, 604800)
+                .unwrap();
+            let visible: i64 = if table == "custody_items" {
+                connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM custody_items WHERE text IS NOT NULL",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap()
+            } else {
+                connection
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                        row.get(0)
+                    })
+                    .unwrap()
+            };
+            assert_eq!(
+                visible, 1,
+                "{table}: row disappeared before guaranteed lifetime"
+            );
+            let expired = UNIX_EPOCH + Duration::from_secs(expiry as u64);
+            store
+                .custody_status(&scope, &limits, expired, 604800)
+                .unwrap();
+            if table == "custody_items" {
+                let text: Option<String> = connection
+                    .query_row("SELECT text FROM custody_items", [], |row| row.get(0))
+                    .unwrap();
+                assert!(text.is_none(), "held content visible after expiry");
+                if tombstone {
+                    store
+                        .custody_status(&scope, &limits, expired + Duration::from_secs(1), 604800)
+                        .unwrap();
+                    let count: i64 = connection
+                        .query_row("SELECT COUNT(*) FROM custody_items", [], |row| row.get(0))
+                        .unwrap();
+                    assert_eq!(count, 1, "tombstone reclaimed before its inherited anchor");
+                    store
+                        .custody_status(&scope, &limits, expired + Duration::from_secs(2), 604800)
+                        .unwrap();
+                    let count: i64 = connection
+                        .query_row("SELECT COUNT(*) FROM custody_items", [], |row| row.get(0))
+                        .unwrap();
+                    assert_eq!(
+                        count, 0,
+                        "tombstone exceeded its inherited retention anchor"
+                    );
+                }
+            } else {
+                let count: i64 = connection
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                        row.get(0)
+                    })
+                    .unwrap();
+                assert_eq!(count, 0, "{table}: expired row remains visible");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "mandatory private-node custody profile"]
+async fn pending_metadata_retains_its_complete_fractional_lifetime() {
+    fractional_retention_site("custody_pending", false).await;
+    println!("gateway-custody-complete:fractional-pending");
+}
+
+#[tokio::test]
+#[ignore = "mandatory private-node custody profile"]
+async fn refusal_metadata_retains_its_complete_fractional_lifetime() {
+    fractional_retention_site("custody_metadata", false).await;
+    println!("gateway-custody-complete:fractional-refusal");
+}
+
+#[tokio::test]
+#[ignore = "mandatory private-node custody profile"]
+async fn held_content_retains_its_complete_fractional_lifetime() {
+    fractional_retention_site("custody_items", false).await;
+    println!("gateway-custody-complete:fractional-content");
+}
+
+#[tokio::test]
+#[ignore = "mandatory private-node custody profile"]
+async fn tombstone_gc_inherits_the_ceiled_content_anchor() {
+    fractional_retention_site("custody_items", true).await;
+    println!("gateway-custody-complete:fractional-tombstone");
 }

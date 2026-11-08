@@ -1,5 +1,6 @@
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use xmsg::client::{Delivery, RegisteredService};
 
 use crate::grants::{
@@ -23,6 +24,12 @@ pub struct Limits {
     pub metadata_retention_secs: i64,
     pub max_gap_intervals: i64,
 }
+struct Windows {
+    observed: i64,
+    content_expires: i64,
+    metadata_expires: i64,
+}
+
 impl Default for Limits {
     fn default() -> Self {
         Self {
@@ -38,25 +45,30 @@ impl Default for Limits {
 }
 
 impl Limits {
-    fn validate(&self, now: i64) -> Result<(), Error> {
-        if now < 0
-            || [
-                self.max_items,
-                self.max_bytes,
-                self.max_item_bytes,
-                self.content_retention_secs,
-                self.max_metadata,
-                self.metadata_retention_secs,
-                self.max_gap_intervals,
-            ]
-            .iter()
-            .any(|value| *value <= 0)
-            || now.checked_add(self.content_retention_secs).is_none()
-            || now.checked_add(self.metadata_retention_secs).is_none()
+    fn windows(&self, at: SystemTime) -> Result<Windows, Error> {
+        if [
+            self.max_items,
+            self.max_bytes,
+            self.max_item_bytes,
+            self.content_retention_secs,
+            self.max_metadata,
+            self.metadata_retention_secs,
+            self.max_gap_intervals,
+        ]
+        .iter()
+        .any(|value| *value <= 0)
         {
             return Err(Error::Configuration);
         }
-        Ok(())
+        let (observed, content_expires) = crate::deadline::window(at, self.content_retention_secs)
+            .map_err(|_| Error::Configuration)?;
+        let (_, metadata_expires) = crate::deadline::window(at, self.metadata_retention_secs)
+            .map_err(|_| Error::Configuration)?;
+        Ok(Windows {
+            observed,
+            content_expires,
+            metadata_expires,
+        })
     }
 }
 
@@ -199,9 +211,9 @@ impl Store {
         scope: &Scope,
         connected: bool,
         limits: &Limits,
-        now: i64,
+        at: SystemTime,
     ) -> Result<(), Error> {
-        self.record_bus_link(&scope.bus_instance, connected, limits, now)
+        self.record_bus_link(&scope.bus_instance, connected, limits, at)
     }
 
     pub(crate) fn record_bus_link(
@@ -209,9 +221,10 @@ impl Store {
         bus: &str,
         connected: bool,
         limits: &Limits,
-        now: i64,
+        at: SystemTime,
     ) -> Result<(), Error> {
-        limits.validate(now)?;
+        let deadlines = limits.windows(at)?;
+        let now = deadlines.observed;
         if bus.trim().is_empty() {
             return Err(Error::Configuration);
         }
@@ -234,9 +247,23 @@ impl Store {
         };
         if let Some(start) = start {
             if observed > start {
-                let expiry = observed
-                    .checked_add(limits.metadata_retention_secs)
+                let observed_at = UNIX_EPOCH
+                    .checked_add(Duration::from_secs(observed as u64))
                     .ok_or(Error::Configuration)?;
+                let observation_at = at.max(observed_at);
+                let (_, proposed_expiry) =
+                    crate::deadline::window(observation_at, limits.metadata_retention_secs)
+                        .map_err(|_| Error::Configuration)?;
+                let stored_expiry: Option<i64> = tx.query_row(
+                    "SELECT MIN(expires_at) FROM custody_gaps WHERE bus=?1 AND gap_start=?2 AND gap_end=?3",
+                    params![bus, start, observed], |row| row.get(0),
+                )?;
+                let expiry =
+                    stored_expiry.map_or(proposed_expiry, |stored| stored.min(proposed_expiry));
+                tx.execute(
+                    "DELETE FROM custody_gaps WHERE bus=?1 AND gap_start=?2 AND gap_end=?3",
+                    params![bus, start, observed],
+                )?;
                 tx.execute("DELETE FROM custody_gaps WHERE bus=?1 AND gap_end-gap_start<=?2 AND expires_at<=?3", params![bus, observed-start, expiry])?;
                 let count: i64 =
                     tx.query_row("SELECT COUNT(*) FROM custody_gaps", [], |row| row.get(0))?;
@@ -278,10 +305,10 @@ impl Store {
         &mut self,
         scope: &Scope,
         limits: &Limits,
-        now: i64,
+        at: SystemTime,
         effective_reply_ttl_secs: i64,
     ) -> Result<Status, Error> {
-        limits.validate(now)?;
+        let now = limits.windows(at)?.observed;
         if effective_reply_ttl_secs <= 0 {
             return Err(Error::Configuration);
         }
@@ -375,9 +402,10 @@ impl Store {
         service: &RegisteredService,
         delivery: &Delivery,
         limits: &Limits,
-        now: i64,
+        at: SystemTime,
     ) -> Result<Acceptance, Error> {
-        limits.validate(now)?;
+        let deadlines = limits.windows(at)?;
+        let now = deadlines.observed;
         if scope.bus_instance.trim().is_empty() || scope.grant_id.trim().is_empty() {
             return Err(Error::Configuration);
         }
@@ -400,7 +428,7 @@ impl Store {
         if !known_pending && pending_count >= limits.max_metadata {
             return Err(Error::MetadataFull);
         }
-        tx.execute("INSERT OR IGNORE INTO custody_pending(bus,upstream_id,first_seen,expires_at) VALUES (?1,?2,?3,?4)", params![scope.bus_instance, delivery.message_id(), now, now + limits.metadata_retention_secs])?;
+        tx.execute("INSERT OR IGNORE INTO custody_pending(bus,upstream_id,first_seen,expires_at) VALUES (?1,?2,?3,?4)", params![scope.bus_instance, delivery.message_id(), now, deadlines.metadata_expires])?;
         let mailbox = service
             .address()
             .ok_or(xmsg::client::ClientError::Disconnected)?;
@@ -466,7 +494,7 @@ impl Store {
                 return Err(Error::MetadataFull);
             }
             let bounded_size = i64::try_from(size).map_err(|_| Error::Configuration)?;
-            tx.execute("INSERT OR IGNORE INTO custody_metadata (bus, upstream_id, fingerprint, origin, size, reason, first_seen, expires_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)", params![scope.bus_instance, delivery.message_id(), hash, origin, bounded_size, reason, now, now + limits.metadata_retention_secs])?;
+            tx.execute("INSERT OR IGNORE INTO custody_metadata (bus, upstream_id, fingerprint, origin, size, reason, first_seen, expires_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)", params![scope.bus_instance, delivery.message_id(), hash, origin, bounded_size, reason, now, deadlines.metadata_expires])?;
             tx.commit()?;
             return Ok(if conflict {
                 Acceptance::Quarantined
@@ -480,7 +508,7 @@ impl Store {
             "event-{}",
             fingerprint(&[&scope.bus_instance, delivery.message_id()])
         );
-        tx.execute("INSERT INTO custody_items (bus,upstream_id,event_id,grant_id,grant_revision,mailbox,owner,origin,text,envelope,in_reply_to,fingerprint,received_at,expires_at,held) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,1)", params![scope.bus_instance, delivery.message_id(), event_id, scope.grant_id, revision, mailbox, owner, origin, delivery.text(), delivery.envelope(), delivery.in_reply_to(), hash, now, now + limits.content_retention_secs])?;
+        tx.execute("INSERT INTO custody_items (bus,upstream_id,event_id,grant_id,grant_revision,mailbox,owner,origin,text,envelope,in_reply_to,fingerprint,received_at,expires_at,held) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,1)", params![scope.bus_instance, delivery.message_id(), event_id, scope.grant_id, revision, mailbox, owner, origin, delivery.text(), delivery.envelope(), delivery.in_reply_to(), hash, now, deadlines.content_expires])?;
         tx.execute(
             "INSERT INTO custody_outbox (event_id,state) VALUES (?1,'held')",
             [&event_id],
@@ -497,26 +525,137 @@ pub async fn receive_one(
     service: &mut RegisteredService,
     scope: &Scope,
     limits: &Limits,
-    now: i64,
+    at: SystemTime,
 ) -> Result<Option<Acceptance>, Error> {
     store.require_custody_ready()?;
     let polled = match service.poll(0).await {
         Ok(delivery) => {
-            store.record_custody_link(scope, true, limits, now)?;
+            store.record_custody_link(scope, true, limits, at)?;
             delivery
         }
         Err(error) => {
-            store.record_custody_link(scope, false, limits, now)?;
+            store.record_custody_link(scope, false, limits, at)?;
             return Err(error.into());
         }
     };
     let Some(delivery) = polled else {
         return Ok(None);
     };
-    let accepted = store.accept_delivery(scope, service, &delivery, limits, now)?;
+    let accepted = store.accept_delivery(scope, service, &delivery, limits, at)?;
     if accepted.can_ack() {
         service.ack(delivery.message_id()).await?;
         store.record_custody_ack(scope, delivery.message_id())?;
     }
     Ok(Some(accepted))
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+
+    fn store() -> (tempfile::TempDir, Store) {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::initialize(&directory.path().join("store.db")).unwrap();
+        store.migrate_custody().unwrap();
+        (directory, store)
+    }
+
+    #[test]
+    fn fractional_gap_retention_preserves_the_complete_lifetime() {
+        for nanos in [1, 999_999_999] {
+            for lifetime in [1, 86_400] {
+                let (_directory, mut store) = store();
+                let limits = Limits {
+                    metadata_retention_secs: lifetime,
+                    ..Limits::default()
+                };
+                store
+                    .record_bus_link("node", true, &limits, UNIX_EPOCH + Duration::from_secs(100))
+                    .unwrap();
+                let at = UNIX_EPOCH + Duration::new(101, nanos);
+                store.record_bus_link("node", false, &limits, at).unwrap();
+                let expires: i64 = store
+                    .connection
+                    .query_row("SELECT expires_at FROM custody_gaps", [], |row| row.get(0))
+                    .unwrap();
+                let remaining = (UNIX_EPOCH + Duration::from_secs(expires as u64))
+                    .duration_since(at)
+                    .unwrap();
+                assert!(remaining >= Duration::from_secs(lifetime as u64));
+                assert!(remaining < Duration::from_secs(lifetime as u64 + 1));
+                let scope = Scope {
+                    bus_instance: "node".into(),
+                    grant_id: "unused".into(),
+                };
+                store
+                    .custody_status(
+                        &scope,
+                        &limits,
+                        at + Duration::from_secs(lifetime as u64),
+                        604800,
+                    )
+                    .unwrap();
+                let visible: i64 = store
+                    .connection
+                    .query_row("SELECT COUNT(*) FROM custody_gaps", [], |row| row.get(0))
+                    .unwrap();
+                assert_eq!(visible, 1, "gap expired before its guaranteed lifetime");
+                store
+                    .custody_status(
+                        &scope,
+                        &limits,
+                        at + Duration::from_secs(lifetime as u64 + 1),
+                        604800,
+                    )
+                    .unwrap();
+                let visible: i64 = store
+                    .connection
+                    .query_row("SELECT COUNT(*) FROM custody_gaps", [], |row| row.get(0))
+                    .unwrap();
+                assert_eq!(visible, 0, "expired gap remained observable");
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_gap_observations_never_extend_the_stored_expiry() {
+        let (_directory, mut store) = store();
+        let mut limits = Limits {
+            metadata_retention_secs: 1,
+            ..Limits::default()
+        };
+        store
+            .record_bus_link("node", true, &limits, UNIX_EPOCH + Duration::from_secs(100))
+            .unwrap();
+        store
+            .record_bus_link(
+                "node",
+                false,
+                &limits,
+                UNIX_EPOCH + Duration::from_secs(101),
+            )
+            .unwrap();
+        limits.metadata_retention_secs = 10;
+        store
+            .record_bus_link(
+                "node",
+                false,
+                &limits,
+                UNIX_EPOCH + Duration::new(101, 999_999_999),
+            )
+            .unwrap();
+        let (count, expires): (i64, i64) = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*), MIN(expires_at) FROM custody_gaps",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (count, expires),
+            (1, 102),
+            "repeat extended the same gap's retention"
+        );
+    }
 }

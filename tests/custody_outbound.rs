@@ -1,5 +1,8 @@
 #![cfg(target_os = "linux")]
 
+#[path = "common/custody_time.rs"]
+mod custody_time;
+
 #[path = "common/agent_stall.rs"]
 mod agent_stall;
 #[path = "common/custody_crash.rs"]
@@ -715,7 +718,7 @@ async fn dispatch_does_not_change_the_callers_custody_busy_wait() {
         },
         true,
         &xmsg_mcp_gateway::custody::Limits::default(),
-        100,
+        custody_time::at(100),
     );
     writer.join().unwrap();
     result.expect("dispatch disabled the caller Store's custody busy wait");
@@ -1044,7 +1047,13 @@ async fn confirmed_reply_replay_survives_policy_write_and_correlation_expiry() {
     let delivery = service.poll(1).await.unwrap().unwrap();
     let custody_limits = xmsg_mcp_gateway::custody::Limits::default();
     store
-        .accept_delivery(&scope, &service, &delivery, &custody_limits, timestamp)
+        .accept_delivery(
+            &scope,
+            &service,
+            &delivery,
+            &custody_limits,
+            custody_time::at(timestamp),
+        )
         .unwrap();
     service.ack(delivery.message_id()).await.unwrap();
     let operation = Request::Reply(ReplyArguments {
@@ -1095,7 +1104,7 @@ async fn confirmed_reply_replay_survives_policy_write_and_correlation_expiry() {
         .custody_status(
             &scope,
             &custody_limits,
-            timestamp + custody_limits.content_retention_secs + 1,
+            custody_time::at(timestamp + custody_limits.content_retention_secs + 1),
             604800,
         )
         .unwrap();
@@ -1240,7 +1249,7 @@ async fn inbound_commit_and_ack_complete_while_outbound_acceptance_is_stalled() 
             &service,
             &delivery,
             &xmsg_mcp_gateway::custody::Limits::default(),
-            100,
+            custody_time::at(100),
         );
         (
             result,
@@ -1334,7 +1343,7 @@ async fn replies_require_owned_current_correlations_and_preserve_bus_receipts() 
             &service,
             &delivery,
             &xmsg_mcp_gateway::custody::Limits::default(),
-            now,
+            custody_time::at(now),
         )
         .unwrap();
     service.ack(delivery.message_id()).await.unwrap();
@@ -1408,7 +1417,7 @@ async fn replies_require_owned_current_correlations_and_preserve_bus_receipts() 
             &service,
             &delivery,
             &xmsg_mcp_gateway::custody::Limits::default(),
-            now,
+            custody_time::at(now),
         )
         .unwrap();
     service.ack(delivery.message_id()).await.unwrap();
