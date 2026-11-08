@@ -31,6 +31,7 @@ async fn listener(fixture: &serving_fixture::Fixture) -> (tokio::process::Child,
         .args(["serve", "--config"])
         .arg(&fixture.config_file)
         .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .unwrap();
@@ -323,4 +324,73 @@ async fn body_configuration_refuses_invalid_values_and_preserves_owner_file_boun
         Serving::from_owner_file(&fixture.config_file).await,
         Err(StartupError::Configuration(_))
     ));
+}
+
+#[tokio::test]
+async fn chunked_body_budget_is_enforced_on_the_real_listener() {
+    let mut fixture = serving_fixture::Fixture::new();
+    fixture.config["max_request_body_bytes"] = json!(256);
+    save(&fixture);
+    let (mut child, address) = listener(&fixture).await;
+    let mut logs = BufReader::new(child.stderr.take().expect("captured production stderr")).lines();
+    for length in [256, 257] {
+        let mut body = json!({"jsonrpc":"2.0","id":"chunked-body-secret-sentinel","method":"ping"})
+            .to_string();
+        body.extend(std::iter::repeat_n(' ', length - body.len()));
+        let mut socket = tokio::net::TcpStream::connect(&address).await.unwrap();
+        let request = format!("POST /mcp HTTP/1.1\r\nHost: gateway.example\r\nAuthorization: Bearer good-token\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{}\r\n0\r\n\r\n", body.len(), body);
+        socket.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), socket.read_to_end(&mut response))
+            .await
+            .expect("chunked response deadline")
+            .unwrap();
+        let response = String::from_utf8(response).unwrap();
+        if length == 256 {
+            assert!(
+                response.starts_with("HTTP/1.1 200 OK"),
+                "exact-limit chunked body: {response}"
+            );
+            let (_, body) = response.split_once("\r\n\r\n").unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(body).unwrap(),
+                json!({"jsonrpc":"2.0","id":"chunked-body-secret-sentinel","result":{}})
+            );
+            assert_eq!(fixture.requests.load(Ordering::SeqCst), 1);
+        } else {
+            assert!(
+                response.starts_with("HTTP/1.1 413"),
+                "chunked over-limit body was accepted: {response}"
+            );
+            assert_eq!(
+                fixture.requests.load(Ordering::SeqCst),
+                1,
+                "over-limit chunked body reached the provider"
+            );
+        }
+    }
+    let refusal = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let line = logs
+                .next_line()
+                .await
+                .unwrap()
+                .expect("binary stderr closed before body refusal");
+            if line.contains("BodyTooLarge") {
+                break line;
+            }
+        }
+    })
+    .await
+    .expect("binary did not log its typed body refusal");
+    assert!(
+        refusal.contains("limit_bytes: 256"),
+        "body refusal log lost configured limit: {refusal}"
+    );
+    assert!(!refusal.contains("good-token"));
+    assert!(!refusal.contains("chunked-body-secret-sentinel"));
+    println!(
+        "content-length-complete:chunked-wire:{}",
+        option_env!("GW_H1_NONCE").unwrap_or("local")
+    );
 }
