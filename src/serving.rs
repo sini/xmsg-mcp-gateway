@@ -81,6 +81,8 @@ struct Messaging {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Configuration {
+    #[serde(default = "default_header_read_timeout_ms")]
+    header_read_timeout_ms: u64,
     bind: SocketAddr,
     grant_store: PathBuf,
     request_timeout_ms: u64,
@@ -89,6 +91,16 @@ struct Configuration {
     verifier: VerifierConfig,
     #[serde(default, deserialize_with = "present_messaging")]
     messaging: Option<MessagingConfiguration>,
+}
+
+fn default_header_read_timeout_ms() -> u64 {
+    5_000
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TransportRefusal {
+    #[error("request headers exceeded their read deadline")]
+    HeaderReadTimeout,
 }
 
 struct App {
@@ -106,6 +118,7 @@ struct App {
 }
 
 pub struct Serving {
+    header_read_timeout: Duration,
     state: Arc<App>,
     router: Router,
     bind: SocketAddr,
@@ -158,6 +171,8 @@ impl Serving {
         }
         if !config.bind.ip().is_loopback()
             || config.allowed_hosts.is_empty()
+            || config.header_read_timeout_ms == 0
+            || config.header_read_timeout_ms > 60_000
             || config.request_timeout_ms == 0
             || config.request_timeout_ms > 60_000
             || config
@@ -261,6 +276,7 @@ impl Serving {
             router = router.route(&path, get(protected_resource));
         }
         Ok(Self {
+            header_read_timeout: Duration::from_millis(config.header_read_timeout_ms),
             router: router.with_state(state.clone()),
             state,
             bind: config.bind,
@@ -277,17 +293,58 @@ impl Serving {
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         let listener = tokio::net::TcpListener::bind(self.bind).await?;
         println!("serving MCP at {}", listener.local_addr()?);
-        let result = axum::serve(listener, self.router)
-            .with_graceful_shutdown(async move {
-                #[cfg(unix)]
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {},
-                    _ = terminate.recv() => {},
+        let shutdown = async move {
+            #[cfg(unix)]
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = terminate.recv() => {},
+            }
+            #[cfg(not(unix))]
+            let _ = tokio::signal::ctrl_c().await;
+        };
+        tokio::pin!(shutdown);
+        let (stopping, stopped) = tokio::sync::watch::channel(false);
+        let mut connections = tokio::task::JoinSet::new();
+        let result = loop {
+            tokio::select! {
+                _ = &mut shutdown => break Ok(()),
+                Some(_) = connections.join_next(), if !connections.is_empty() => {},
+                accepted = listener.accept() => {
+                    let (socket, _) = match accepted {
+                        Ok(accepted) => accepted,
+                        Err(error) => break Err(error),
+                    };
+                    let router = self.router.clone();
+                    let deadline = self.header_read_timeout;
+                    let mut stopped = stopped.clone();
+                    connections.spawn(async move {
+                        let mut builder = hyper::server::conn::http1::Builder::new();
+                        builder.timer(hyper_util::rt::TokioTimer::new());
+                        builder.header_read_timeout(deadline);
+                        let connection = builder.serve_connection(
+                            hyper_util::rt::TokioIo::new(socket),
+                            hyper_util::service::TowerToHyperService::new(router),
+                        ).with_upgrades();
+                        tokio::pin!(connection);
+                        let outcome = tokio::select! {
+                            outcome = &mut connection => outcome,
+                            _ = stopped.changed() => {
+                                connection.as_mut().graceful_shutdown();
+                                connection.await
+                            }
+                        };
+                        if let Err(error) = outcome {
+                            if error.is_timeout() {
+                                let reason = TransportRefusal::HeaderReadTimeout;
+                                tracing::warn!(target: "gateway_transport", reason = ?reason, "transport refused");
+                            }
+                        }
+                    });
                 }
-                #[cfg(not(unix))]
-                let _ = tokio::signal::ctrl_c().await;
-            })
-            .await;
+            }
+        };
+        let _ = stopping.send(true);
+        while connections.join_next().await.is_some() {}
         {
             let mut tasks = self.state.dispatch_tasks.lock().await;
             while tasks.join_next().await.is_some() {}
