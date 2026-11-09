@@ -52,10 +52,73 @@ umask 077; $EDITOR .state/tunnel-runtime-key   # paste the key, save
 
 ## 3. Start the reference server
 
-This section lands with the Events feasibility example. Until it does, steps 0 to 2 can be done ahead of time.
+Run these commands from the repository root. The throwaway
+[example](../examples/step0-spike.md) reuses the Python reference only for this probe. Neither the example
+nor `phase1` becomes a runtime dependency of the shipped Rust gateway. No xmsg node is needed.
 
-The example listens on loopback only. Note its MCP URL, for instance `http://127.0.0.1:<port>/mcp`, for
-step 4.
+Use a separate state directory for each authentication arm, and stop one server before starting the other.
+Both configurations below use `http://127.0.0.1:8765/mcp`; use that URL in step 4. Keep secrets out of the
+config and command line. Access logging is disabled; the observation procedure below uses content-free
+status rather than raw requests.
+
+### Bearer arm: explicit opt-in
+
+Create `.state/step0-bearer.toml` with this nonsecret configuration:
+
+```toml
+auth_mode = "bearer"
+state_dir = ".state/step0-bearer"
+bind = "127.0.0.1"
+port = 8765
+```
+
+Issue a temporary credential into an owner-only file, then start the server:
+
+```sh
+uv run --locked python examples/step0_spike.py --config .state/step0-bearer.toml \
+  --allow-bearer issue-bearer --output .state/step0-bearer-token
+uv run --locked python examples/step0_spike.py --config .state/step0-bearer.toml \
+  --allow-bearer serve
+```
+
+Issuance refuses an existing output file. The token is never printed; the server stores its digest.
+Enter the file's contents only in the supported secure connection form in step 5. Configuring bearer mode
+without `--allow-bearer` refuses startup. This changes no reference-server default or local-test constraint.
+The inherited tool metadata declares OAuth2 even in bearer mode: this arm tests bearer HTTP auth, while
+the hosted run must establish whether the installation actually accepts and uses it.
+
+After check 3 succeeds, leave the intended conversation idle. In a second terminal, trigger check 4:
+
+```sh
+uv run --locked python examples/step0_spike.py --config .state/step0-bearer.toml \
+  --allow-bearer emit hosted-bearer-one
+uv run --locked phase1 --state .state/step0-bearer status
+```
+
+### OAuth arm: the existing provider path
+
+Copy `config.oauth.example.toml` to `.state/step0-oauth.toml`. Set `state_dir = ".state/step0-oauth"`,
+`bind = "127.0.0.1"` and `port = 8765`. Fill in the actual issuer, resource, subject, introspection URL and
+client ID from [provider setup](provider-setup.md). Set `client_secret_file` to the owner-only file holding
+the dedicated introspection client secret; do not put its value in the TOML. The OAuth access token is
+obtained through the connection flow, not the bearer token file above. The reference is a resource server,
+not an authorization server.
+
+```sh
+uv run --locked python examples/step0_spike.py --config .state/step0-oauth.toml serve
+```
+
+OAuth is the default; it needs no bearer opt-in. After check 3, trigger check 4 from a second terminal:
+
+```sh
+uv run --locked python examples/step0_spike.py --config .state/step0-oauth.toml emit hosted-oauth-one
+uv run --locked phase1 --state .state/step0-oauth status
+```
+
+Both arms advertise `xmsg_identity` and `xmsg.message.received.v1`. The subscriber supplies the HTTPS callback
+and its distinct signing secret. The server verifies the signed callback challenge before delivery. Emitting the same
+occurrence ID deduplicates it; use a new ID for another trial. Callback validation remains HTTPS/public-only
+with no redirects. Never substitute the fixture's loopback callback transport for a hosted run.
 
 ## 4. Run `tunnel-client`
 
@@ -66,7 +129,7 @@ runtime key file. It doesn't need this repository, an SSH agent or any other cre
 ```sh
 export CONTROL_PLANE_API_KEY="$(cat .state/tunnel-runtime-key)"
 tunnel-client init --profile dots-spike --tunnel-id <tunnel_id> \
-  --mcp-server-url http://127.0.0.1:<port>/mcp
+  --mcp-server-url http://127.0.0.1:8765/mcp
 tunnel-client doctor --profile dots-spike --explain
 tunnel-client run --profile dots-spike
 ```
@@ -89,25 +152,35 @@ Keep it running for the whole test: discovery and every call fail while it is di
 
 ## 6. What to observe
 
-For each check, record pass or fail, the time, and the server log lines (bodies and secrets redacted).
+For each check, record pass or fail, the time, and content-free status from the matching state directory
+(section 3). `xmsg_identity` also returns subscription health. Do not enable raw request logging to collect
+callback URLs or credentials.
 
 | # | check | passes when |
 |---|---|---|
 | 1 | connect and authenticate | the plugin page lists `xmsg_identity`; a dot calls it and gets the synthetic identity |
 | 2 | event discovery | the synthetic event appears beside the tools on the plugin page (rescan after any change) |
-| 3 | subscribe | in a dot, ask it to subscribe to the event and say how to respond; the server logs `events/subscribe`, the signed verification challenge succeeds, and the subscription is stored |
-| 4 | wake-up | trigger the synthetic event (section 3); the server logs a `2xx` from the callback, and the idle dot responds |
-| 5 | unsubscribe | ask the dot to stop; the server logs `events/unsubscribe` and delivers nothing further |
+| 3 | subscribe | in a dot, ask it to subscribe to `xmsg.message.received.v1` and say how to respond; health becomes `active`, which requires successful signed-challenge verification and stored subscription |
+| 4 | wake-up | trigger the synthetic event (section 3); status records its event ID as `accepted` after callback 2xx, and the intended idle dot responds |
+| 5 | unsubscribe | ask the dot to stop; health becomes `inactive` and a fresh occurrence stays pending rather than being delivered |
 
 A successful tool call alone doesn't pass checks 2 to 4. If checks 1 and 2 pass but 3 or 4 fail through the
 tunnel, the tunnel hasn't been shown to carry the event flow. Record that, then try section 7.
 
+Callback acceptance is distinct from wakeup, observation or task completion. The probe demonstrates only
+the synthetic portions of connection/discovery and idle wakeup: real service discovery and attested peer
+origins remain production checks. Restarting with the same state can test recovery of a queued synthetic
+event and subscription. There is no real xmsg custody/ACK boundary here; the full production restart gate
+still requires failure injection before commit, before ACK, before webhook and after callback acceptance.
+
 ## 7. Fallback: public HTTPS
 
 Use this only if section 6 fails through the tunnel. Put the example behind a TLS reverse proxy at a public
-hostname (`exposure = "public-https"`, `public_url = "https://<host>/mcp"`, OAuth required; see
-`config.oauth.example.toml`), add the server in ChatGPT with its URL instead of a tunnel, and repeat
-section 6. Remove the public exposure when the run ends.
+hostname (`exposure = "public-https"`, `public_url = "https://<host>/mcp"`; see
+`config.oauth.example.toml`), retaining the loopback listener. The public hostname must match the config's
+resource or public URL for Host validation. Use OAuth, or the example-only bearer arm with explicit
+`--allow-bearer` if the installation offers supported secure entry. Add the server in ChatGPT with its URL
+instead of a tunnel, and repeat section 6. Remove the public exposure when the run ends.
 
 ## 8. Tear down
 
