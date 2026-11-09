@@ -145,10 +145,17 @@ CASES += [
     ),
     (
         "owner-config-mode",
-        "metadata.permissions().mode() & 0o077 != 0",
+        "metadata.permissions().mode() & 0o022 != 0",
         "false",
         "owner_file_permissions_and_unknown_fields_are_checked",
         "public owner configuration accepted",
+    ),
+    (
+        "owner-config-size",
+        "const MAX_OWNER_FILE: usize = 65_536;",
+        "const MAX_OWNER_FILE: usize = 1_048_576;",
+        "owner_file_permissions_and_unknown_fields_are_checked",
+        "oversized owner configuration accepted",
     ),
     (
         "loopback-bind",

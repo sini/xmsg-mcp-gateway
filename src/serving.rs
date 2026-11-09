@@ -183,7 +183,7 @@ impl Serving {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if metadata.permissions().mode() & 0o077 != 0 {
+            if metadata.permissions().mode() & 0o022 != 0 {
                 return Err(ConfigurationError.into());
             }
         }

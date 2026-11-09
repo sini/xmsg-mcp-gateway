@@ -475,15 +475,44 @@ async fn owner_file_permissions_and_unknown_fields_are_checked() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&fixture.config_file, std::fs::Permissions::from_mode(0o644))
+        std::fs::set_permissions(&fixture.config_file, std::fs::Permissions::from_mode(0o444))
+            .unwrap();
+        assert!(
+            Serving::from_owner_file(&fixture.config_file).await.is_ok(),
+            "read-only 0444 owner configuration refused"
+        );
+        std::fs::set_permissions(&fixture.keys.secret, std::fs::Permissions::from_mode(0o444))
             .unwrap();
         assert!(
             Serving::from_owner_file(&fixture.config_file)
                 .await
                 .is_err(),
-            "public owner configuration accepted"
+            "group/world-readable credential file accepted"
         );
+        std::fs::set_permissions(&fixture.keys.secret, std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        for mode in [0o664, 0o666] {
+            std::fs::set_permissions(&fixture.config_file, std::fs::Permissions::from_mode(mode))
+                .unwrap();
+            assert!(
+                Serving::from_owner_file(&fixture.config_file)
+                    .await
+                    .is_err(),
+                "public owner configuration accepted"
+            );
+        }
+        std::fs::set_permissions(&fixture.config_file, std::fs::Permissions::from_mode(0o600))
+            .unwrap();
     }
+    let mut oversized = serde_json::to_vec(&fixture.config).unwrap();
+    oversized.resize(65_537, b' ');
+    fixture::private_file(&fixture.config_file, &oversized);
+    assert!(
+        Serving::from_owner_file(&fixture.config_file)
+            .await
+            .is_err(),
+        "oversized owner configuration accepted"
+    );
 }
 
 #[tokio::test]

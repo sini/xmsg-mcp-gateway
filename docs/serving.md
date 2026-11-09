@@ -107,8 +107,10 @@ the reservation transaction; the crash cell detects the premature delivery.
 ## Owner configuration
 
 `serve --config FILE` is the only serving configuration entry. Request arguments,
-metadata, sessions and connection headers cannot select or replace it. The file
-must be private to its owner (mode 0600 or 0400 on Unix). Unknown fields are refused.
+metadata, sessions and connection headers cannot select or replace it. The nonsecret
+configuration file may be read-only world-readable (such as mode 0444 in the Nix
+store) or owner-private (mode 0600 or 0400), and must not be group- or world-writable
+on Unix; credential files remain owner-private (mode 0600 or 0400). Unknown fields are refused.
 Relative state, lookup-secret and root-certificate paths resolve against its
 containing directory. The current listener binds only loopback; it accepts OAuth
 credentials and has no local bearer/no-authentication mode.
