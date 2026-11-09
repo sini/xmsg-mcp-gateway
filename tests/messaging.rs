@@ -662,8 +662,13 @@ async fn real_mcp_send_keeps_request_identity_and_owner_policy() {
     policy(&fixture, "3", json!({"send":null,"reply":null}));
     let (_, listed, _) = serving_fixture::request(&serving, "good-token", discovery).await;
     assert_eq!(
-        listed["result"]["tools"].as_array().unwrap().len(),
-        1,
+        listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["xmsg_identity", "xmsg_inbox", "xmsg_read_message"],
         "empty policy advertised messaging authority"
     );
     let mut denied = send;
@@ -783,8 +788,13 @@ async fn fresh_policy_is_empty_and_cannot_be_changed_by_mcp() {
     )
     .await;
     assert_eq!(
-        listed["result"]["tools"].as_array().unwrap().len(),
-        1,
+        listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["xmsg_identity", "xmsg_inbox", "xmsg_read_message"],
         "empty policy advertised messaging authority"
     );
     for (name, arguments) in [
@@ -905,8 +915,13 @@ async fn unconfigured_scopes_do_not_advertise_or_dispatch_messaging() {
     )
     .await;
     assert_eq!(
-        listed["result"]["tools"].as_array().unwrap().len(),
-        1,
+        listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["xmsg_identity", "xmsg_inbox", "xmsg_read_message"],
         "unconfigured scope advertised messaging authority"
     );
     let (status, _, probe) = serving_fixture::request(

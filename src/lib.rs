@@ -3,6 +3,7 @@
 pub mod auth;
 mod deadline;
 pub mod grants;
+mod reads;
 pub mod serving;
 mod session;
 pub mod xmsg_config;

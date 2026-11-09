@@ -10,7 +10,8 @@ Inbound acceptance uses `xmsg::client::RegisteredService` through the explicit
 `receive_one` library call. The Rust listener separately supports configured MCP
 send/reply through the [outbound layer](outbound.md); it starts no inbound receiving
 worker or callback dispatcher. All accepted inbound messages and outbox
-occurrences remain held. The first-subscription policy has no default, and
+occurrences remain held. Enabled, current-revision custody can be recovered through
+[mailbox reads](serving.md#mailbox-recovery-reads), which do not change event state. The first-subscription policy has no default, and
 disable/re-enable never rebinds an old acceptance. Those owner decisions and
 [deployment boundaries](serving.md#deployment-boundaries) remain open.
 
