@@ -41,6 +41,7 @@ workspace, and keep its restricted runtime credential private. Point its client
 at the private MCP endpoint. In Plugins select Connection: Tunnel, then OAuth.
 The OAuth authorization server still needs browser reachability: the tunnel does
 not automatically expose it. Consult the [current tunnel setup guide](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels).
+The step-by-step hosted dot run is in [hosted dots setup](hosted-dots-setup.md).
 
 First prove discovery, login and the harmless identity read. Events challenge,
 signed delivery, refresh, revocation and restart need their own hosted checks.
