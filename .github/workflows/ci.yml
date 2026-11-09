@@ -138,7 +138,7 @@ jobs:
           revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')
           export XMSG_GATEWAY_BIN="$PWD/.artifacts/transport/$revision/xmsg"
           python3 scripts/wiring_mutants.py | tee wiring-mutants.log
-          grep -Fx 'wiring-mutants-complete:36' wiring-mutants.log
+          grep -Fx 'wiring-mutants-complete:37' wiring-mutants.log
       - name: Bounded uncertainty acceptance source mutant
         run: |
           revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')
