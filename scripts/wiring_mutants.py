@@ -22,15 +22,23 @@ CASES = [
     (
         "rpc-id-is-not-request-id",
         "src/serving.rs",
-        "Ok(request) => request,",
-        """Ok(mut request) => {
-        let id = outbound::RequestId::parse(&id.to_string()).unwrap();
-        match &mut request {
-            outbound::Request::Send(args) => args.request_id = id,
-            outbound::Request::Reply(args) => args.request_id = id,
-        }
-        request
-    },""",
+        """let request = match request {
+                    Ok(request) => request,
+                    Err(_) => return rpc_error(&id, -32602, "Invalid params"),
+                };
+                return messaging_call(app, token, id, request, policy, store, progress).await;""",
+        """let request = match request {
+                    Ok(mut request) => {
+                        let request_id = outbound::RequestId::parse(&id.to_string()).unwrap();
+                        match &mut request {
+                            outbound::Request::Send(args) => args.request_id = request_id,
+                            outbound::Request::Reply(args) => args.request_id = request_id,
+                        }
+                        request
+                    },
+                    Err(_) => return rpc_error(&id, -32602, "Invalid params"),
+                };
+                return messaging_call(app, token, id, request, policy, store, progress).await;""",
         "messaging",
         MCP,
         "RPC id changed logical send",
@@ -346,9 +354,25 @@ CASES.append((
     "background observation hid request store opens",
 ))
 
+CASES.append(
+    (
+        "read-response-id",
+        "src/serving.rs",
+        "Ok(Ok(data)) => rpc_result(&id, tool_result(data)),",
+        'Ok(Ok(data)) => rpc_result(&json!("wrong-read-response-id"), tool_result(data)),',
+        "reads",
+        "reads_are_advertised_only_with_a_registered_mailbox",
+        "read responses changed their JSON-RPC request IDs",
+    )
+)
+
+
 def main():
-    if len(CASES) != 36:
+    if len(CASES) != 37:
         raise RuntimeError("wiring mutant inventory drift")
+    for name, filename, before, *_ in CASES:
+        if (ROOT / filename).read_text().count(before) != 1:
+            raise RuntimeError(f"{name}: source site drift")
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", choices=[case[0] for case in CASES])
     args = parser.parse_args()

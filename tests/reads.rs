@@ -153,6 +153,11 @@ fn call(name: &str, arguments: Value) -> Value {
 async fn tool(serving: &Serving, name: &str, args: Value) -> Value {
     let (status, response, _) = request(serving, "good-token", call(name, args)).await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        response["id"],
+        json!(1),
+        "read response changed its JSON-RPC request ID"
+    );
     assert!(response.get("error").is_none(), "{response}");
     response["result"]["structuredContent"].clone()
 }
@@ -594,4 +599,24 @@ async fn reads_are_advertised_only_with_a_registered_mailbox() {
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
     assert_eq!(names, ["xmsg_identity", "xmsg_inbox", "xmsg_read_message"]);
+    let mut response_ids = Vec::new();
+    let expected_ids = [json!("inbox-request"), json!(42)];
+    for ((name, arguments), id) in [
+        ("xmsg_inbox", json!({})),
+        ("xmsg_read_message", json!({"message_id":"unknown"})),
+    ]
+    .into_iter()
+    .zip(expected_ids.iter())
+    {
+        let mut body = call(name, arguments);
+        body["id"] = id.clone();
+        let (status, response, _) = request(&serving, "good-token", body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(response.get("error").is_none(), "{response}");
+        response_ids.push(response["id"].clone());
+    }
+    assert_eq!(
+        response_ids, expected_ids,
+        "read responses changed their JSON-RPC request IDs"
+    );
 }
