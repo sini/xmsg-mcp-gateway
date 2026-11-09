@@ -140,7 +140,9 @@ the values from the actual provider setup:
 ```
 
 An optional `verifier.root_certificate_file` supplies a PEM root for private PKI.
-Provider addresses are explicit connection pins, independent of callback policy.
+Optional `verifier.provider_addresses` supply explicit connection pins, independent of
+callback policy; when omitted or empty, standard DNS resolution and `HTTPS_PROXY`/`NO_PROXY`
+environment settings apply, while configured pins connect directly (`.no_proxy()`).
 Lookup credentials stay in the private secret file. The introspection client and
 approved hosted client have separate roles. See [provider setup](provider-setup.md)
 and [verified-token foundation](verified-identity.md).

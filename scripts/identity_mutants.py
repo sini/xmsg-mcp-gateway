@@ -86,8 +86,8 @@ CASES += [
     (
         "provider-allowlist",
         "src/auth.rs",
-        "config.provider_addresses.is_empty()",
-        "false",
+        "if !config.provider_addresses.is_empty()",
+        "if false",
         "configuration_rejects_insecure_urls_and_unknown_fields",
     ),
 ]
@@ -137,15 +137,31 @@ CASES += [
         "",
         "stalled_provider_is_refused_before_its_response",
     ),
+    (
+        "provider-pin-mismatch",
+        "src/auth.rs",
+        "builder = builder.no_proxy().resolve_to_addrs(host, &addresses);",
+        "builder = builder.no_proxy();",
+        "configuration_rejects_insecure_urls_and_unknown_fields",
+    ),
+    (
+        "provider-unpinned-proxy",
+        "src/auth.rs",
+        "let mut builder = Client::builder()\n            .https_only(true)",
+        "let mut builder = Client::builder()\n            .https_only(true)\n            .no_proxy()",
+        "configuration_rejects_insecure_urls_and_unknown_fields",
+    ),
 ]
 TYPE_TESTS = {case[4] for case in CASES[:5]}
 EXPECTED_RED = {
     "response-bound": "oversized provider body accepted",
     "provider-https": "accepted config introspection_url",
-    "provider-allowlist": "accepted config provider_addresses",
+    "provider-allowlist": "accepted out-of-list IP literal",
     "provider-ip-literal": "accepted out-of-list IP literal",
     "provider-redirect": "redirect target received a request",
     "provider-timeout": "provider timeout refusal missing",
+    "provider-pin-mismatch": "accepted mismatched provider pin",
+    "provider-unpinned-proxy": "unpinned provider request should succeed through HTTPS_PROXY",
     **{
         name: f"accepted {field}"
         for name, field in [

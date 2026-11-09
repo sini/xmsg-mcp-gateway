@@ -185,6 +185,68 @@ def test_ssrf(address, monkeypatch):
     ]
 
 
+def test_provider_policy_separate_from_callback_ssrf(tmp_path, monkeypatch):
+    from phase1.auth import SCOPES, OAuth
+
+    key = tmp_path / "secret"
+    key.write_text("fixture-secret")
+    key.chmod(0o600)
+    monkeypatch.setattr(
+        transport.socket,
+        "getaddrinfo",
+        lambda *a, **k: [(2, 1, 6, "", ("10.0.0.1", 443))],
+    )
+    with pytest.raises(transport.DestinationError):
+        transport.HTTPS().post("https://10.0.0.1/callback", b"{}", {})
+
+    class Conn:
+        def __init__(self, host, **kwargs):
+            pass
+
+        def request(self, method, target, body, headers):
+            self._create_connection(("10.0.0.1", 443), 10)
+
+        def getresponse(self):
+            claims = {
+                "active": True,
+                "iss": "https://10.0.0.1/",
+                "sub": "owner",
+                "aud": "https://gateway.example/mcp",
+                "exp": time.time() + 300,
+                "scope": " ".join(SCOPES),
+            }
+            payload = json.dumps(claims).encode()
+            return type("Reply", (), {"status": 200, "read": lambda self, n: payload})()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(transport.http.client, "HTTPSConnection", Conn)
+    monkeypatch.setattr(transport, "dial_ip", lambda address, timeout: object())
+
+    unpinned = Settings(
+        issuer="https://10.0.0.1/",
+        resource="https://gateway.example/mcp",
+        subject="owner",
+        introspection_url="https://10.0.0.1/introspect",
+        client_id="lookup-client",
+        client_secret_file=key,
+    )
+    assert OAuth(unpinned).validate("fixture-token") is not None
+
+    pinned = Settings(
+        issuer="https://10.0.0.1/",
+        resource="https://gateway.example/mcp",
+        subject="owner",
+        introspection_url="https://10.0.0.1/introspect",
+        client_id="lookup-client",
+        client_secret_file=key,
+        provider_addresses=["192.0.2.10"],
+    )
+    assert OAuth(pinned).validate("fixture-token") is None
+
+
+
 def test_rebinding_and_pin(monkeypatch):
     addresses = ["93.184.216.34"]
     monkeypatch.setattr(

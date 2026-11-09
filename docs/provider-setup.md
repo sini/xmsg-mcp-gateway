@@ -24,9 +24,9 @@ The current resource server uses Basic introspection credentials, configured by
 hosted OAuth client. The current serving profile does not yet enforce an approved
 hosted-client claim or a durable local service grant. Those are phase-2 gates;
 do not treat this synthetic feasibility server as a production authority boundary.
-Introspection currently uses the same public-destination transport as callbacks:
-LAN/tailnet-only provider endpoints are refused. An explicit provider allowlist
-separate from the callback policy is planned, not implemented here.
+Introspection transport is separate from callback public-destination filtering:
+LAN/tailnet provider endpoints are accepted by default, and optional
+`provider_addresses` pin provider connections when configured.
 
 A local Kanidm 1.11.2 experiment returned its OAuth client name as audience even
 when an MCP resource was requested. Direct use did not pass the exact-resource

@@ -24,6 +24,7 @@ pub struct VerifierConfig {
     pub introspection_url: String,
     pub introspection_client: String,
     pub client_secret_file: PathBuf,
+    #[serde(default)]
     pub provider_addresses: Vec<IpAddr>,
     pub required_scopes: Vec<String>,
     pub timeout_ms: u64,
@@ -104,7 +105,6 @@ impl Verifier {
         .iter()
         .any(|s| s.trim().is_empty())
             || config.introspection_client.contains(':')
-            || config.provider_addresses.is_empty()
             || config.required_scopes.is_empty()
             || config
                 .required_scopes
@@ -115,23 +115,24 @@ impl Verifier {
         {
             return Err(Error::Configuration);
         }
-        let host = endpoint.host_str().ok_or(Error::Configuration)?;
-        if let Ok(ip) = host.trim_matches(['[', ']']).parse::<IpAddr>() {
-            if !config.provider_addresses.contains(&ip) {
-                return Err(Error::Configuration);
-            }
-        }
-        let addresses: Vec<_> = config
-            .provider_addresses
-            .iter()
-            .map(|ip| SocketAddr::new(*ip, endpoint.port_or_known_default().unwrap_or(443)))
-            .collect();
         let mut builder = Client::builder()
             .https_only(true)
-            .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_millis(config.timeout_ms))
-            .resolve_to_addrs(host, &addresses);
+            .timeout(Duration::from_millis(config.timeout_ms));
+        if !config.provider_addresses.is_empty() {
+            let host = endpoint.host_str().ok_or(Error::Configuration)?;
+            if let Ok(ip) = host.trim_matches(['[', ']']).parse::<IpAddr>() {
+                if !config.provider_addresses.contains(&ip) {
+                    return Err(Error::Configuration);
+                }
+            }
+            let addresses: Vec<_> = config
+                .provider_addresses
+                .iter()
+                .map(|ip| SocketAddr::new(*ip, endpoint.port_or_known_default().unwrap_or(443)))
+                .collect();
+            builder = builder.no_proxy().resolve_to_addrs(host, &addresses);
+        }
         if let Some(file) = &config.root_certificate_file {
             let pem = fs::read(file).map_err(|_| Error::Configuration)?;
             builder = builder.add_root_certificate(

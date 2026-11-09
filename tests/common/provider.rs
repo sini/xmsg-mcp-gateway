@@ -21,7 +21,12 @@ impl TlsFixture {
     pub fn new() -> Self {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let temp = tempfile::tempdir().unwrap();
-        let certificate = generate_simple_self_signed(vec!["provider.test".into()]).unwrap();
+        let certificate = generate_simple_self_signed(vec![
+            "provider.test".into(),
+            "localhost".into(),
+            "127.0.0.1".into(),
+        ])
+        .unwrap();
         let roots = temp.path().join("root.pem");
         std::fs::write(&roots, certificate.cert.pem()).unwrap();
         let secret = temp.path().join("secret");
@@ -170,6 +175,233 @@ pub fn network_case(
 
 pub fn verified(binding: &Binding) -> VerifiedIdentity {
     verify_response(binding, claims(binding), 200).unwrap()
+}
+
+#[allow(dead_code)]
+pub fn verify_pin_and_proxy_policy(binding: &Binding) {
+    let fixture = TlsFixture::new();
+    let body = claims(binding).to_string();
+
+    // 1. Unpinned provider authenticates directly (including IP literal / localhost).
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let tls = fixture.tls.clone();
+    let response_body = body.clone();
+    let server = thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        serve(socket, tls, &response_body, 200, None, Duration::ZERO, true);
+    });
+    let unpinned_config = VerifierConfig {
+        service: binding.service.clone(),
+        issuer: binding.issuer.clone(),
+        resource: binding.resource.clone(),
+        subject: binding.subject.clone(),
+        hosted_client: binding.hosted_client.clone(),
+        introspection_url: format!("https://127.0.0.1:{port}/introspect"),
+        introspection_client: "lookup-client".into(),
+        client_secret_file: fixture.secret.clone(),
+        provider_addresses: Vec::new(),
+        required_scopes: vec!["identity:read".into()],
+        timeout_ms: 2000,
+        root_certificate_file: Some(fixture.roots.clone()),
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let unpinned = Verifier::from_config(unpinned_config).expect("unpinned config should load");
+    let identity = runtime
+        .block_on(unpinned.verify("fixture-token"))
+        .expect("unpinned provider should authenticate");
+    assert_eq!(identity.subject(), binding.subject);
+    server.join().unwrap();
+
+    // 2. Configured pin mismatch refuses connection even when the hostname resolves to a live listener.
+    let mismatch_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let mismatch_port = mismatch_listener.local_addr().unwrap().port();
+    mismatch_listener.set_nonblocking(true).unwrap();
+    let mismatch_stopped = Arc::new(AtomicBool::new(false));
+    let mismatch_flag = mismatch_stopped.clone();
+    let mismatch_tls = fixture.tls.clone();
+    let mismatch_body = body.clone();
+    let mismatch_server = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match mismatch_listener.accept() {
+                Ok((socket, _)) => {
+                    serve(
+                        socket,
+                        mismatch_tls,
+                        &mismatch_body,
+                        200,
+                        None,
+                        Duration::ZERO,
+                        true,
+                    );
+                    return 1usize;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if mismatch_flag.load(Ordering::SeqCst) {
+                        return 0usize;
+                    }
+                    assert!(Instant::now() < deadline, "mismatch fixture deadline");
+                    thread::sleep(Duration::from_millis(2));
+                }
+                Err(error) => panic!("mismatch accept: {error}"),
+            }
+        }
+    });
+    let mismatch_config = VerifierConfig {
+        service: binding.service.clone(),
+        issuer: binding.issuer.clone(),
+        resource: binding.resource.clone(),
+        subject: binding.subject.clone(),
+        hosted_client: binding.hosted_client.clone(),
+        introspection_url: format!("https://localhost:{mismatch_port}/introspect"),
+        introspection_client: "lookup-client".into(),
+        client_secret_file: fixture.secret.clone(),
+        provider_addresses: vec![Ipv4Addr::new(127, 0, 0, 2).into()],
+        required_scopes: vec!["identity:read".into()],
+        timeout_ms: 500,
+        root_certificate_file: Some(fixture.roots.clone()),
+    };
+    let mismatched = Verifier::from_config(mismatch_config).unwrap();
+    let mismatch_result = runtime.block_on(mismatched.verify("fixture-token"));
+    mismatch_stopped.store(true, Ordering::SeqCst);
+    let mismatch_requests = mismatch_server.join().unwrap();
+    assert!(
+        matches!(
+            mismatch_result,
+            Err(xmsg_mcp_gateway::auth::Error::Unavailable)
+        ) && mismatch_requests == 0,
+        "accepted mismatched provider pin"
+    );
+
+    // 3. With no pins and HTTPS_PROXY set, provider request traverses the local fixture proxy;
+    //    when pins ARE configured, .no_proxy() bypasses HTTPS_PROXY.
+    let proxy_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let proxy_port = proxy_listener.local_addr().unwrap().port();
+    let proxy_tls = fixture.tls.clone();
+    let proxy_body = body.clone();
+    let proxy_server = thread::spawn(move || {
+        let (mut socket, _) = proxy_listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        socket
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut reader = BufReader::new(&mut socket);
+        let mut connect_line = String::new();
+        reader.read_line(&mut connect_line).unwrap();
+        assert!(
+            connect_line.starts_with("CONNECT provider.test:443 HTTP/1.1"),
+            "unexpected proxy request: {connect_line}"
+        );
+        loop {
+            let mut header = String::new();
+            reader.read_line(&mut header).unwrap();
+            if header == "\r\n" || header.is_empty() {
+                break;
+            }
+        }
+        drop(reader);
+        socket
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .unwrap();
+        socket.flush().unwrap();
+        serve(
+            socket,
+            proxy_tls,
+            &proxy_body,
+            200,
+            None,
+            Duration::ZERO,
+            true,
+        );
+        1usize
+    });
+
+    let direct_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let direct_port = direct_listener.local_addr().unwrap().port();
+    let direct_tls = fixture.tls.clone();
+    let direct_body = body;
+    let direct_server = thread::spawn(move || {
+        let (socket, _) = direct_listener.accept().unwrap();
+        serve(
+            socket,
+            direct_tls,
+            &direct_body,
+            200,
+            None,
+            Duration::ZERO,
+            true,
+        );
+        1usize
+    });
+
+    let prev_https = std::env::var_os("HTTPS_PROXY");
+    let prev_no = std::env::var_os("NO_PROXY");
+    std::env::set_var("HTTPS_PROXY", format!("http://127.0.0.1:{proxy_port}"));
+    std::env::remove_var("NO_PROXY");
+    let proxied_unpinned = Verifier::from_config(VerifierConfig {
+        service: binding.service.clone(),
+        issuer: binding.issuer.clone(),
+        resource: binding.resource.clone(),
+        subject: binding.subject.clone(),
+        hosted_client: binding.hosted_client.clone(),
+        introspection_url: "https://provider.test/introspect".into(),
+        introspection_client: "lookup-client".into(),
+        client_secret_file: fixture.secret.clone(),
+        provider_addresses: Vec::new(),
+        required_scopes: vec!["identity:read".into()],
+        timeout_ms: 2000,
+        root_certificate_file: Some(fixture.roots.clone()),
+    });
+    let pinned_direct = Verifier::from_config(VerifierConfig {
+        service: binding.service.clone(),
+        issuer: binding.issuer.clone(),
+        resource: binding.resource.clone(),
+        subject: binding.subject.clone(),
+        hosted_client: binding.hosted_client.clone(),
+        introspection_url: format!("https://provider.test:{direct_port}/introspect"),
+        introspection_client: "lookup-client".into(),
+        client_secret_file: fixture.secret,
+        provider_addresses: vec![Ipv4Addr::LOCALHOST.into()],
+        required_scopes: vec!["identity:read".into()],
+        timeout_ms: 2000,
+        root_certificate_file: Some(fixture.roots),
+    });
+    match prev_https {
+        Some(val) => std::env::set_var("HTTPS_PROXY", val),
+        None => std::env::remove_var("HTTPS_PROXY"),
+    }
+    match prev_no {
+        Some(val) => std::env::set_var("NO_PROXY", val),
+        None => std::env::remove_var("NO_PROXY"),
+    }
+
+    let proxied_verifier = proxied_unpinned.expect("unpinned proxy config should build");
+    let proxied_identity = runtime
+        .block_on(proxied_verifier.verify("fixture-token"))
+        .expect("unpinned provider request should succeed through HTTPS_PROXY");
+    assert_eq!(proxied_identity.subject(), binding.subject);
+    assert_eq!(
+        proxy_server.join().unwrap(),
+        1,
+        "unpinned provider request did not traverse HTTPS_PROXY"
+    );
+
+    let direct_verifier = pinned_direct.expect("pinned config should build");
+    let direct_identity = runtime
+        .block_on(direct_verifier.verify("fixture-token"))
+        .expect("pinned provider request should bypass HTTPS_PROXY and connect directly");
+    assert_eq!(direct_identity.subject(), binding.subject);
+    assert_eq!(
+        direct_server.join().unwrap(),
+        1,
+        "pinned provider request did not connect directly"
+    );
 }
 
 fn serve(
