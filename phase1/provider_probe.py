@@ -27,6 +27,7 @@ class ProbeConfig(BaseModel):
     introspection_client_secret_file: Path
     introspection_url: str = Field(min_length=1)
     required_scopes: list[str] = Field(min_length=1)
+    provider_addresses: list[str] = []
 
     @field_validator("issuer", "resource", "introspection_url")
     @classmethod
@@ -79,7 +80,11 @@ def check_provider(config, token, http=None):
         (config.introspection_client_id + ":" + secret).encode()
     ).decode()
     try:
-        status, body = (http or HTTPS()).post(
+        transport = http or HTTPS(
+            public_only=False,
+            allowed_addresses=getattr(config, "provider_addresses", ()),
+        )
+        status, body = transport.post(
             config.introspection_url,
             urlencode({"token": token, "token_type_hint": "access_token"}).encode(),
             {

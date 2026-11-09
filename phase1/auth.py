@@ -17,7 +17,10 @@ def exact_audience(value, resource):
 class OAuth:
     def __init__(self, settings, http=None):
         self.settings = settings
-        self.http = http or HTTPS()
+        self.http = http or HTTPS(
+            public_only=False,
+            allowed_addresses=getattr(settings, "provider_addresses", ()),
+        )
         for field in (
             "issuer",
             "resource",

@@ -8,11 +8,12 @@ There is no test constructor, injectable provider object, or enabling Cargo feat
 
 `VerifierConfig` rejects unknown fields. It requires a service, HTTPS issuer and
 resource, expected subject, approved hosted client, HTTPS introspection endpoint,
-separate introspection client, owner-private secret file, explicit provider IP
-addresses, required scopes and a bounded timeout. An optional PEM root certificate
-supports private PKI. Provider addresses pin the configured endpoint's connections;
-this is a separate policy from the future callback public-address filter. The
-asynchronous client disables proxies and redirects, verifies TLS, and bounds response bodies
+separate introspection client, owner-private secret file, required scopes and a
+bounded timeout. Optional `provider_addresses` pin the configured endpoint's
+connections directly (disabling proxies) independently of the callback public-address
+filter; when omitted or empty, standard DNS resolution and `HTTPS_PROXY`/`NO_PROXY`
+environment settings apply. An optional PEM root certificate supports private PKI.
+The asynchronous client disables redirects, verifies TLS, and bounds response bodies
 at 64 KiB. Neither credentials nor provider response bodies appear in errors.
 
 The provider must report an active token, exact issuer and resource audience

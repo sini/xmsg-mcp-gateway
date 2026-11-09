@@ -1,3 +1,4 @@
+import ipaddress
 from pathlib import Path
 from typing import Literal
 
@@ -18,9 +19,12 @@ class Settings(BaseModel):
     introspection_url: str | None = None
     client_id: str | None = None
     client_secret_file: Path | None = None
+    provider_addresses: list[str] = []
 
     @model_validator(mode="after")
     def safe(self):
+        for address in self.provider_addresses:
+            ipaddress.ip_address(address)
         if self.bind not in ("127.0.0.1", "::1") and self.exposure != "public-https":
             raise ValueError(
                 "non-loopback bind requires explicit public-https exposure"

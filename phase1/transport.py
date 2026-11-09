@@ -85,6 +85,34 @@ def resolve_public(url):
         raise DestinationError("invalid_destination") from exc
 
 
+def resolve_provider(url, allowed_addresses=()):
+    try:
+        parsed = urlsplit(url)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+            or "%" in parsed.hostname
+            or len(url) > 4096
+            or any(ord(c) < 33 for c in url)
+        ):
+            raise DestinationError("invalid_destination")
+        allowed = {ipaddress.ip_address(address) for address in allowed_addresses}
+        port = parsed.port or 443
+        answers = bounded_dns(parsed.hostname, port)
+        addresses = list(dict.fromkeys(answer[4][0] for answer in answers))
+        if not addresses or (
+            allowed
+            and not all(ipaddress.ip_address(address) in allowed for address in addresses)
+        ):
+            raise DestinationError("untrusted_provider_address")
+        return parsed, addresses
+    except (ValueError, OSError) as exc:
+        raise DestinationError("invalid_destination") from exc
+
+
 def dial_ip(address, timeout):
     ip, port = address
     family = socket.AF_INET6 if ":" in ip else socket.AF_INET
@@ -99,8 +127,16 @@ def dial_ip(address, timeout):
 
 
 class HTTPS:
+    def __init__(self, public_only=True, allowed_addresses=()):
+        self.public_only = public_only
+        self.allowed_addresses = tuple(allowed_addresses)
+
     def post(self, url, body, headers):
-        parsed, addresses = resolve_public(url)
+        parsed, addresses = (
+            resolve_public(url)
+            if self.public_only
+            else resolve_provider(url, self.allowed_addresses)
+        )
         connection = http.client.HTTPSConnection(
             parsed.hostname,
             port=parsed.port or 443,

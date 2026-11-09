@@ -26,6 +26,28 @@ fn configuration_rejects_insecure_urls_and_unknown_fields() {
         "timeout_ms": 1000
     });
     assert!(Verifier::from_config(serde_json::from_value(raw.clone()).unwrap()).is_ok());
+    for (lan_url, addresses) in [
+        ("https://10.0.0.1/token", None),
+        ("https://100.64.0.1/token", Some(serde_json::json!([]))),
+    ] {
+        let mut unpinned = raw.clone();
+        unpinned["introspection_url"] = serde_json::json!(lan_url);
+        match addresses {
+            Some(addresses) => unpinned["provider_addresses"] = addresses,
+            None => {
+                unpinned
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("provider_addresses");
+            }
+        }
+        let config: VerifierConfig = serde_json::from_value(unpinned)
+            .expect("LAN provider config without provider_addresses must deserialize");
+        assert!(
+            Verifier::from_config(config).is_ok(),
+            "LAN provider URL refused without pin policy: {lan_url}"
+        );
+    }
     for (field, value) in [
         (
             "introspection_url",
@@ -33,7 +55,6 @@ fn configuration_rejects_insecure_urls_and_unknown_fields() {
         ),
         ("issuer", serde_json::json!("http://issuer.example/")),
         ("resource", serde_json::json!("http://gateway.example/mcp")),
-        ("provider_addresses", serde_json::json!([])),
         ("timeout_ms", serde_json::json!(0)),
         ("timeout_ms", serde_json::json!(30_001)),
         ("required_scopes", serde_json::json!([])),
@@ -61,6 +82,7 @@ fn configuration_rejects_insecure_urls_and_unknown_fields() {
     let mut unknown = raw;
     unknown["verified"] = true.into();
     assert!(serde_json::from_value::<VerifierConfig>(unknown).is_err());
+    provider::verify_pin_and_proxy_policy(&binding());
 }
 
 #[path = "common/provider.rs"]
