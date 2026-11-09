@@ -5,7 +5,8 @@ grants. Its public resource metadata advertises the canonical resource and issue
 from the owner's configuration. `initialize`, `ping`, `tools/list`,
 `notifications/initialized` and `xmsg_identity` are implemented. Standard `_meta`
 progress tokens are accepted but unused. An optional owner-file messaging section
-enables authorized `xmsg_send` and `xmsg_reply`. Events remain unavailable.
+enables authorized `xmsg_send` and `xmsg_reply`, plus mailbox-scoped
+`xmsg_inbox` and `xmsg_read_message` recovery reads. Events remain unavailable.
 
 The existing xmsg MCP entry point is a harness-associated stdio adapter behind its
 daemon feature. Service-node I/O belongs to the shared `xmsg::client` boundary.
@@ -51,8 +52,9 @@ These are transport limits, distinct from the required node-bound manifest value
 The service name uses xmsg's shared validator. The retained registration supplies
 the actual mailbox, node and effective TTL/capacity values; config supplies no bus
 address. Explicit custody and outbound migrations are required before messaging.
-Only the owner CLI/store changes per-grant policy. Empty policy advertises no
-messaging tools and refuses messaging calls.
+Only the owner CLI/store changes per-grant policy. Empty send/reply policy
+advertises no send/reply tools and refuses those calls. An enabled grant with
+a registered mailbox still exposes its scoped recovery reads.
 
 The real-node cells
 [`real_mcp_send_keeps_request_identity_and_owner_policy`](../tests/messaging.rs),
@@ -294,3 +296,46 @@ backoff through stderr under the same descriptor pressure, releases the held
 clients and sends SIGTERM to its owned CLI process. Shutdown must succeed within
 750 ms, below the one-second backoff; replacing the shutdown select with an
 uninterruptible sleep must fail that cell.
+
+
+## Mailbox recovery reads
+
+With a registered messaging profile, `xmsg_inbox(after?, limit?)` returns
+`items` containing message IDs, mailbox, attested origin, correlation, the durable
+observation time, previews of at most 256 Unicode characters and
+`body_available: true`. The default page is 20 items; valid limits are 1 through
+100. `next` is an opaque cursor only when another eligible item exists; otherwise
+it is null. Query order follows custody insertion order, not upstream IDs or
+client-supplied timestamps.
+
+`xmsg_read_message(message_id, offset?, limit?)` returns `state: "found"`, the
+same identity metadata, `offset`, `text` and `next_offset`. Offsets count Unicode
+scalar values, starting at zero. The default and maximum page is 4096 characters
+(at most 16 KiB of UTF-8 text); valid limits are 1 through 4096. Embedded NULs and
+other valid JSON string characters survive reads. An offset at or past the end
+returns an empty text and null next offset. A foreign, expired, redacted,
+pre-enable, earlier-revision or unknown message returns `state: "not_found"`
+without metadata. No upstream read-by-ID operation is performed.
+
+Every read reauthorizes the verified OAuth binding against the currently enabled
+grant in the same SQLite read transaction as the custody query. The mailbox and
+bus come from the live registered handle. Ownership also requires the stored
+owner, service, issuer, resource, hosted client, grant ID and grant revision to
+match. Reads may expose currently held custody accepted under the current enabled
+grant revision. They never release held events, authorize a subscription, or make
+pre-enable/earlier-revision custody visible. Disable/re-enable changes the revision
+and does not rebind prior custody. There is still no automatic inbound receiver.
+
+Cursors bind their event anchor to that mailbox, bus, identity binding and grant
+revision. They resolve the anchor's current insertion position, so deleting earlier
+rows or vacuuming the database does not change the anchor identity. An expired,
+purged, foreign or differently bound anchor returns JSON-RPC invalid params
+(-32602). Restart `xmsg_inbox` without `after` in that case. This intentionally does
+not promise that a cursor survives retention; it prevents a recycled SQLite row ID
+from silently skipping later messages. Unknown arguments and limits outside the
+advertised bounds also return -32602.
+
+Portable tests in `tests/reads.rs` exercise the real OAuth verifier over a local
+TLS introspection fixture and actual service registration/poll over a fixture Unix
+socket. They verify ownership through real `accept_delivery` calls, without a
+private daemon binary or a deployed service.

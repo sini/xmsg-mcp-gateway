@@ -21,8 +21,8 @@ use serde_json::{json, Map, Value};
 use crate::auth::{self, VerifiedIdentity, Verifier, VerifierConfig};
 use crate::grants::{Authorization, Binding, Error as GrantError, Store};
 use crate::outbound::{self, Outcome, Policy};
-use crate::session;
 use crate::xmsg_config::{DeploymentManifest, ManifestError, XmsgConfig};
+use crate::{reads, session};
 
 const MAX_OWNER_FILE: usize = 65_536;
 
@@ -684,6 +684,26 @@ fn tools(app: &App, policy: &Policy) -> Value {
         "securitySchemes":[{"type":"oauth2","scopes":app.scopes}]}),
     ];
     if app.messaging.is_some() {
+        for (name, description, properties, required) in [
+            (
+                "xmsg_inbox",
+                "Read bounded previews from the authenticated registered mailbox.",
+                json!({"after":{"type":"string","maxLength":256},"limit":{"type":"integer","minimum":1,"maximum":reads::INBOX_MAX,"default":reads::INBOX_DEFAULT}}),
+                json!([]),
+            ),
+            (
+                "xmsg_read_message",
+                "Read a bounded Unicode character range from an owned message.",
+                json!({"message_id":{"type":"string","minLength":1,"maxLength":4096},"offset":{"type":"integer","minimum":0,"default":0},
+                    "limit":{"type":"integer","minimum":1,"maximum":reads::READ_MAX,"default":reads::READ_MAX}}),
+                json!(["message_id"]),
+            ),
+        ] {
+            tools.push(json!({"name":name,"description":description,
+                "inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false},
+                "annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false},
+                "securitySchemes":[{"type":"oauth2","scopes":app.scopes}]}));
+        }
         for (name, permission, target) in [
             ("xmsg_send", &policy.send, "to"),
             ("xmsg_reply", &policy.reply, "message_id"),
@@ -978,6 +998,48 @@ async fn mcp_request(
                 Ok(call) => call,
                 Err(_) => return rpc_error(&id, -32602, "Invalid params"),
             };
+            if matches!(call.name.as_str(), "xmsg_inbox" | "xmsg_read_message")
+                && app.messaging.is_some()
+            {
+                let request = match call.name.as_str() {
+                    "xmsg_inbox" => serde_json::from_value::<reads::InboxArguments>(call.arguments)
+                        .map(reads::Request::Inbox),
+                    _ => serde_json::from_value::<reads::ReadArguments>(call.arguments)
+                        .map(reads::Request::Read),
+                };
+                let request = match request {
+                    Ok(request) => request,
+                    Err(_) => return rpc_error(&id, -32602, "Invalid params"),
+                };
+                let snapshot = match app
+                    .messaging
+                    .as_ref()
+                    .and_then(|messaging| messaging.session.snapshot().ok())
+                {
+                    Some(snapshot) => snapshot,
+                    None => return unavailable(),
+                };
+                let result = tokio::task::spawn_blocking(move || {
+                    reads::dispatch(
+                        store,
+                        &identity,
+                        &snapshot.bus,
+                        snapshot.endpoint.sender(),
+                        request,
+                    )
+                })
+                .await;
+                return match result {
+                    Ok(Ok(data)) => rpc_result(&id, tool_result(data)),
+                    Ok(Err(reads::Error::Arguments)) => {
+                        rpc_error(&id, -32602, "Invalid params or unavailable cursor")
+                    }
+                    Ok(Err(reads::Error::Authority(GrantError::Denied))) => {
+                        StatusCode::FORBIDDEN.into_response()
+                    }
+                    _ => unavailable(),
+                };
+            }
             if matches!(call.name.as_str(), "xmsg_send" | "xmsg_reply") && app.messaging.is_some() {
                 let request = match call.name.as_str() {
                     "xmsg_send" => {
