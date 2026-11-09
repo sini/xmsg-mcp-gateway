@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import ssl
 import sys
 import tomllib
 from pathlib import Path
@@ -11,10 +12,10 @@ from urllib.parse import urlsplit
 
 import uvicorn
 
-import phase1.events
-from phase1.app import create_app
+from phase1.app import MAX_REQUEST, create_app
 from phase1.config import Settings
 from phase1.store import Store
+from phase1.transport import HTTPS, DestinationError
 
 
 class SpikeSettings(Settings):
@@ -29,99 +30,98 @@ def require_bearer_opt_in(settings, allow_bearer):
 
 def create_spike(settings, *, allow_bearer=False, ingress_token=None, **kwargs):
     require_bearer_opt_in(settings, allow_bearer)
-    app = create_app(settings, **kwargs)
     if ingress_token is None:
-        return app
+        return create_app(settings, **kwargs)
     if settings.auth_mode != "bearer" or settings.bind != "127.0.0.1":
         raise ValueError("--no-auth-ingress requires bearer mode on 127.0.0.1")
     header = b"Bearer " + ingress_token.encode()
-
     diagnostics = Path(settings.state_dir) / "step0-diagnostics.jsonl"
+    fields = {
+        "name",
+        "arguments",
+        "delivery",
+        "mode",
+        "url",
+        "secret",
+        "cursor",
+        "ttlMs",
+        "_meta",
+        "progressToken",
+        "challenge",
+    }
+
+    def shape(value):
+        if isinstance(value, dict):
+            result = {k: shape(v) for k, v in value.items() if k in fields}
+            unknown = sum(k not in fields for k in value)
+            if unknown:
+                result["other_fields"] = unknown
+            return result
+        return type(value).__name__
 
     def note(record):
         fd = os.open(diagnostics, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
         with os.fdopen(fd, "a") as stream:
+            os.fchmod(stream.fileno(), 0o600)
             stream.write(json.dumps(record) + "\n")
 
-    # phase1 reports every verification failure as challenge_failed; record which step failed.
-    original_post = phase1.events.signed_post
+    class TracedHTTP:
+        def __init__(self, http):
+            self.http = http
 
-    def traced_post(http, url, body, event_id, subscription_id, keys):
-        record = {"step": "callback_post", "kind": event_id.split("_")[0]}
-        try:
-            status, raw = original_post(
-                http, url, body, event_id, subscription_id, keys
-            )
-        except Exception as exc:
-            record["raised"] = f"{type(exc).__name__}: {exc}"[:200]
-            note(record)
-            raise
-        record["status"] = status
-        try:
-            reply = json.loads(raw)
-            record["reply"] = (
-                shape(reply) if isinstance(reply, dict) else type(reply).__name__
-            )
-            if isinstance(reply, dict) and record["kind"] == "verification":
-                record["challenge_echoed"] = json.loads(body).get(
-                    "challenge"
-                ) == reply.get("challenge")
-        except ValueError:
-            record["reply"] = f"non-json, {len(raw)} bytes"
-        note(record)
-        return status, raw
-
-    phase1.events.signed_post = traced_post
-
-    def shape(value):
-        # Field names and types only; values (callback URL, secret, cursor) never leave the process.
-        if isinstance(value, dict):
-            return {k: shape(v) for k, v in value.items()}
-        return type(value).__name__
-
-    def diagnose(request, send):
-        params = (
-            request.get("params") if isinstance(request.get("params"), dict) else {}
-        )
-        delivery = (
-            params.get("delivery") if isinstance(params.get("delivery"), dict) else {}
-        )
-        url = (
-            urlsplit(delivery["url"]) if isinstance(delivery.get("url"), str) else None
-        )
-        record = {
-            "method": request.get("method"),
-            "params": shape(params),
-            "callback": f"{url.scheme}://{url.hostname}" if url else None,
-        }
-        chunks = []
-
-        async def capture(message):
-            if message["type"] == "http.response.body":
-                chunks.append(message.get("body", b""))
-                if not message.get("more_body", False):
-                    try:
-                        reply = json.loads(b"".join(chunks))
-                        err = reply.get("error") or {}
-                        record["result"] = "error" if err else "ok"
-                        record["error"] = (
-                            {k: err.get(k) for k in ("code", "message", "data")}
-                            if err
-                            else None
+        def post(self, url, body, headers):
+            verification = json.loads(body).get("type") == "verification"
+            record = {
+                "step": "callback_post",
+                "kind": "verification" if verification else "event",
+            }
+            try:
+                parsed = urlsplit(url)
+                record["callback"] = f"{parsed.scheme}://{parsed.hostname}"
+            except ValueError:
+                record["callback"] = None
+            try:
+                status, raw = self.http.post(url, body, headers)
+            except Exception as exc:
+                record["failed_step"] = (
+                    "tls"
+                    if isinstance(exc, ssl.SSLError)
+                    else "destination"
+                    if isinstance(exc, DestinationError)
+                    else "timeout"
+                    if isinstance(exc, TimeoutError)
+                    else "transport"
+                )
+                # Exceptions can contain the full callback, signing secret or response body.
+                record["exception_type"] = type(exc).__name__
+                note(record)
+                raise
+            record["status"] = status
+            if not 200 <= status < 300:
+                record["failed_step"] = "http_status"
+            elif verification:
+                try:
+                    reply = json.loads(raw)
+                except (ValueError, UnicodeDecodeError):
+                    record["failed_step"] = "response_json"
+                else:
+                    record["reply"] = shape(reply)
+                    if not isinstance(reply, dict):
+                        record["failed_step"] = "response_shape"
+                    else:
+                        echoed = json.loads(body).get("challenge") == reply.get(
+                            "challenge"
                         )
-                    except ValueError:
-                        record["result"] = "unparseable"
-                    fd = os.open(
-                        diagnostics, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600
-                    )
-                    with os.fdopen(fd, "a") as stream:
-                        stream.write(json.dumps(record) + "\n")
-            await send(message)
+                        record["challenge_echoed"] = echoed
+                        if not echoed:
+                            record["failed_step"] = "challenge_echo"
+            note(record)
+            return status, raw
 
-        return capture
+    # Tracing stays local to this example app; phase1's signer and authentication are unchanged.
+    http = TracedHTTP(kwargs.pop("http", None) or HTTPS())
+    app = create_app(settings, http=http, **kwargs)
 
-    # "No Authentication" connections (the hosted form's only non-OAuth choice) carry no credential:
-    # supply the probe's own issued token, so phase1 still authenticates every request.
     async def inject(scope, receive, send):
         if scope["type"] != "http" or any(
             k == b"authorization" for k, _ in scope["headers"]
@@ -129,50 +129,66 @@ def create_spike(settings, *, allow_bearer=False, ingress_token=None, **kwargs):
             await app(scope, receive, send)
             return
         scope = dict(scope, headers=[*scope["headers"], (b"authorization", header)])
-        body, more = b"", True
-        while more:
+        body = bytearray()
+
+        async def capture_request():
             message = await receive()
-            body += message.get("body", b"")
-            more = message.get("more_body", False)
-        replayed = False
+            if message["type"] == "http.request":
+                body.extend(
+                    message.get("body", b"")[: max(0, MAX_REQUEST + 1 - len(body))]
+                )
+            return message
 
-        async def replay():
-            nonlocal replayed
-            if replayed:
-                return await receive()
-            replayed = True
-            return {"type": "http.request", "body": body, "more_body": False}
-
-        try:
-            request = json.loads(body)
-            method = request.get("method")
-        except (ValueError, AttributeError):
-            request, method = {}, None
-        if method in ("events/subscribe", "events/unsubscribe", "server/discover"):
-            await app(scope, replay, diagnose(request, send))
-            return
-        if method != "tools/list":
-            await app(scope, replay, send)
-            return
-        # A no-auth connection is rejected while a tool still declares an OAuth2 security scheme.
         start, chunks = None, []
 
-        async def rewrite(message):
+        async def capture_response(message):
             nonlocal start
             if message["type"] == "http.response.start":
                 start = message
+                return
+            if message["type"] != "http.response.body":
+                await send(message)
                 return
             chunks.append(message.get("body", b""))
             if message.get("more_body", False):
                 return
             payload = b"".join(chunks)
             try:
-                data = json.loads(payload)
-                for tool in data["result"]["tools"]:
-                    tool["securitySchemes"] = [{"type": "noauth"}]
-                payload = json.dumps(data).encode()
-            except (ValueError, KeyError, TypeError):
-                pass
+                request, reply = json.loads(body), json.loads(payload)
+            except (ValueError, UnicodeDecodeError):
+                request, reply = {}, {}
+            method = request.get("method") if isinstance(request, dict) else None
+            if method in ("events/subscribe", "events/unsubscribe", "server/discover"):
+                record = {"method": method, "params": shape(request.get("params", {}))}
+                err = reply.get("error") if isinstance(reply, dict) else None
+                record["result"] = "error" if err else "ok"
+                if isinstance(err, dict):
+                    messages = {
+                        "Invalid Request",
+                        "Invalid params",
+                        "Method not found",
+                        "Callback endpoint verification failed",
+                        "Access revoked",
+                        "Internal error",
+                    }
+                    record["error"] = {
+                        "code": err.get("code")
+                        if type(err.get("code")) is int
+                        else None,
+                        "message": err.get("message")
+                        if err.get("message") in messages
+                        else "other",
+                    }
+                    if err.get("code") == -32015:
+                        record["failed_step"] = "verification"
+                note(record)
+            if method == "tools/list" and start["status"] == 200:
+                try:
+                    for tool in reply["result"]["tools"]:
+                        tool["securitySchemes"] = [{"type": "noauth"}]
+                    payload = json.dumps(reply).encode()
+                except (KeyError, TypeError):
+                    pass
             headers = [
                 (k, str(len(payload)).encode() if k == b"content-length" else v)
                 for k, v in start["headers"]
@@ -180,7 +196,8 @@ def create_spike(settings, *, allow_bearer=False, ingress_token=None, **kwargs):
             await send(dict(start, headers=headers))
             await send({"type": "http.response.body", "body": payload})
 
-        await app(scope, replay, rewrite)
+        # The form's credential-less arm still goes through phase1's issued-token verifier.
+        await app(scope, capture_request, capture_response)
 
     return inject
 

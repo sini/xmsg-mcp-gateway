@@ -5,6 +5,7 @@ import importlib.util
 import json
 import secrets
 import socket
+import ssl
 import subprocess
 import sys
 import threading
@@ -20,10 +21,13 @@ import uvicorn
 from pydantic import ValidationError
 from standardwebhooks import Webhook
 from standardwebhooks.webhooks import WebhookVerificationError
+from starlette.testclient import TestClient
 
+import phase1.events
 from phase1.auth import OAuth
 from phase1.config import Settings
 from phase1.store import Store
+from phase1.transport import signed_post
 from phase1.worker import Worker
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "step0_spike.py"
@@ -74,6 +78,181 @@ def test_local_test_profile_stays_loopback_only():
             exposure="public-https",
             public_url="https://mcp.example/mcp",
         )
+
+
+def ingress_probe(tmp_path, monkeypatch, http=None):
+    # Isolate the inherited example's global tracing while measuring its replacement.
+    monkeypatch.setattr(phase1.events, "signed_post", signed_post)
+    spike = example()
+    store = Store(tmp_path / "state")
+    token = store.issue()
+    settings = spike.SpikeSettings(state_dir=store.root, auth_mode="bearer")
+    app = spike.create_spike(
+        settings, allow_bearer=True, ingress_token=token, store=store, http=http
+    )
+    return TestClient(app, base_url="http://127.0.0.1"), store, token
+
+
+def post_rpc(client, method, params=None, **kwargs):
+    return client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}},
+        **kwargs,
+    )
+
+
+def test_no_auth_ingress_uses_issued_credential_and_preserves_wrong_bearer_401(
+    tmp_path, monkeypatch
+):
+    client, store, token = ingress_probe(tmp_path, monkeypatch)
+    original = store.authenticate
+    checked = []
+
+    def authenticate(value, oauth):
+        checked.append(value)
+        return original(value, oauth)
+
+    monkeypatch.setattr(store, "authenticate", authenticate)
+    with client:
+        response = post_rpc(
+            client, "tools/call", {"name": "xmsg_identity", "arguments": {}}
+        )
+        assert response.status_code == 200
+        assert (
+            response.json()["result"]["structuredContent"]["identity"]
+            == "dot@phase1-synthetic"
+        )
+        assert checked == [token], (
+            "phase1 must authenticate the injected issued credential"
+        )
+        assert (
+            post_rpc(
+                client, "ping", headers={"Authorization": "Bearer wrong"}
+            ).status_code
+            == 401
+        )
+        assert checked[-1] == "wrong", "an explicit credential must never be replaced"
+        store.revoke(token)
+        assert post_rpc(client, "ping").status_code == 401
+
+
+@pytest.mark.parametrize("mode,bind", [("oauth", "127.0.0.1"), ("bearer", "::1")])
+def test_no_auth_ingress_requires_bearer_and_ipv4_loopback(tmp_path, mode, bind):
+    spike = example()
+    settings = spike.SpikeSettings(state_dir=tmp_path, auth_mode=mode, bind=bind)
+    with pytest.raises(ValueError, match="requires bearer mode on 127.0.0.1"):
+        spike.create_spike(
+            settings, allow_bearer=True, ingress_token="fixture-issued-token"
+        )
+
+
+def test_no_auth_ingress_tracing_does_not_replace_reference_signer(
+    tmp_path, monkeypatch
+):
+    original = phase1.events.signed_post
+    client, _store, _token = ingress_probe(tmp_path, monkeypatch)
+    with client:
+        assert phase1.events.signed_post is original
+
+
+def test_no_auth_ingress_lists_noauth_tools_only_for_credentialless_arm(
+    tmp_path, monkeypatch
+):
+    client, _store, token = ingress_probe(tmp_path, monkeypatch)
+    with client:
+        tools = post_rpc(client, "tools/list").json()["result"]["tools"]
+        assert tools and all(
+            t["securitySchemes"] == [{"type": "noauth"}] for t in tools
+        )
+        secured = post_rpc(
+            client, "tools/list", headers={"Authorization": "Bearer " + token}
+        )
+        assert (
+            secured.json()["result"]["tools"][0]["securitySchemes"][0]["type"]
+            == "oauth2"
+        )
+
+
+def test_no_auth_ingress_malformed_subscription_records_shapes_not_values(
+    tmp_path, monkeypatch
+):
+    client, store, _token = ingress_probe(tmp_path, monkeypatch)
+    key = "whsec_" + base64.b64encode(secrets.token_bytes(32)).decode()
+    url = "https://callback-canary.example/private-path?private=value"
+    cursor = "private-cursor-value"
+    with client:
+        response = post_rpc(
+            client,
+            "events/subscribe",
+            {
+                "name": "xmsg.message.received.v1",
+                "arguments": {},
+                "delivery": {"mode": "webhook", "url": url, "secret": key},
+                "cursor": cursor,
+            },
+        )
+        assert response.json()["error"]["code"] == -32602
+    file = store.root / "step0-diagnostics.jsonl"
+    raw = file.read_text()
+    record = json.loads(raw.splitlines()[-1])
+    assert record["params"]["delivery"] == {
+        "mode": "str",
+        "url": "str",
+        "secret": "str",
+    }
+    assert record["params"]["cursor"] == "str"
+    assert record["error"]["code"] == -32602
+    assert not record.get("callback"), "malformed subscriptions must record shape only"
+    for private in (url, "callback-canary", "private-path", key, cursor):
+        assert private not in raw
+    assert file.stat().st_mode & 0o077 == 0
+
+
+@pytest.mark.parametrize(
+    "failure,step",
+    [
+        ("refused", "http_status"),
+        ("tls", "tls"),
+        ("json", "response_json"),
+        ("challenge", "challenge_echo"),
+    ],
+)
+def test_no_auth_ingress_callback_diagnostics_name_failing_step_without_content(
+    tmp_path, monkeypatch, failure, step
+):
+    canary = "private-callback-content"
+
+    class CallbackFailure:
+        def post(self, url, body, headers):
+            if failure == "tls":
+                raise ssl.SSLCertVerificationError(f"{url} {canary}")
+            if failure == "refused":
+                return 403, canary.encode()
+            if failure == "json":
+                return 200, canary.encode()
+            return 200, json.dumps({"challenge": canary}).encode()
+
+    client, store, _token = ingress_probe(tmp_path, monkeypatch, CallbackFailure())
+    key = "whsec_" + base64.b64encode(secrets.token_bytes(32)).decode()
+    with client:
+        result = post_rpc(
+            client,
+            "events/subscribe",
+            {
+                "name": "xmsg.message.received.v1",
+                "arguments": {},
+                "delivery": {"mode": "webhook", "url": CALLBACK, "secret": key},
+                "cursor": None,
+            },
+        ).json()
+        assert result["error"]["data"]["reason"] == "challenge_failed"
+    raw = (store.root / "step0-diagnostics.jsonl").read_text()
+    records = [json.loads(line) for line in raw.splitlines()]
+    assert any(
+        r.get("step") == "callback_post" and r.get("failed_step") == step
+        for r in records
+    )
+    assert canary not in raw and key not in raw and CALLBACK not in raw
 
 
 @contextmanager

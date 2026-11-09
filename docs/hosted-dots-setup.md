@@ -61,7 +61,7 @@ Both configurations below use `http://127.0.0.1:8765/mcp`; use that URL in step 
 config and command line. Access logging is disabled; the observation procedure below uses content-free
 status rather than raw requests.
 
-### Bearer arm: explicit opt-in
+### No Authentication arm: tunnel-only example ingress
 
 Create `.state/step0-bearer.toml` with this nonsecret configuration:
 
@@ -72,26 +72,45 @@ bind = "127.0.0.1"
 port = 8765
 ```
 
-Issue a temporary credential into an owner-only file, then start the server:
+If the trusted CA bundle is not at Python/OpenSSL's default location, set its path before starting the
+server. The hosted probe on NixOS with uv's standalone Python failed callback verification because
+`/etc/ssl/cert.pem` was absent; this resolved it:
+
+```sh
+export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+```
+
+Use the trusted CA bundle appropriate to the host; keep TLS certificate verification enabled. This also
+applies to the OAuth arm below. A missing CA bundle is a local TLS configuration failure, not evidence that
+the callback endpoint rejected the subscription.
+
+Issue a temporary credential into an owner-only file, then start the tunnel ingress:
 
 ```sh
 uv run --locked python examples/step0_spike.py --config .state/step0-bearer.toml \
   --allow-bearer issue-bearer --output .state/step0-bearer-token
 uv run --locked python examples/step0_spike.py --config .state/step0-bearer.toml \
-  --allow-bearer serve
+  --allow-bearer serve --no-auth-ingress .state/step0-bearer-token
 ```
 
 Issuance refuses an existing output file. The token is never printed; the server stores its digest.
-Enter the file's contents only in the supported secure connection form in step 5. Configuring bearer mode
-without `--allow-bearer` refuses startup. This changes no reference-server default or local-test constraint.
-The inherited tool metadata declares OAuth2 even in bearer mode: this arm tests bearer HTTP auth, while
-the hosted run must establish whether the installation actually accepts and uses it.
+The observed ChatGPT form offers **OAuth** or **No Authentication**, with no bearer/API-key entry. Select
+**No Authentication** for this arm. `--no-auth-ingress` accepts credential-less tunnel requests and supplies
+the issued token internally, so the reference server still authenticates every request. An explicitly
+supplied wrong bearer remains unauthorized. `tools/list` declares `noauth` for this ingress; an OAuth2
+security scheme caused the form to reject the No Authentication connection.
+
+This flag requires bearer mode and `bind = "127.0.0.1"`; it belongs only to this synthetic tunnel probe.
+It changes no reference-server default, local-test constraint or shipped Rust authentication. For an HTTP
+bearer control outside the hosted form, omit `--no-auth-ingress` and supply the token through the client's
+secure authentication mechanism. The hosted form has no place to enter it.
+
 
 After check 3 succeeds, leave the intended conversation idle. In a second terminal, trigger check 4:
 
 ```sh
 uv run --locked python examples/step0_spike.py --config .state/step0-bearer.toml \
-  --allow-bearer emit hosted-bearer-one
+  --allow-bearer emit hosted-noauth-one
 uv run --locked phase1 --state .state/step0-bearer status
 ```
 
@@ -115,9 +134,9 @@ uv run --locked python examples/step0_spike.py --config .state/step0-oauth.toml 
 uv run --locked phase1 --state .state/step0-oauth status
 ```
 
-Both arms advertise `xmsg_identity` and `xmsg.message.received.v1`. The subscriber supplies the HTTPS callback
-and its distinct signing secret. The server verifies the signed callback challenge before delivery. Emitting the same
-occurrence ID deduplicates it; use a new ID for another trial. Callback validation remains HTTPS/public-only
+Both hosted arms advertise `xmsg_identity` and `xmsg.message.received.v1`. The subscriber supplies the HTTPS
+callback and its distinct signing secret. The server verifies the signed callback challenge before delivery.
+Emitting the same occurrence ID deduplicates it; use a new ID for another trial. Callback validation remains HTTPS/public-only
 with no redirects. Never substitute the fixture's loopback callback transport for a hosted run.
 
 ## 4. Run `tunnel-client`
@@ -141,20 +160,40 @@ Keep it running for the whole test: discovery and every call fail while it is di
 
 1. Open ChatGPT → **Plugins** → **+** → **Add custom MCP server**.
 2. Under **Connection**, choose **Tunnel**, then select the tunnel or paste its `tunnel_id`. No URL is entered.
-3. **Authentication.** Record every option the form offers; this list is one of the run's results.
-   - **Bearer / API key, if offered:** start the example in bearer mode (section 3) and enter its token in
-     the form. This path needs no authorization server.
-   - **OAuth:** the authorization server is *not* carried by the tunnel. The browser must reach it publicly,
-     and it must meet the exact-audience rule in [provider setup](provider-setup.md). If no such issuer is
-     available yet, stop at this step and record "OAuth only, no issuer". That is a valid result.
+3. **Authentication.** The observed form offers **OAuth** and **No Authentication** only; there is no bearer
+   or API-key field. Record the options shown by the installation being tested.
+   - **No Authentication:** use the tunnel-only ingress command in section 3. The temporary bearer stays in
+     its owner-only token file and is injected internally; do not paste it into another field.
+   - **OAuth:** use the existing provider path. The authorization server is *not* carried by the tunnel.
+     The browser must reach it publicly, and it must meet the exact-audience rule in
+     [provider setup](provider-setup.md). If no such issuer is available, record that OAuth could not be
+     tested; the No Authentication arm can still be measured independently.
 4. Accept the risk warning and select **Create as a plugin**. Record the plugin's connection ID
    (`plugin_asdk_app…`).
 
 ## 6. What to observe
 
 For each check, record pass or fail, the time, and content-free status from the matching state directory
-(section 3). `xmsg_identity` also returns subscription health. Do not enable raw request logging to collect
-callback URLs or credentials.
+(section 3). `xmsg_identity` also returns subscription health. For the No Authentication ingress, inspect
+both the example's shape-only diagnostics and reference status:
+
+```sh
+tail -n 20 .state/step0-bearer/step0-diagnostics.jsonl
+uv run --locked phase1 --state .state/step0-bearer status
+```
+
+The owner-only diagnostics file records field shapes, JSON-RPC outcome and the callback step that failed.
+For a valid callback request it can identify the scheme and host, without the full URL, secret or cursor.
+Malformed subscription parameters are recorded by shape only. Read diagnostics plus status; never enable
+raw request logs or share request bodies, callback URLs, credentials or webhook headers.
+
+Two discovery/transport log lines were harmless in the observed run:
+
+- ChatGPT first sent MCP 2.0 HTTP `server/discover`; the reference returned HTTP 400 / JSON-RPC `-32601`,
+  then ChatGPT fell back to `initialize`. That initial response does not by itself fail connection.
+- `tunnel-client` logged `unsupported channel "harpoon"` on its OAuth-derived HTTP-target channel. With no
+  OAuth targets configured, it did not prevent this tunnel arm from working. Investigate an actual failed
+  check below rather than treating that line alone as a failure.
 
 | # | check | passes when |
 |---|---|---|
@@ -175,12 +214,16 @@ still requires failure injection before commit, before ACK, before webhook and a
 
 ## 7. Fallback: public HTTPS
 
-Use this only if section 6 fails through the tunnel. Put the example behind a TLS reverse proxy at a public
-hostname (`exposure = "public-https"`, `public_url = "https://<host>/mcp"`; see
+Use this only if section 6 fails through the tunnel. Put the OAuth example behind a TLS reverse proxy at a
+public hostname (`exposure = "public-https"`, `public_url = "https://<host>/mcp"`; see
 `config.oauth.example.toml`), retaining the loopback listener. The public hostname must match the config's
-resource or public URL for Host validation. Use OAuth, or the example-only bearer arm with explicit
-`--allow-bearer` if the installation offers supported secure entry. Add the server in ChatGPT with its URL
-instead of a tunnel, and repeat section 6. Remove the public exposure when the run ends.
+resource or public URL for Host validation. Add the server in ChatGPT with its URL instead of a tunnel,
+select OAuth, and repeat section 6. If a compatible public issuer is unavailable, record that the fallback
+could not be tested. Remove the public exposure when the run ends.
+
+Do not expose `--no-auth-ingress` through the public reverse proxy. It is the synthetic tunnel-only arm,
+not a public authentication mechanism. The example's direct bearer HTTP control remains available to
+clients with a supported secure bearer entry, but the observed ChatGPT form does not offer one.
 
 ## 8. Tear down
 
@@ -192,4 +235,5 @@ instead of a tunnel, and repeat section 6. Remove the public exposure when the r
 
 Report these results, with no secrets: which authentication options the form offered and which one worked;
 the pass/fail table from section 6, with times; whether the tunnel or the fallback carried it; the
-`tunnel-client` version; and any error text that ChatGPT or the server showed.
+`tunnel-client` version; and content-free diagnostic steps or error codes. Do not attach raw requests or
+credential-bearing error text.
