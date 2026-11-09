@@ -4,8 +4,10 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -18,6 +20,8 @@ IDLE = "idle_keepalive_is_bounded_by_the_next_header_deadline"
 ACCEPT = "accept_errors_recover_after_descriptor_exhaustion"
 SHUTDOWN = "shutdown_is_not_delayed_by_accept_backoff"
 SOURCE = (ROOT / "src/serving.rs").read_text()
+CELL_BUDGET = 20
+HANG_CLASS = {"uninterruptible-backoff"}
 accept_start = SOURCE.index(
     "                        Err(error) => {",
     SOURCE.index("accepted = listener.accept()"),
@@ -74,7 +78,59 @@ def digest(file):
     return hashlib.sha256(file.read_bytes()).hexdigest()
 
 
+def run_cell(args, *, cwd, env, budget=CELL_BUDGET):
+    started = time.monotonic()
+    child = subprocess.Popen(
+        args,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    timed_out = False
+    try:
+        stdout, stderr = child.communicate(timeout=budget)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        # The test may have exited while an owned gateway still holds its output pipes.
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        stdout, stderr = child.communicate(timeout=5)
+    return {
+        "status": child.returncode,
+        "output": stdout + stderr,
+        "duration_seconds": time.monotonic() - started,
+        "timed_out": timed_out,
+    }
+
+
+def cell_verdict(
+    result, *, label, diagnostic, nonce, baseline_seconds, budget=CELL_BUDGET
+):
+    output = result["output"]
+    assert output.count(f"header-timeout nonce={nonce}") == 1, output
+    if result["timed_out"]:
+        assert label in HANG_CLASS, f"{label}: non-hang cell timed out (harness error)"
+        assert baseline_seconds is not None and baseline_seconds < budget / 2, (
+            f"{label}: missing or slow baseline cannot justify a timeout kill"
+        )
+        return "killed by timeout"
+    if diagnostic is None:
+        assert result["status"] == 0, output
+        assert result["duration_seconds"] < budget / 2, (
+            "control not well inside cell budget"
+        )
+        return "green"
+    assert result["status"] != 0 and diagnostic in output, output
+    return "red"
+
+
 def main():
+    baseline_durations = {}
     with tempfile.TemporaryDirectory(prefix="gateway-header-mutants-") as temporary:
         for label, needle, replacement, cells in CASES:
             nonce = f"{label}-{uuid.uuid4()}"
@@ -160,22 +216,27 @@ def main():
             for name, diagnostic in cells:
                 args = [executable, "--exact", name, "--nocapture"]
                 invocation_evidence(args)
-                result = subprocess.run(
-                    args,
-                    cwd=tree,
-                    env=environment,
-                    capture_output=True,
-                    text=True,
-                    timeout=20,
+                result = run_cell(args, cwd=tree, env=environment)
+                verdict = cell_verdict(
+                    result,
+                    label=label,
+                    diagnostic=diagnostic,
+                    nonce=nonce,
+                    baseline_seconds=baseline_durations.get(name),
                 )
-                output = result.stdout + result.stderr
-                assert output.count(f"header-timeout nonce={nonce}") == 1, output
-                if diagnostic is not None:
-                    assert result.returncode != 0 and diagnostic in output, output
-                else:
-                    assert result.returncode == 0, output
-                results.append({"test": name, "status": result.returncode})
-                print(output, flush=True)
+                if label == "control":
+                    baseline_durations[name] = result["duration_seconds"]
+                results.append(
+                    {
+                        "test": name,
+                        "status": result["status"],
+                        "verdict": verdict,
+                        "duration_seconds": result["duration_seconds"],
+                        "baseline_duration_seconds": baseline_durations.get(name),
+                        "budget_seconds": CELL_BUDGET,
+                    }
+                )
+                print(result["output"], flush=True)
             print(
                 json.dumps(
                     {
