@@ -78,8 +78,8 @@ CASES = [
     ),
     (
         "grant-recheck",
-        "store.authorize(&identity)",
-        'Ok::<Authorization, GrantError>(Authorization { grant_id: "cached".into(), revision: 2 })',
+        "let grant = store.authorize(&identity)?;",
+        'let grant = Ok::<Authorization, GrantError>(Authorization { grant_id: "cached".into(), revision: 2 })?;',
         "grant_is_rechecked_after_discovery",
         "disabled grant was accepted",
     ),
