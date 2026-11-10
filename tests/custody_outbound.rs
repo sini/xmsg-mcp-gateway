@@ -108,6 +108,22 @@ async fn same_request_reuses_receipt_and_changed_payload_conflicts() {
         }
     }
     store.migrate_outbound().unwrap();
+    assert!(
+        matches!(
+            dispatch(
+                &mut store,
+                &Endpoint::from_registered(&service).unwrap(),
+                &verifier,
+                "good-token",
+                "private-bus",
+                &original,
+                &limits(),
+            )
+            .await,
+            Err(Error::MigrationRequired)
+        ),
+        "outbound dispatch accepted an unmigrated store: retirement required at schema 3"
+    );
     store.migrate_retirement().unwrap();
     assert!(
         matches!(
@@ -139,6 +155,29 @@ async fn same_request_reuses_receipt_and_changed_payload_conflicts() {
             },
         )
         .unwrap();
+    let metadata = rusqlite::Connection::open(&fixture.store_file).unwrap();
+    metadata.pragma_update(None, "user_version", 2).unwrap();
+    assert!(
+        matches!(
+            dispatch(
+                &mut store,
+                &Endpoint::from_registered(&service).unwrap(),
+                &verifier,
+                "good-token",
+                "private-bus",
+                &request("invalid-declared-version", &target, "must never publish"),
+                &limits(),
+            )
+            .await,
+            Err(Error::MigrationRequired)
+        ),
+        "outbound dispatch accepted an unmigrated store: declared version below outbound floor"
+    );
+    assert!(
+        receiver.poll(0).await.unwrap().is_none(),
+        "invalid declared schema published work"
+    );
+    metadata.pragma_update(None, "user_version", 3).unwrap();
     let first = dispatch(
         &mut store,
         &Endpoint::from_registered(&service).unwrap(),
