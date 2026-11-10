@@ -170,6 +170,47 @@ impl Prepared {
             peers.to_string().as_bytes(),
         );
     }
+    #[allow(dead_code)]
+    pub async fn launch_leaf(self, binary: &Path) -> Node {
+        let notify =
+            tokio::net::UnixDatagram::bind(self.temp.path().join("run/notify.sock")).unwrap();
+        let mut launch = command(
+            binary,
+            self.temp.path(),
+            None,
+            true,
+            self.reply_ttl_secs,
+            self.max_body_bytes,
+        );
+        launch
+            .args(["--leaf", "--listen", "127.0.0.1:0", "--leaf-principal"])
+            .arg(format!("svc:{}", self.config.service))
+            .arg("--leaf-register-sock")
+            .arg(&self.config.register_socket)
+            .arg("--peers-file")
+            .arg(self.temp.path().join("peers.json"));
+        let mut node = Node {
+            config: self.config,
+            child: launch.spawn().unwrap(),
+            _temp: self.temp,
+            listener: None,
+            notify: Some(notify),
+            reply_ttl_secs: self.reply_ttl_secs,
+            max_body_bytes: self.max_body_bytes,
+            service_executable: std::env::current_exe().unwrap(),
+            extra_service_executables: Vec::new(),
+        };
+        node.ready().await;
+        assert!(
+            node.config.agent_socket.exists(),
+            "leaf must bind agent.sock"
+        );
+        assert!(fs::read_dir(node._temp.path().join("sessions"))
+            .unwrap()
+            .next()
+            .is_none());
+        node
+    }
     pub async fn launch(self, binary: &Path) -> Node {
         self.launch_as(binary, &std::env::current_exe().unwrap())
             .await

@@ -776,10 +776,10 @@ mod reservation_time_tests {
             .find_map(|line| line.strip_prefix("revision = "))
             .expect("missing reviewed xmsg revision");
         assert_eq!(
-            revision, "\"7d9d1ed3f7c37c3433a95c65570892736fd914ab\"",
+            revision, "\"cfdbe265e496a5fa3a68863f266c8577928a5e35\"",
             "review the node's idempotency retention boundary after a pin change"
         );
-        // Reviewed xmsg 7d9d1ed storage.rs:1088–1102 keeps created_at >= now - TTL;
+        // Reviewed xmsg cfdbe265 storage.rs:1088–1102 keeps created_at >= now - TTL;
         // purge_idempotency_keys at 1255–1264 removes only created_at < now - TTL.
         for nanos in [1, 999_999_999] {
             for ttl in [1, 86_400] {
