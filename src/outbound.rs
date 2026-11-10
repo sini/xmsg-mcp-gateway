@@ -549,9 +549,9 @@ pub async fn list(
     arguments.validate()?;
     let store_file = store.file.clone();
     {
-        let store = Store::open_for_dispatch(&store_file)?;
-        store.require_outbound_ready()?;
-        store.require_retirement_ready()?;
+        let list_store = Store::open_for_dispatch(&store_file)?;
+        list_store.require_outbound_ready()?;
+        list_store.require_retirement_ready()?;
     }
     let started = std::time::Instant::now();
     let verified = tokio::time::timeout(limits.timeout, verifier.verify(token))
@@ -561,11 +561,11 @@ pub async fn list(
         return Err(Error::Denied);
     }
     let policy = {
-        let store = Store::open_for_dispatch(&store_file)?;
-        store.require_outbound_ready()?;
-        store.require_retirement_ready()?;
-        let authority = store.authorize(&verified)?;
-        store.outbound_policy(&authority.grant_id)?
+        let list_store = Store::open_for_dispatch(&store_file)?;
+        list_store.require_outbound_ready()?;
+        list_store.require_retirement_ready()?;
+        let authority = list_store.authorize(&verified)?;
+        list_store.outbound_policy(&authority.grant_id)?
     };
     let permission = policy.send.as_ref().ok_or(Error::Denied)?;
     if !verifier.requires_scope(&permission.required_scope) {
