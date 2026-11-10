@@ -115,6 +115,7 @@ struct Configuration {
     events: Option<EventsConfiguration>,
     #[serde(default, deserialize_with = "present_messaging")]
     messaging: Option<MessagingConfiguration>,
+    broker: Option<crate::broker::Config>,
 }
 
 fn default_header_read_timeout_ms() -> u64 {
@@ -162,6 +163,7 @@ struct App {
     scopes: Vec<String>,
     challenge: HeaderValue,
     messaging: Option<Messaging>,
+    broker: Option<crate::broker::Config>,
 }
 
 fn default_max_connections() -> usize {
@@ -227,6 +229,11 @@ impl Serving {
                 .ok_or(StartupError::RequestBodyBudget)?;
             if config.max_request_body_bytes < minimum {
                 return Err(StartupError::RequestBodyBudget);
+            }
+        }
+        if let Some(broker) = &config.broker {
+            if broker.origin().is_none() || config.messaging.is_none() || config.events.is_none() {
+                return Err(ConfigurationError.into());
             }
         }
         let mut metadata_url =
@@ -366,6 +373,7 @@ impl Serving {
             scopes,
             challenge,
             messaging,
+            broker: config.broker,
         });
         let mut router = Router::new().route("/mcp", any(mcp));
         for path in BTreeSet::from([
@@ -684,8 +692,19 @@ fn identity_spoof(body: &Value) -> bool {
                     | "client_id"
             )
         })
-    }) || reserved_identity(&body["params"]["arguments"])
-        || reserved_identity(&body["params"]["_meta"])
+    }) || if body["method"] == "tools/call"
+        && crate::broker::NAMES
+            .iter()
+            .any(|name| body["params"]["name"] == *name)
+    {
+        let mut arguments = body["params"]["arguments"].clone();
+        if let Some(fields) = arguments.as_object_mut() {
+            fields.remove("files");
+        }
+        reserved_identity(&arguments)
+    } else {
+        reserved_identity(&body["params"]["arguments"])
+    } || reserved_identity(&body["params"]["_meta"])
 }
 
 fn rpc_result(id: &Value, result: Value) -> Response {
@@ -721,7 +740,7 @@ fn permission_enabled(app: &App, permission: &Option<outbound::Permission>) -> b
     })
 }
 
-fn tools(app: &App, policy: &Policy) -> Value {
+fn tools(app: &App, policy: &Policy, grant: &Authorization) -> Value {
     let mut tools = vec![
         json!({"name":"xmsg_identity","description":"Read the authenticated gateway identity.",
         "inputSchema":{"type":"object","properties":{},"additionalProperties":false},
@@ -772,7 +791,128 @@ fn tools(app: &App, policy: &Policy) -> Value {
             tools.push(json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":{argument:{"type":"string","minLength":1,"maxLength":4096}},"required":[argument],"additionalProperties":false},"annotations":{"readOnlyHint":read_only,"destructiveHint":false,"openWorldHint":false,"idempotentHint":true},"securitySchemes":[{"type":"oauth2","scopes":app.scopes}]}));
         }
     }
+    if broker_permitted(app, policy, grant) {
+        for mut tool in crate::broker::catalog() {
+            tool["securitySchemes"] = json!([{"type":"oauth2","scopes":app.scopes}]);
+            tools.push(tool);
+        }
+    }
     json!({"tools":tools})
+}
+
+fn broker_permitted(app: &App, policy: &Policy, grant: &Authorization) -> bool {
+    match (&app.broker, &app.events, &app.messaging) {
+        (Some(config), Some(events), Some(_)) => {
+            config.permitted(policy, grant, &events.selected_grant, &app.verifier)
+        }
+        _ => false,
+    }
+}
+
+async fn lookup_broker(
+    app: Arc<App>,
+    identity: Arc<VerifiedIdentity>,
+    bus: String,
+    mailbox: String,
+    request_id: String,
+) -> Result<Option<Value>, outbound::Error> {
+    tokio::task::spawn_blocking(move || {
+        let store = Store::open_for_dispatch(&app.grant_store)?;
+        let events = app.events.as_ref().ok_or(outbound::Error::Configuration)?;
+        let config = app.broker.as_ref().ok_or(outbound::Error::Configuration)?;
+        let messaging = app
+            .messaging
+            .as_ref()
+            .ok_or(outbound::Error::Configuration)?;
+        crate::broker::lookup(
+            &store,
+            &identity,
+            &bus,
+            &mailbox,
+            &events.selected_grant,
+            config,
+            &request_id,
+            messaging.limits.max_framed_bytes,
+            &app.verifier,
+        )
+    })
+    .await
+    .map_err(|_| outbound::Error::Configuration)?
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn broker_call(
+    app: Arc<App>,
+    token: String,
+    id: Value,
+    request: outbound::SendArguments,
+    mut store: Store,
+    progress: Arc<OnceLock<PendingReply>>,
+    deadline: tokio::time::Instant,
+) -> Response {
+    let pending = PendingReply {
+        id: id.clone(),
+        request_id: request.request_id.as_str().to_owned(),
+    };
+    let _ = progress.set(pending.clone());
+    let Some(messaging) = &app.messaging else {
+        return unavailable();
+    };
+    let snapshot = match messaging.session.snapshot() {
+        Ok(s) => s,
+        Err(_) => return unavailable(),
+    };
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let task_app = app.clone();
+    let broker_work = async move {
+        let result=async {
+            let messaging=task_app.messaging.as_ref().ok_or(outbound::Error::Configuration)?;
+            let events=task_app.events.as_ref().ok_or(outbound::Error::Configuration)?;
+            let request_id=request.request_id.as_str().to_owned();
+            let result=outbound::dispatch_selected(&mut store,&snapshot.endpoint,&task_app.verifier,&token,&snapshot.bus,&outbound::Request::Send(request),&messaging.limits,&events.selected_grant).await?;
+            let (state,receipt)=match result {
+                Outcome::Confirmed(receipt)=>("pending",Some(receipt)),
+                Outcome::Pending=>("pending",None),
+                Outcome::Unknown|Outcome::ExpiredUnknown=>("unknown",None),
+            };
+            if receipt.is_some() {
+                let identity=Arc::new(task_app.verifier.verify(&token).await?);
+                loop {
+                    let value=lookup_broker(task_app.clone(),identity.clone(),snapshot.bus.clone(),snapshot.endpoint.sender().to_owned(),request_id.clone()).await?;
+                    if value.is_some() {
+                        let current=Arc::new(task_app.verifier.verify(&token).await?);
+                        if let Some(value)=lookup_broker(task_app.clone(),current,snapshot.bus.clone(),snapshot.endpoint.sender().to_owned(),request_id.clone()).await? {
+                            return Ok(json!({"request_id":request_id,"submission":"confirmed","receipt":receipt,"broker":value}));
+                        }
+                    }
+                    if tokio::time::Instant::now()>=deadline {break;}
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+            Ok::<Value,outbound::Error>(json!({"state":state,"request_id":request_id,"receipt":receipt,"retry":"use the same request_id and identical arguments; status is read-only"}))
+        }.await;
+        let _ = send.send(result);
+    };
+    {
+        let mut tasks = app.dispatch_tasks.lock().await;
+        while tasks.try_join_next().is_some() {}
+        tasks.spawn(broker_work);
+    }
+    match tokio::time::timeout_at(deadline, receive).await {
+        Ok(Ok(Ok(value))) => rpc_result(&id, tool_result(value)),
+        Ok(Ok(Err(outbound::Error::Denied | outbound::Error::Authority(GrantError::Denied)))) => {
+            StatusCode::FORBIDDEN.into_response()
+        }
+        Ok(Ok(Err(outbound::Error::Authentication(error)))) => auth_response(error, &app.challenge),
+        Ok(Ok(Err(outbound::Error::Conflict))) => {
+            rpc_error(&id, -32009, "request_id payload conflict")
+        }
+        Ok(Ok(Err(outbound::Error::Oversized))) => {
+            rpc_error(&id, -32602, "complete outbound text exceeds bound")
+        }
+        Ok(Ok(Err(_))) => unavailable(),
+        _ => pending_response(&pending),
+    }
 }
 
 async fn messaging_call(
@@ -894,6 +1034,7 @@ async fn mcp_request(
     request: Request,
     progress: Arc<OnceLock<PendingReply>>,
 ) -> Response {
+    let broker_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     if !permitted_request(&app, &request) {
         return StatusCode::FORBIDDEN.into_response();
     }
@@ -952,11 +1093,36 @@ async fn mcp_request(
     } else {
         axum::body::Bytes::new()
     };
-    let identity = match app.verifier.verify(&token).await {
+    let broker_candidate = serde_json::from_slice::<Value>(&raw)
+        .ok()
+        .is_some_and(|body| {
+            body["method"] == "tools/call"
+                && crate::broker::NAMES
+                    .iter()
+                    .any(|name| body["params"]["name"] == *name)
+        });
+    let verification = async { app.verifier.verify(&token).await };
+    let verified = if broker_candidate {
+        match tokio::time::timeout_at(broker_deadline, verification).await {
+            Ok(value) => value,
+            Err(_) => return unavailable(),
+        }
+    } else {
+        verification.await
+    };
+    let identity = match verified {
         Ok(identity) => Arc::new(identity),
         Err(error) => return auth_response(error, &app.challenge),
     };
-    let authorization = authorize_current(&app, identity.clone()).await;
+    let authorization = authorize_current(&app, identity.clone());
+    let authorization = if broker_candidate {
+        match tokio::time::timeout_at(broker_deadline, authorization).await {
+            Ok(value) => value,
+            Err(_) => return unavailable(),
+        }
+    } else {
+        authorization.await
+    };
     let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(now) => now.as_secs(),
         Err(_) => return unavailable(),
@@ -1043,7 +1209,7 @@ async fn mcp_request(
             match rpc.method.as_str() {
                 "notifications/initialized" => return StatusCode::ACCEPTED.into_response(),
                 "ping" => json!({}),
-                _ => tools(&app, &policy),
+                _ => tools(&app, &policy, &grant),
             }
         }
         "tools/call" => {
@@ -1051,6 +1217,18 @@ async fn mcp_request(
                 Ok(call) => call,
                 Err(_) => return rpc_error(&id, -32602, "Invalid params"),
             };
+            if crate::broker::NAMES.contains(&call.name.as_str()) {
+                if !broker_permitted(&app, &policy, &grant) {
+                    return StatusCode::FORBIDDEN.into_response();
+                }
+                let destination = &app.broker.as_ref().unwrap().destination;
+                let request = match crate::broker::parse(&call.name, call.arguments, destination) {
+                    Ok(request) => request,
+                    Err(_) => return rpc_error(&id, -32602, "Invalid gist arguments"),
+                };
+                return broker_call(app, token, id, request, store, progress, broker_deadline)
+                    .await;
+            }
             if matches!(call.name.as_str(), "xmsg_ack" | "xmsg_message_status") {
                 let Some(events) = &app.events else {
                     return rpc_error(&id, -32004, "Tool not yet available");
@@ -1074,18 +1252,57 @@ async fn mcp_request(
                     Ok(request) => request,
                     Err(_) => return rpc_error(&id, -32602, "Invalid params"),
                 };
+                let broker_request_id = match &request {
+                    recovery::Request::Status(args) => Some(args.request_id.clone()),
+                    _ => None,
+                };
+                let broker_configuration = app.broker.clone();
+                let broker_verifier = app.verifier.clone();
+                let broker_bound = messaging.limits.max_framed_bytes;
+                let status_store_file = app.grant_store.clone();
                 let key = events.key.clone();
                 let selected_grant = events.selected_grant.clone();
+                let subscriber = tracing::dispatcher::get_default(Clone::clone);
                 let result = tokio::task::spawn_blocking(move || {
-                    recovery::dispatch(
-                        store,
+                    tracing::dispatcher::with_default(&subscriber, || {
+                    let mut result = recovery::dispatch(
+                        Store::open_for_dispatch(&status_store_file).map_err(recovery::Error::Authority)?,
                         &identity,
                         &bus,
                         &mailbox,
                         &selected_grant,
                         &key,
                         request,
-                    )
+                    )?;
+                    tracing::debug!(target: "gateway_broker_status_result", "submission status read; validate application result next");
+                    let broker_result = if let (Some(config), Some(id)) =
+                        (&broker_configuration, &broker_request_id)
+                    {
+                        Some(crate::broker::lookup(
+                            &store,
+                            &identity,
+                            &bus,
+                            &mailbox,
+                            &selected_grant,
+                            config,
+                            id,
+                            broker_bound,
+                            &broker_verifier,
+                        ))
+                    } else {
+                        None
+                    };
+
+                    match broker_result {
+                        Some(Ok(Some(value))) => result["broker"] = value,
+                        Some(Err(outbound::Error::Denied)) => {
+                            return Err(recovery::Error::Authority(GrantError::Denied))
+                        }
+                        Some(Err(error)) => return Err(recovery::Error::Broker(error)),
+                        _ => {}
+                    }
+                    Ok::<_, recovery::Error>(result)
+                    })
                 })
                 .await;
                 return match result {
@@ -1093,6 +1310,9 @@ async fn mcp_request(
                     Ok(Err(recovery::Error::Arguments)) => rpc_error(&id, -32602, "Invalid params"),
                     Ok(Err(recovery::Error::Authority(GrantError::Denied))) => {
                         StatusCode::FORBIDDEN.into_response()
+                    }
+                    Ok(Err(recovery::Error::Broker(outbound::Error::Authentication(error)))) => {
+                        auth_response(error, &app.challenge)
                     }
                     _ => unavailable(),
                 };

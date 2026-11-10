@@ -8,7 +8,8 @@ progress tokens are accepted but unused. An optional owner-file messaging sectio
 enables authorized `xmsg_send` and `xmsg_reply`, plus mailbox-scoped
 `xmsg_inbox` and `xmsg_read_message` recovery reads. An optional [Events profile](events.md)
 adds subscription methods, inbound polling, signed callback delivery,
-`xmsg_message_status` and `xmsg_ack`.
+`xmsg_message_status` and `xmsg_ack`. An optional [gist broker](#optional-gist-broker)
+profile exposes typed gist operations through the configured service destination.
 
 The existing xmsg MCP entry point is a harness-associated stdio adapter behind its
 daemon feature. Service-node I/O belongs to the shared `xmsg::client` boundary.
@@ -122,6 +123,41 @@ The ordinary messaging submission/store-wait budget also applies. No Events
 worker starts when the section is absent. See [Events setup](events.md) for the
 exact migration order, key provisioning, subscription lifecycle, bounded retries,
 status, responsibility checkpoints and local owner commands.
+
+## Optional gist broker
+
+An optional owner-file section fixes the broker service destination:
+
+```json
+"broker": { "destination": "genie@example.node" }
+```
+
+This requires both messaging and Events configuration. The selected Events grant
+owns the reply mailbox. The four tools `gist`, `gist_read`, `gist_update` and
+`gist_comment` are advertised only to that current grant when its send policy
+allows the exact broker destination and required scope. Calls repeat those checks
+before publication. Granting a gateway principal send to the broker service grants
+it the broker's gist operations. The broker must separately allowlist the gateway's
+attested service and node; body labels do not identify the caller.
+
+Arguments are the existing typed gist proposal fields plus `request_id`; callers
+cannot choose a destination, identity or credential. Creation defaults to an
+unlisted gist unless `public` is explicitly true. Requests use the ordinary Send
+reservation, framing, complete UTF-8 byte bound and grant ceiling. Retrying requires
+identical arguments and the same request ID. A conflicting payload is refused.
+
+The call waits at most ten seconds including submission, then returns `pending` or
+`unknown`. A timeout or disconnect does not cancel work already submitted. Retry
+the identical call or use the read-only `xmsg_message_status`. A confirmed bus
+receipt proves submission, not that GitHub processed the operation. A completed
+broker result appears under `broker.result`; gist-read data retains `untrusted:
+true` and may exceed the ordinary message preview length. The gateway accepts
+only a retained, currently authorized mailbox reply with the exact correlation
+and configured service/node origin, and validates its Action shape against the
+reserved proposal. Conflicting authenticated result bodies yield `unknown` and
+require reconciliation. Expired or oversized result content is unavailable; it is
+never silently truncated or automatically republished. Earlier grant revisions
+remain held until explicitly released by the owner.
 
 ## Owner configuration
 

@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod auth;
+pub mod broker;
 mod deadline;
 pub mod grants;
 mod reads;
