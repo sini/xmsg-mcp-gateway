@@ -274,7 +274,7 @@ impl Request {
 #[serde(tag = "operation", content = "receipt")]
 pub enum Receipt {
     Send(xmsg::client::SendResult),
-    Reply(xmsg::client::ReplyRecord),
+    Reply(Box<xmsg::client::ReplyRecord>),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -741,7 +741,7 @@ async fn submit(
             .client
             .reply(message_id, &reservation.framed_text, Some(&key))
             .await
-            .map(Receipt::Reply),
+            .map(|reply| Receipt::Reply(Box::new(reply))),
         None => service
             .client
             .send(&target, &reservation.framed_text, Some(&key))
@@ -813,11 +813,11 @@ mod reservation_time_tests {
             .find_map(|line| line.strip_prefix("revision = "))
             .expect("missing reviewed xmsg revision");
         assert_eq!(
-            revision, "\"cfdbe265e496a5fa3a68863f266c8577928a5e35\"",
+            revision, "\"42c6c756895b7d4b56abf95a72bd7e7e12daf232\"",
             "review the node's idempotency retention boundary after a pin change"
         );
-        // Reviewed xmsg cfdbe265 storage.rs:1088–1102 keeps created_at >= now - TTL;
-        // purge_idempotency_keys at 1255–1264 removes only created_at < now - TTL.
+        // Reviewed xmsg 42c6c756 storage.rs:1142–1156 keeps created_at >= now - TTL;
+        // purge_idempotency_keys at 1309–1318 removes only created_at < now - TTL.
         for nanos in [1, 999_999_999] {
             for ttl in [1, 86_400] {
                 let (created_at, retry_until) =

@@ -51,7 +51,7 @@ jobs:
           assert summaries, "no Rust test summaries"
           counts = [tuple(map(int, row)) for row in summaries]
           assert all(not row[1] and not any(row[3:]) for row in counts), "failed or filtered Rust tests"
-          expected_passed, expected_ignored = (172, 81) if sys.platform == "linux" else (168, 2)
+          expected_passed, expected_ignored = (184, 83) if sys.platform == "linux" else (180, 2)
           assert sum(row[0] for row in counts) == expected_passed, "executed Rust test count mismatch"
           assert sum(row[2] for row in counts) == expected_ignored, "private-node deferral count mismatch"
           print(f"Rust test completion guard: {expected_passed} passed; {expected_ignored} private-node cases run in mandatory transport/custody job")
@@ -68,6 +68,11 @@ jobs:
       - name: Identity boundary source mutants
         if: runner.os == 'Linux'
         run: python3 scripts/identity_mutants.py
+      - name: Broker authority and correlation source mutants
+        if: runner.os == 'Linux'
+        run: |
+          python3 scripts/broker_mutants.py | tee broker-mutants.log
+          grep -Fx 'broker-mutants-complete:7/7' broker-mutants.log
       - name: Serving misuse source mutants
         if: runner.os == 'Linux'
         run: python3 scripts/serving_mutants.py
@@ -112,6 +117,12 @@ jobs:
           export XMSG_GATEWAY_BIN="$PWD/.artifacts/transport/$revision/xmsg"
           cargo test --locked --lib serving::events_tests::real_pinned_node_custody_wakes_https_and_recovers_owned_body -- --ignored --exact --nocapture 2>&1 | tee events-transport.log
           grep -Fx 'events-transport-complete:owned-custody-https' events-transport.log
+      - name: Plain MCP send receives an owned attested leaf reply
+        run: |
+          revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')
+          export XMSG_GATEWAY_BIN="$PWD/.artifacts/transport/$revision/xmsg"
+          cargo test --locked --test gateway_leaf_reply mcp_leaf_send_reply_enters_owned_custody_with_attested_origin -- --ignored --exact --nocapture 2>&1 | tee gateway-leaf-reply.log
+          grep -Fx 'gateway-leaf-reply-complete:mcp-owned-custody-attested-origin' gateway-leaf-reply.log
       - name: Isolated federation admission source mutants
         run: |
           python3 scripts/transport_mutants.py | tee transport-mutants.log
@@ -168,3 +179,48 @@ jobs:
           revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')
           export XMSG_GATEWAY_BIN="$PWD/.artifacts/transport/$revision/xmsg"
           python3 scripts/body_checks.py
+
+  broker-bridge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Install pinned Rust toolchain
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          rustup toolchain install "$version" --profile minimal
+          rustup default "$version"
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      - name: Enable bounded Nix builds in the runner user manager
+        run: |
+          ci_uid=$(id -u)
+          runtime_dir="/run/user/$ci_uid"
+          timeout 30s sudo -n systemctl start "user@$ci_uid.service"
+          export XDG_RUNTIME_DIR="$runtime_dir"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus"
+          timeout 15s systemctl --user show-environment >/dev/null
+          timeout 15s systemd-run --user --scope -q -p MemoryMax=12G /usr/bin/true
+          printf 'XDG_RUNTIME_DIR=%s\nDBUS_SESSION_BUS_ADDRESS=unix:path=%s/bus\n' "$runtime_dir" "$runtime_dir" >> "$GITHUB_ENV"
+      - name: Build revision-verified private-node fixtures
+        run: |
+          python3 scripts/transport_compat.py --build-only
+          revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')
+          binary="$PWD/.artifacts/transport/$revision/xmsg"
+          test -x "$binary"
+          test "$("$binary" --version)" = "xmsg 0.1.0+$revision"
+          printf 'XMSG_GATEWAY_BIN=%s\n' "$binary" >> "$GITHUB_ENV"
+      - name: Real MCP leaf hub and packaged broker fixture
+        run: |
+          unset GENIE_ROOT
+          python3 scripts/broker_bridge_e2e.py | tee broker-bridge-e2e.log
+          grep -Fx 'broker-bridge-e2e-complete:mcp-leaf-hub-genie-guard-rewrite-dedup' broker-bridge-e2e.log
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          result = json.loads(Path(".artifacts/broker-bridge-e2e/result.json").read_text())
+          assert result["exit_code"] == 0
+          assert result["local_genie_override"] is False, "CI must build the public pinned genie-root"
+          PY
