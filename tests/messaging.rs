@@ -978,6 +978,30 @@ async fn handler_deadline_reports_pending_without_cancelling_accepted_work() {
         http::Request,
     };
     use tower::ServiceExt;
+
+    async fn wall_budget<T>(
+        name: &str,
+        budget: std::time::Duration,
+        future: impl std::future::Future<Output = T>,
+    ) -> T {
+        let deadline = std::time::Instant::now() + budget;
+        tokio::pin!(future);
+        std::future::poll_fn(|cx| {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "wall-clock fixture budget exceeded: {name}"
+            );
+            match future.as_mut().poll(cx) {
+                std::task::Poll::Ready(value) => std::task::Poll::Ready(value),
+                std::task::Poll::Pending => {
+                    // Keep external socket progress runnable without Tokio advancing paused time.
+                    cx.waker().wake_by_ref();
+                    std::task::Poll::Pending
+                }
+            }
+        })
+        .await
+    }
     let node = real_node::Node::start(&real_node::pinned_binary()).await;
     let mut fixture = migrated_fixture(&node);
     policy(
@@ -991,6 +1015,7 @@ async fn handler_deadline_reports_pending_without_cancelling_accepted_work() {
     save(&fixture);
     let serving = fixture.serving().await;
     let mut stall = agent_stall::AgentStall::install(&node.config, "send");
+    tokio::time::pause();
     let send = json!({"jsonrpc":"2.0","id":401,"method":"tools/call","params":{
         "name":"xmsg_send","arguments":{"request_id":"deadline-operation",
             "to":"gateway@gateway.fixture","text":"accepted after a slow request body"}}});
@@ -1011,19 +1036,24 @@ async fn handler_deadline_reports_pending_without_cancelling_accepted_work() {
         .body(Body::from_stream(stream))
         .unwrap();
     let handler = tokio::spawn(serving.router().oneshot(request));
-    tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx)
-        .await
-        .unwrap()
-        .unwrap();
-    // Spend the real handler budget in its body reader, after observing its first poll.
-    tokio::time::sleep(std::time::Duration::from_millis(32500)).await;
+    wall_budget(
+        "body entered",
+        std::time::Duration::from_secs(5),
+        entered_rx,
+    )
+    .await
+    .unwrap();
+    tokio::time::advance(std::time::Duration::from_millis(32500)).await;
     release_tx.send(()).unwrap();
-    let accepted = tokio::time::timeout(std::time::Duration::from_secs(3), stall.reached())
+    let accepted = wall_budget(
+        "upstream acceptance",
+        std::time::Duration::from_secs(3),
+        stall.reached(),
+    )
+    .await;
+    tokio::time::advance(std::time::Duration::from_millis(501)).await;
+    let response = wall_budget("outer deadline", std::time::Duration::from_secs(3), handler)
         .await
-        .unwrap();
-    let response = tokio::time::timeout(std::time::Duration::from_secs(3), handler)
-        .await
-        .unwrap()
         .unwrap()
         .unwrap();
     let status = response.status();
@@ -1032,8 +1062,16 @@ async fn handler_deadline_reports_pending_without_cancelling_accepted_work() {
         StatusCode::OK,
         "handler deadline hid its pending request"
     );
-    let body: serde_json::Value =
-        serde_json::from_slice(&to_bytes(response.into_body(), 100_000).await.unwrap()).unwrap();
+    let body: serde_json::Value = serde_json::from_slice(
+        &wall_budget(
+            "response body",
+            std::time::Duration::from_secs(3),
+            to_bytes(response.into_body(), 100_000),
+        )
+        .await
+        .unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         body["result"]["structuredContent"]["state"], "pending",
         "handler deadline hid its pending request"
@@ -1042,17 +1080,23 @@ async fn handler_deadline_reports_pending_without_cancelling_accepted_work() {
         body["result"]["structuredContent"]["request_id"],
         "deadline-operation"
     );
-    stall.finish(true).await;
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    wall_budget(
+        "receipt forwarding",
+        std::time::Duration::from_secs(3),
+        stall.finish(true),
+    )
+    .await;
+    wall_budget("deadline cancelled the dispatch outcome commit", std::time::Duration::from_secs(5), async {
         loop {
             let connection = rusqlite::Connection::open(&fixture.store_file).unwrap();
             let confirmed: bool = connection.query_row(
                 "SELECT state='confirmed' AND receipt IS NOT NULL FROM outbound_reservations WHERE request_id='deadline-operation'",
                 [], |row| row.get(0)).unwrap();
             if confirmed { break; }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio::task::yield_now().await;
         }
-    }).await.expect("deadline cancelled the dispatch outcome commit");
+    }).await;
+    tokio::time::resume();
     let (_, replay, _) = serving_fixture::request(&serving, "good-token", send).await;
     let receipt: Receipt =
         serde_json::from_value(replay["result"]["structuredContent"]["receipt"].clone()).unwrap();
