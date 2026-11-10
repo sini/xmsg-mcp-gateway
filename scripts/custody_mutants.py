@@ -39,7 +39,7 @@ CASES = [
         "    let accepted = store.accept_delivery(scope, service, &delivery, limits, at)?;",
         "    service.ack(delivery.message_id()).await?;\n    let accepted = store.accept_delivery(scope, service, &delivery, limits, at)?;",
         "failed_transaction_never_acknowledges_or_retains_partial_custody",
-        "failed custody transaction ACKed upstream",
+        "failed transaction ACKed upstream",
     ),
     (
         "quarantine-write",
