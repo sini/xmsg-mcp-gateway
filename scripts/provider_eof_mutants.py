@@ -1,4 +1,4 @@
-"""Require clean TLS EOF recovery and reject a single-site ignored-EOF mutant."""
+"""Require zero-byte cancellation recovery and strict partial-request failure."""
 
 import subprocess
 import tempfile
@@ -7,11 +7,13 @@ from pathlib import Path
 from artifact_evidence import record
 from transport_compat import ROOT, build_test, copy_fixture_tree, invocation_evidence
 
-TEST = "clean_tls_eof_during_headers_releases_provider_fixture"
+TEST = "partial_tls_eof_is_a_fixture_error"
 REFUSAL = "serving provider fixture worker did not exit within 3 seconds"
-SITE = """        if reader.read_line(&mut line).unwrap() == 0 {
-            return None;
-        }"""
+SITE = """        assert_ne!(
+            reader.read_line(&mut line).unwrap(),
+            0,
+            "partial provider request ended during headers"
+        );"""
 
 
 def main():
@@ -38,13 +40,13 @@ def main():
             )
             output = result.stdout + result.stderr
             if arm == "positive":
-                assert result.returncode == 0 and "2 passed" in output, output
+                assert result.returncode == 0 and "4 passed" in output, output
             else:
                 assert result.returncode != 0, "ignored-header-EOF mutant survived"
-                assert REFUSAL in output and f"{TEST} ... FAILED" in output, output
-                assert "1 passed; 1 failed" in output, output
+                assert REFUSAL in output and f"{TEST} - should panic ... FAILED" in output, output
+                assert "3 passed; 1 failed" in output, output
                 print(
-                    f"named mutant refusal: {REFUSAL}; 1 passed; 1 failed", flush=True
+                    f"named mutant refusal: {REFUSAL}; 3 passed; 1 failed", flush=True
                 )
             print(f"provider-eof-{arm}: verified", flush=True)
 

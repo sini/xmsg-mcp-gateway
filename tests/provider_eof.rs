@@ -6,7 +6,7 @@ mod provider;
 mod serving_fixture;
 use rustls::pki_types::pem::PemObject;
 use std::io::Write;
-fn exercise(partial: bool) {
+fn exercise(partial: bool, stall: bool) {
     let fixture = serving_fixture::Fixture::new();
     let url = reqwest::Url::parse(
         fixture.config["verifier"]["introspection_url"]
@@ -44,8 +44,10 @@ fn exercise(partial: bool) {
     };
     tls.write_all(raw.as_bytes()).unwrap();
     tls.flush().unwrap();
-    tls.conn.send_close_notify();
-    tls.flush().unwrap();
+    if !stall {
+        tls.conn.send_close_notify();
+        tls.flush().unwrap();
+    }
 
     if !partial {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -65,11 +67,49 @@ fn exercise(partial: bool) {
 }
 
 #[test]
-fn clean_tls_eof_during_headers_releases_provider_fixture() {
-    exercise(true);
+#[should_panic(expected = "serving provider fixture worker panicked")]
+fn partial_tls_eof_is_a_fixture_error() {
+    exercise(true, false);
+}
+
+#[test]
+#[should_panic(expected = "serving provider fixture worker panicked")]
+fn partial_tls_stall_is_a_fixture_error() {
+    exercise(true, true);
 }
 
 #[test]
 fn complete_tls_request_releases_provider_fixture() {
-    exercise(false);
+    exercise(false, false);
+}
+
+#[test]
+fn idle_cancelled_tls_connection_does_not_panic_the_provider_fixture() {
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::mpsc;
+    use std::time::Duration;
+    for close_without_bytes in [false, true] {
+        let keys = provider::TlsFixture::new();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (socket, _) = listener.accept().unwrap();
+        let idle_client = if close_without_bytes {
+            drop(client);
+            None
+        } else {
+            Some(client)
+        };
+        let (send, receive) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            send.send(provider::read_request(socket, keys.tls.clone(), true).is_none())
+                .unwrap();
+        });
+        assert!(receive
+            .recv_timeout(Duration::from_secs(3))
+            .expect("idle cancelled TLS connection panicked or failed to finish"));
+        worker
+            .join()
+            .expect("provider fixture panicked on cancelled TLS");
+        drop(idle_client);
+    }
 }

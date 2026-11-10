@@ -482,12 +482,28 @@ pub fn read_request(
     socket
         .set_write_timeout(Some(Duration::from_secs(2)))
         .unwrap();
+    let mut first_byte = [0];
+    match socket.peek(&mut first_byte) {
+        Ok(0) => return None,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) =>
+        {
+            return None
+        }
+        Ok(_) => {}
+        Err(error) => panic!("provider fixture initial read failed: {error}"),
+    }
     let mut tls = rustls::StreamOwned::new(rustls::ServerConnection::new(tls).unwrap(), socket);
     let mut reader = BufReader::new(&mut tls);
     let mut line = String::new();
-    if reader.read_line(&mut line).unwrap() == 0 {
-        return None;
-    }
+    assert_ne!(
+        reader.read_line(&mut line).unwrap(),
+        0,
+        "partial provider request ended before its request line"
+    );
     if strict_request {
         assert_eq!(line, "POST /introspect HTTP/1.1\r\n");
     }
@@ -495,9 +511,11 @@ pub fn read_request(
     let mut lookup_auth = false;
     loop {
         line.clear();
-        if reader.read_line(&mut line).unwrap() == 0 {
-            return None;
-        }
+        assert_ne!(
+            reader.read_line(&mut line).unwrap(),
+            0,
+            "partial provider request ended during headers"
+        );
         if line == "\r\n" {
             break;
         }
