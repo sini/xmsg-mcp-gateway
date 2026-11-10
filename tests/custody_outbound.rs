@@ -31,6 +31,7 @@ use xmsg_mcp_gateway::{
 fn limits() -> Limits {
     Limits {
         dedup_lifetime_secs: 86400,
+        result_recovery_secs: 86400,
         max_framed_bytes: 65536,
         timeout: std::time::Duration::from_secs(5),
         max_reservations: 1000,
@@ -65,6 +66,7 @@ fn authority() -> (serving_fixture::Fixture, Store, Verifier) {
     let (fixture, mut store, verifier) = unmigrated_authority();
     store.migrate_custody().unwrap();
     store.migrate_outbound().unwrap();
+    store.migrate_retirement().unwrap();
     (fixture, store, verifier)
 }
 
@@ -106,6 +108,7 @@ async fn same_request_reuses_receipt_and_changed_payload_conflicts() {
         }
     }
     store.migrate_outbound().unwrap();
+    store.migrate_retirement().unwrap();
     assert!(
         matches!(
             dispatch(

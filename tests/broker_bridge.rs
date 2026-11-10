@@ -83,6 +83,7 @@ async fn setup_mode(auto_reply: bool) -> (fixture::Fixture, Bus) {
     let mut store = Store::open(&fixture.store_file).unwrap();
     store.migrate_custody().unwrap();
     store.migrate_outbound().unwrap();
+    store.migrate_retirement().unwrap();
     store.migrate_events(&key).unwrap();
     store
         .set_outbound_policy(
@@ -164,7 +165,7 @@ async fn setup_mode(auto_reply: bool) -> (fixture::Fixture, Bus) {
     fixture.config["events"] =
         json!({"grant_id":"grant","key_file":keyfile,"dispatch_timeout_ms":13000});
     fixture.config["broker"] = json!({"destination":"genie@node"});
-    fixture.config["messaging"] = json!({"xmsg":{"service":"gateway","expected_node":"bus","daemon_uid":std::fs::metadata(directory).unwrap().uid(),"register_socket":register,"agent_socket":agent,"operation_timeout_ms":1000},"manifest":{"reply_ttl_secs":604800,"idempotency_ttl_secs":604800,"svc_queue_cap":1000,"dedup_lifetime_secs":604800,"max_framed_bytes":65536},"submission_timeout_ms":1000,"max_reservations":100,"max_retained_bytes":1048576});
+    fixture.config["messaging"] = json!({"xmsg":{"service":"gateway","expected_node":"bus","daemon_uid":std::fs::metadata(directory).unwrap().uid(),"register_socket":register,"agent_socket":agent,"operation_timeout_ms":1000},"manifest":{"reply_ttl_secs":604800,"idempotency_ttl_secs":604800,"svc_queue_cap":1000,"dedup_lifetime_secs":604800,"max_framed_bytes":65536},"result_recovery_secs":604800,"submission_timeout_ms":1000,"max_reservations":100,"max_retained_bytes":1048576});
     fixture::private_file(
         &fixture.config_file,
         &serde_json::to_vec(&fixture.config).unwrap(),

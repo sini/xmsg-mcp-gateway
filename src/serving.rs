@@ -82,8 +82,14 @@ struct MessagingConfiguration {
     xmsg: XmsgConfig,
     manifest: DeploymentManifest,
     submission_timeout_ms: u64,
+    #[serde(default = "default_result_recovery_secs")]
+    result_recovery_secs: i64,
     max_reservations: i64,
     max_retained_bytes: i64,
+}
+
+fn default_result_recovery_secs() -> i64 {
+    86_400
 }
 
 fn present_messaging<'de, D: serde::Deserializer<'de>>(
@@ -310,8 +316,9 @@ impl Serving {
                 .require_outbound_ready()
                 .map_err(StartupError::Store)?;
             let limits = outbound::Limits {
-                dedup_lifetime_secs: i64::try_from(messaging.manifest.dedup_lifetime_secs)
+                dedup_lifetime_secs: i64::try_from(messaging.manifest.idempotency_ttl_secs)
                     .map_err(|_| ManifestError::DedupLifetime)?,
+                result_recovery_secs: messaging.result_recovery_secs,
                 max_framed_bytes: messaging.manifest.max_framed_bytes,
                 timeout: Duration::from_millis(messaging.submission_timeout_ms),
                 max_reservations: messaging.max_reservations,

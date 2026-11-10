@@ -55,6 +55,7 @@ enum Command {
     Init,
     MigrateCustody,
     MigrateOutbound,
+    MigrateRetirement,
     MigrateEvents {
         #[arg(long)]
         key_file: PathBuf,
@@ -187,6 +188,10 @@ async fn run(cli: Cli) -> Result<(), CommandError> {
             let key = xmsg_mcp_gateway::event_store::EventKey::load(&key_file)?;
             Store::open(&state)?.migrate_events(&key)?;
             println!("Events schema migrated");
+        }
+        (Some(state), Command::MigrateRetirement) => {
+            Store::open(&state)?.migrate_retirement()?;
+            println!("outbound retirement schema migrated");
         }
         (Some(state), Command::MigrateOutbound) => {
             Store::open(&state)?.migrate_outbound()?;

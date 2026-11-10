@@ -89,6 +89,7 @@ impl Mailbox {
         let mut store = Store::open(&provider.store_file).unwrap();
         store.migrate_custody().unwrap();
         store.migrate_outbound().unwrap();
+        store.migrate_retirement().unwrap();
         provider.config["request_timeout_ms"] = json!(40000);
         provider.config["messaging"] = json!({
             "xmsg":{"service":config.service,"expected_node":config.expected_node,"daemon_uid":config.daemon_uid,
@@ -96,7 +97,7 @@ impl Mailbox {
                 "operation_timeout_ms":config.operation_timeout_ms},
             "manifest":{"reply_ttl_secs":604800,"idempotency_ttl_secs":604800,"svc_queue_cap":1000,
                 "dedup_lifetime_secs":604800,"max_framed_bytes":65536},
-            "submission_timeout_ms":1000,"max_reservations":100,"max_retained_bytes":1048576,
+            "result_recovery_secs":604800,"submission_timeout_ms":1000,"max_reservations":100,"max_retained_bytes":1048576,
         });
         private_file(
             &provider.config_file,

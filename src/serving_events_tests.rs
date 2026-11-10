@@ -31,6 +31,10 @@ async fn call(serving: &Serving, method: &str, params: Value) -> Value {
     value["result"].clone()
 }
 async fn start_bus(setup: &mut Setup) -> Bus {
+    crate::grants::Store::open(&setup.provider.store_file)
+        .unwrap()
+        .migrate_retirement()
+        .unwrap();
     let directory = setup.provider.keys._directory.path();
     std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
     let socket = directory.join("register.sock");
@@ -75,7 +79,7 @@ async fn start_bus(setup: &mut Setup) -> Bus {
     });
     setup.provider.config["request_timeout_ms"] = json!(60000);
     setup.provider.config["events"] = json!({"grant_id":"grant","key_file":directory.join("events-key"),"dispatch_timeout_ms":13000});
-    setup.provider.config["messaging"] = json!({"xmsg":{"service":"gateway","expected_node":"bus","daemon_uid":std::fs::metadata(directory).unwrap().uid(),"register_socket":socket,"agent_socket":directory.join("unused-agent.sock"),"operation_timeout_ms":1000},"manifest":{"reply_ttl_secs":604800,"idempotency_ttl_secs":604800,"svc_queue_cap":1000,"dedup_lifetime_secs":604800,"max_framed_bytes":65536},"submission_timeout_ms":1000,"max_reservations":100,"max_retained_bytes":1048576});
+    setup.provider.config["messaging"] = json!({"xmsg":{"service":"gateway","expected_node":"bus","daemon_uid":std::fs::metadata(directory).unwrap().uid(),"register_socket":socket,"agent_socket":directory.join("unused-agent.sock"),"operation_timeout_ms":1000},"manifest":{"reply_ttl_secs":604800,"idempotency_ttl_secs":604800,"svc_queue_cap":1000,"dedup_lifetime_secs":604800,"max_framed_bytes":65536},"result_recovery_secs":604800,"submission_timeout_ms":1000,"max_reservations":100,"max_retained_bytes":1048576});
     fixture::private_file(
         &setup.provider.config_file,
         &serde_json::to_vec(&setup.provider.config).unwrap(),

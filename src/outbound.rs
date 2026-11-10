@@ -285,8 +285,10 @@ pub enum Outcome {
     Confirmed(Receipt),
 }
 
+#[derive(Clone)]
 pub struct Limits {
     pub dedup_lifetime_secs: i64,
+    pub result_recovery_secs: i64,
     /// Complete framed message including the gateway preamble, in bytes.
     pub max_framed_bytes: usize,
     pub timeout: std::time::Duration,
@@ -325,7 +327,8 @@ impl Limits {
     }
 
     pub(crate) fn validate(&self) -> Result<(), Error> {
-        if self.dedup_lifetime_secs <= 0
+        if self.result_recovery_secs < self.dedup_lifetime_secs
+            || self.dedup_lifetime_secs <= 0
             || self.max_framed_bytes == 0
             || self.max_framed_bytes > 65536
             || self.timeout.is_zero()
@@ -335,6 +338,8 @@ impl Limits {
         {
             return Err(Error::Configuration);
         }
+        reservation_times(SystemTime::now(), self.dedup_lifetime_secs)?;
+        reservation_times(SystemTime::now(), self.result_recovery_secs)?;
         Ok(())
     }
 }
@@ -858,6 +863,7 @@ mod reservation_time_tests {
     fn retry_deadlines_preserve_stored_windows_and_reduce_with_limits() {
         let mut limits = Limits {
             dedup_lifetime_secs: 1,
+            result_recovery_secs: 86400,
             max_framed_bytes: 1,
             timeout: Duration::from_secs(1),
             max_reservations: 1,

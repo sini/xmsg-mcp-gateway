@@ -12,6 +12,7 @@ pub mod xmsg_config;
 pub mod custody;
 pub mod outbound;
 mod outbound_lease;
+pub mod retirement;
 pub use outbound_lease::OperationLease;
 
 pub mod event_store;
