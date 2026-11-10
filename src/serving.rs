@@ -758,10 +758,17 @@ fn pending_response(pending: &PendingReply) -> Response {
     )
 }
 
+fn list_enabled(app: &App, permission: &Option<outbound::Permission>) -> bool {
+    permission
+        .as_ref()
+        .is_some_and(|permission| app.verifier.requires_scope(&permission.required_scope))
+}
+
 fn permission_enabled(app: &App, permission: &Option<outbound::Permission>) -> bool {
-    permission.as_ref().is_some_and(|permission| {
-        !permission.targets.is_empty() && app.verifier.requires_scope(&permission.required_scope)
-    })
+    list_enabled(app, permission)
+        && permission
+            .as_ref()
+            .is_some_and(|permission| !permission.targets.is_empty())
 }
 
 fn tools(app: &App, policy: &Policy, grant: &Authorization) -> Value {
@@ -789,6 +796,16 @@ fn tools(app: &App, policy: &Policy, grant: &Authorization) -> Value {
         ] {
             tools.push(json!({"name":name,"description":description,
                 "inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false},
+                "annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false},
+                "securitySchemes":[{"type":"oauth2","scopes":app.scopes}]}));
+        }
+        if list_enabled(app, &policy.send) {
+            tools.push(json!({"name":"xmsg_list","description":"List authorized send-policy targets with live status.",
+                "inputSchema":{"type":"object","properties":{"node":{"type":"string","minLength":1},
+                    "kind":{"type":"string","enum":["service","instance","subagent"]},
+                    "status":{"type":"string","enum":["live","inactive"]},
+                    "within":{"type":"integer","minimum":0}},
+                    "required":[],"additionalProperties":false},
                 "annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false},
                 "securitySchemes":[{"type":"oauth2","scopes":app.scopes}]}));
         }
@@ -1409,6 +1426,48 @@ async fn mcp_request(
                         StatusCode::FORBIDDEN.into_response()
                     }
                     _ => tool_unavailable(&id, false),
+                };
+            }
+            if call.name == "xmsg_list" && app.messaging.is_some() {
+                if !list_enabled(&app, &policy.send) {
+                    return StatusCode::FORBIDDEN.into_response();
+                }
+                let arguments =
+                    match serde_json::from_value::<outbound::ListArguments>(call.arguments) {
+                        Ok(arguments) if arguments.validate().is_ok() => arguments,
+                        _ => return rpc_error(&id, -32602, "Invalid params"),
+                    };
+                let Some(messaging) = &app.messaging else {
+                    return unavailable();
+                };
+                let snapshot = match messaging.session.snapshot() {
+                    Ok(snapshot) => snapshot,
+                    Err(_) => return unavailable(),
+                };
+                let mut list_store = store;
+                tracing::info!(target: "gateway_dispatch", operation = "xmsg_list", "dispatch");
+                return match outbound::list(
+                    &mut list_store,
+                    &snapshot.endpoint,
+                    &app.verifier,
+                    &token,
+                    &arguments,
+                    &messaging.limits,
+                )
+                .await
+                {
+                    Ok(listed) => match serde_json::to_value(listed) {
+                        Ok(data) => rpc_result(&id, tool_result(data)),
+                        Err(_) => unavailable(),
+                    },
+                    Err(
+                        outbound::Error::Denied | outbound::Error::Authority(GrantError::Denied),
+                    ) => StatusCode::FORBIDDEN.into_response(),
+                    Err(outbound::Error::Authentication(error)) => {
+                        auth_response(error, &app.challenge)
+                    }
+                    Err(outbound::Error::Configuration) => rpc_error(&id, -32602, "Invalid params"),
+                    Err(_) => unavailable(),
                 };
             }
             if matches!(call.name.as_str(), "xmsg_send" | "xmsg_reply") && app.messaging.is_some() {

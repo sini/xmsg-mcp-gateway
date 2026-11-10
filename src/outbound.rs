@@ -84,9 +84,15 @@ impl Policy {
     }
 
     fn validate(&self) -> Result<(), Error> {
+        if self
+            .reply
+            .as_ref()
+            .is_some_and(|permission| permission.targets.is_empty())
+        {
+            return Err(Error::Configuration);
+        }
         for permission in [&self.send, &self.reply].into_iter().flatten() {
             if permission.required_scope.trim().is_empty()
-                || permission.targets.is_empty()
                 || permission.targets.iter().any(|target| {
                     let Some((service, node)) = target.split_once('@') else {
                         return true;
@@ -253,6 +259,54 @@ pub struct ReplyArguments {
     pub request_id: RequestId,
     pub message_id: String,
     pub text: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ListArguments {
+    pub node: Option<String>,
+    pub kind: Option<String>,
+    pub status: Option<String>,
+    pub within: Option<u64>,
+}
+
+impl ListArguments {
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.node.as_deref().is_some_and(|node| {
+            node.is_empty()
+                || node.contains('@')
+                || node.chars().any(|c| c.is_whitespace() || c.is_control())
+        }) || self
+            .kind
+            .as_deref()
+            .is_some_and(|kind| !matches!(kind, "service" | "instance" | "subagent"))
+            || self
+                .status
+                .as_deref()
+                .is_some_and(|status| !matches!(status, "live" | "inactive"))
+            || self.within.is_some_and(|within| {
+                within == 0 || within > 604_800 || self.status.as_deref() == Some("live")
+            })
+        {
+            return Err(Error::Configuration);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ListedRecipient {
+    pub address: String,
+    pub node: String,
+    pub kind: String,
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FilteredList {
+    pub recipients: Vec<ListedRecipient>,
 }
 
 #[derive(Debug)]
@@ -434,6 +488,110 @@ impl Store {
             key:r.get(0)?,payload_hash:r.get(1)?,sender:r.get(2)?,grant_id:r.get(3)?,grant_revision:r.get(4)?,framed_text:r.get(5)?,created_at:r.get(6)?,retry_until:r.get(7)?,receipt:r.get(8)?,target:r.get(9)?
         })).optional()?)
     }
+}
+
+pub fn filter_recipients(
+    policy: &Policy,
+    arguments: &ListArguments,
+    listed: xmsg::client::ListResult,
+) -> Result<FilteredList, Error> {
+    arguments.validate()?;
+    let targets = policy.send.as_ref().map(|permission| &permission.targets);
+    let healthy_nodes: BTreeSet<&str> = listed
+        .nodes
+        .iter()
+        .filter(|node| node.status == "ok")
+        .map(|node| node.node.as_str())
+        .collect();
+    let mut recipients: Vec<ListedRecipient> = listed
+        .recipients
+        .into_iter()
+        .filter(|item| {
+            targets.is_some_and(|allowed| allowed.contains(&item.address))
+                && item.kind == "service"
+                && item.harness.as_deref() == Some("svc")
+                && item.status == "live"
+                && (listed.nodes.is_empty() || healthy_nodes.contains(item.node.as_str()))
+                && arguments
+                    .node
+                    .as_deref()
+                    .is_none_or(|node| item.node == node)
+                && arguments
+                    .kind
+                    .as_deref()
+                    .is_none_or(|kind| item.kind == kind)
+                && arguments
+                    .status
+                    .as_deref()
+                    .is_none_or(|status| item.status == status)
+        })
+        .map(|item| ListedRecipient {
+            address: item.address,
+            node: item.node,
+            kind: item.kind,
+            status: item.status,
+        })
+        .collect();
+    recipients.sort_by(|left, right| left.address.cmp(&right.address));
+    recipients.dedup_by(|left, right| left.address == right.address);
+    Ok(FilteredList { recipients })
+}
+
+pub async fn list(
+    store: &mut Store,
+    service: &Endpoint,
+    verifier: &crate::auth::Verifier,
+    token: &str,
+    arguments: &ListArguments,
+    limits: &Limits,
+) -> Result<FilteredList, Error> {
+    limits.validate()?;
+    arguments.validate()?;
+    let store_file = store.file.clone();
+    {
+        let list_store = Store::open_for_dispatch(&store_file)?;
+        list_store.require_outbound_ready()?;
+    }
+    let started = std::time::Instant::now();
+    let verified = tokio::time::timeout(limits.timeout, verifier.verify(token))
+        .await
+        .map_err(|_| Error::Deadline)??;
+    if verified.expires_at() <= now() as u64 {
+        return Err(Error::Denied);
+    }
+    let policy = {
+        let list_store = Store::open_for_dispatch(&store_file)?;
+        let authority = list_store.authorize(&verified)?;
+        list_store.outbound_policy(&authority.grant_id)?
+    };
+    let permission = policy.send.as_ref().ok_or(Error::Denied)?;
+    if !verifier.requires_scope(&permission.required_scope) {
+        return Err(Error::Denied);
+    }
+    let remaining = limits.timeout.saturating_sub(started.elapsed());
+    let listed = match tokio::time::timeout(
+        remaining,
+        service.client.list(xmsg::client::ListQuery {
+            name: None,
+            node: arguments.node.clone(),
+            kind: arguments.kind.clone(),
+            status: arguments.status.clone(),
+            within: arguments.within,
+        }),
+    )
+    .await
+    .map_err(|_| Error::Deadline)?
+    {
+        Ok(listed) => listed,
+        Err(xmsg::client::ClientError::Refused { code }) if code == "unknown_peer" => {
+            xmsg::client::ListResult {
+                recipients: Vec::new(),
+                nodes: Vec::new(),
+            }
+        }
+        Err(error) => return Err(error.into()),
+    };
+    filter_recipients(&policy, arguments, listed)
 }
 
 pub async fn dispatch(
