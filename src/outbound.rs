@@ -74,6 +74,40 @@ pub struct Permission {
     pub required_scope: String,
 }
 
+impl Permission {
+    fn admits_node(&self, node: &str) -> bool {
+        self.targets
+            .iter()
+            .any(|target| target.strip_prefix("*@") == Some(node))
+    }
+
+    fn admits_target(&self, target: &str) -> bool {
+        let Some((name, node)) = target.split_once('@') else {
+            return false;
+        };
+        if name.is_empty()
+            || name == "*"
+            || node.is_empty()
+            || node.contains('@')
+            || target.chars().any(|c| c.is_whitespace() || c.is_control())
+        {
+            return false;
+        }
+        self.targets.contains(target) || self.admits_node(node)
+    }
+
+    fn admits_listed_recipient(&self, item: &xmsg::client::Recipient) -> bool {
+        if self.admits_node(&item.node) {
+            matches!(item.kind.as_str(), "service" | "instance" | "subagent")
+                && (item.kind != "service" || item.harness.as_deref() == Some("svc"))
+        } else {
+            self.targets.contains(&item.address)
+                && item.kind == "service"
+                && item.harness.as_deref() == Some("svc")
+        }
+    }
+}
+
 impl Policy {
     fn permission(&self, request: &Request) -> Result<Permission, Error> {
         match request {
@@ -98,8 +132,10 @@ impl Policy {
                         return true;
                     };
                     service.is_empty()
+                        || (service != "*" && service.contains('*'))
                         || node.is_empty()
                         || node.contains('@')
+                        || node.contains('*')
                         || target.chars().any(|c| c.is_whitespace() || c.is_control())
                 })
             {
@@ -439,6 +475,7 @@ impl Reservation {
 }
 
 impl Store {
+    #[allow(clippy::too_many_arguments)]
     fn reply_target(
         &self,
         bus: &str,
@@ -447,6 +484,7 @@ impl Store {
         identity: &crate::auth::VerifiedIdentity,
         authority: &crate::grants::Authorization,
         existing: Option<&Reservation>,
+        permission: &Permission,
     ) -> Result<String, Error> {
         if let Some(reservation) = existing {
             return Ok(reservation.target.clone());
@@ -461,10 +499,15 @@ impl Store {
         };
         let origin: Option<String> = self.connection.query_row(&format!("SELECT c.origin FROM custody_items c JOIN grants g ON g.id=c.grant_id WHERE c.bus=?1 AND c.upstream_id=?2 AND c.mailbox=?3 AND c.owner=?4 AND g.service=?5 AND g.issuer=?6 AND g.resource=?7 AND c.grant_id=?8 AND {authority_predicate} AND c.text IS NOT NULL AND c.expires_at>?10"), params![bus, message_id, sender, identity.subject(), identity.service(), identity.issuer(), identity.resource(), authority.grant_id, authority.revision, now()], |r|r.get(0)).optional()?;
         let origin: xmsg::client::Origin = serde_json::from_str(&origin.ok_or(Error::Denied)?)?;
-        let name = origin.service.ok_or(Error::Denied)?;
-        if origin.id.is_some() {
-            return Err(Error::Denied);
-        }
+        let name = match (origin.service.as_deref(), origin.id.as_deref()) {
+            (Some(service), None) if !service.is_empty() && service != "*" => service,
+            (None, Some(id))
+                if !id.is_empty() && id != "*" && permission.admits_node(&origin.node) =>
+            {
+                id
+            }
+            _ => return Err(Error::Denied),
+        };
         Ok(format!("{name}@{}", origin.node))
     }
 
@@ -496,7 +539,7 @@ pub fn filter_recipients(
     listed: xmsg::client::ListResult,
 ) -> Result<FilteredList, Error> {
     arguments.validate()?;
-    let targets = policy.send.as_ref().map(|permission| &permission.targets);
+    let permission = policy.send.as_ref();
     let healthy_nodes: BTreeSet<&str> = listed
         .nodes
         .iter()
@@ -507,9 +550,7 @@ pub fn filter_recipients(
         .recipients
         .into_iter()
         .filter(|item| {
-            targets.is_some_and(|allowed| allowed.contains(&item.address))
-                && item.kind == "service"
-                && item.harness.as_deref() == Some("svc")
+            permission.is_some_and(|allowed| allowed.admits_listed_recipient(item))
                 && item.status == "live"
                 && (listed.nodes.is_empty() || healthy_nodes.contains(item.node.as_str()))
                 && arguments
@@ -535,6 +576,84 @@ pub fn filter_recipients(
     recipients.sort_by(|left, right| left.address.cmp(&right.address));
     recipients.dedup_by(|left, right| left.address == right.address);
     Ok(FilteredList { recipients })
+}
+
+fn node_scoped_send_admitted(
+    recipients: &xmsg::client::ListResult,
+    target: &str,
+    name: &str,
+    node: &str,
+) -> bool {
+    if !recipients
+        .nodes
+        .iter()
+        .any(|item| item.node == node && item.status == "ok")
+    {
+        return false;
+    }
+    let live_on_node = |item: &xmsg::client::Recipient| {
+        item.node == node
+            && item.status == "live"
+            && matches!(item.kind.as_str(), "service" | "instance" | "subagent")
+            && (item.kind != "service" || item.harness.as_deref() == Some("svc"))
+    };
+    if recipients
+        .recipients
+        .iter()
+        .any(|item| live_on_node(item) && item.address == target)
+    {
+        return true;
+    }
+    if let Some((parent_ref, child_ref)) = name.split_once('/') {
+        if parent_ref.is_empty() || child_ref.is_empty() || child_ref.contains('/') {
+            return false;
+        }
+        let parent_address = format!("{parent_ref}@{node}");
+        let parent_prefix = format!("{parent_ref}/");
+        let resolved_parent = if recipients.recipients.iter().any(|item| {
+            live_on_node(item)
+                && ((item.kind == "instance" && item.address == parent_address)
+                    || (item.kind == "subagent" && item.address.starts_with(&parent_prefix)))
+        }) {
+            Some(parent_ref)
+        } else {
+            let mut matches = recipients.recipients.iter().filter_map(|item| {
+                (live_on_node(item)
+                    && item.kind == "instance"
+                    && item.label.as_deref() == Some(parent_ref))
+                .then(|| item.address.split_once('@').map(|(id, _)| id))
+                .flatten()
+            });
+            let first = matches.next();
+            if matches.next().is_some() {
+                None
+            } else {
+                first
+            }
+        };
+        let Some(parent_id) = resolved_parent else {
+            return false;
+        };
+        let subagent_address = format!("{parent_id}/{child_ref}@{node}");
+        if recipients.recipients.iter().any(|item| {
+            live_on_node(item) && item.kind == "subagent" && item.address == subagent_address
+        }) {
+            return true;
+        }
+        let subagent_prefix = format!("{parent_id}/");
+        let mut label_matches = recipients.recipients.iter().filter(|item| {
+            live_on_node(item)
+                && item.kind == "subagent"
+                && item.address.starts_with(&subagent_prefix)
+                && item.label.as_deref() == Some(child_ref)
+        });
+        return label_matches.next().is_some() && label_matches.next().is_none();
+    }
+    let mut label_matches = recipients
+        .recipients
+        .iter()
+        .filter(|item| live_on_node(item) && item.label.as_deref() == Some(name));
+    label_matches.next().is_some() && label_matches.next().is_none()
 }
 
 pub async fn list(
@@ -711,7 +830,7 @@ async fn dispatch_on_connection(
             {
                 return Err(Error::Conflict);
             }
-            if !initial_permission.targets.contains(target) {
+            if !initial_permission.admits_target(target) {
                 return Err(Error::Denied);
             }
             if let Some(receipt) = reservation.receipt {
@@ -820,6 +939,7 @@ async fn submit(
                 &identity,
                 &authority,
                 existing.as_ref(),
+                &permission,
             )?,
             Some(args.message_id.as_str()),
         ),
@@ -831,7 +951,7 @@ async fn submit(
     {
         return Err(Error::Conflict);
     }
-    if !permission.targets.contains(&target) {
+    if !permission.admits_target(&target) {
         return Err(Error::Denied);
     }
     if let Some(reservation) = &existing {
@@ -852,29 +972,47 @@ async fn submit(
     let Some((name, node)) = target.split_once('@') else {
         return Err(Error::Denied);
     };
-    let recipients = service
-        .client
-        .list(xmsg::client::ListQuery {
-            name: Some(name.into()),
-            node: Some(node.into()),
-            kind: Some("service".into()),
-            status: Some("live".into()),
-            ..Default::default()
-        })
-        .await?;
-    if !recipients
-        .nodes
-        .iter()
-        .any(|item| item.node == node && item.status == "ok")
-        || !recipients.recipients.iter().any(|item| {
-            item.address == target
-                && item.node == node
-                && item.kind == "service"
-                && item.harness.as_deref() == Some("svc")
-                && item.status == "live"
-        })
-    {
-        return Err(Error::Denied);
+    if permission.admits_node(node) {
+        if matches!(request, Request::Send(_)) {
+            let recipients = service
+                .client
+                .list(xmsg::client::ListQuery {
+                    name: None,
+                    node: Some(node.into()),
+                    kind: None,
+                    status: Some("live".into()),
+                    ..Default::default()
+                })
+                .await?;
+            if !node_scoped_send_admitted(&recipients, &target, name, node) {
+                return Err(Error::Denied);
+            }
+        }
+    } else {
+        let recipients = service
+            .client
+            .list(xmsg::client::ListQuery {
+                name: Some(name.into()),
+                node: Some(node.into()),
+                kind: Some("service".into()),
+                status: Some("live".into()),
+                ..Default::default()
+            })
+            .await?;
+        if !recipients
+            .nodes
+            .iter()
+            .any(|item| item.node == node && item.status == "ok")
+            || !recipients.recipients.iter().any(|item| {
+                item.address == target
+                    && item.node == node
+                    && item.kind == "service"
+                    && item.harness.as_deref() == Some("svc")
+                    && item.status == "live"
+            })
+        {
+            return Err(Error::Denied);
+        }
     }
     let reservation = match existing {
         Some(reservation) => reservation,
@@ -927,6 +1065,7 @@ async fn submit(
             &current,
             &authority,
             None,
+            &permission,
         )? != target
         {
             return Err(Error::Denied);
@@ -1147,14 +1286,34 @@ mod events_reply_tests {
         store.set_enabled("grant", 1, true).unwrap();
         let identity = crate::provider_fixture::verified(&binding);
         let authority = store.authorize(&identity).unwrap();
+        let permission = Permission {
+            targets: ["source@source-node".into()].into(),
+            required_scope: "reply:write".into(),
+        };
         assert_eq!(
             store
-                .reply_target("bus", "first", "gateway@bus", &identity, &authority, None)
+                .reply_target(
+                    "bus",
+                    "first",
+                    "gateway@bus",
+                    &identity,
+                    &authority,
+                    None,
+                    &permission
+                )
                 .unwrap(),
             "source@source-node"
         );
         assert!(matches!(
-            store.reply_target("bus", "first", "foreign@bus", &identity, &authority, None),
+            store.reply_target(
+                "bus",
+                "first",
+                "foreign@bus",
+                &identity,
+                &authority,
+                None,
+                &permission
+            ),
             Err(Error::Denied)
         ));
         let mut foreign = binding.clone();
@@ -1167,7 +1326,8 @@ mod events_reply_tests {
                 "gateway@bus",
                 &foreign_identity,
                 &authority,
-                None
+                None,
+                &permission
             ),
             Err(Error::Denied)
         ));
@@ -1175,7 +1335,15 @@ mod events_reply_tests {
         store.set_enabled("grant", 3, true).unwrap();
         let current = store.authorize(&identity).unwrap();
         assert!(matches!(
-            store.reply_target("bus", "first", "gateway@bus", &identity, &current, None),
+            store.reply_target(
+                "bus",
+                "first",
+                "gateway@bus",
+                &identity,
+                &current,
+                None,
+                &permission
+            ),
             Err(Error::Denied)
         ));
         assert_eq!(

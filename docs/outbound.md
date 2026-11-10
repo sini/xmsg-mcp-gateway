@@ -46,7 +46,10 @@ The configured verifier must require `xmsg:send` too. This policy file is an own
 input to the CLI, not an MCP argument or listener activation switch.
 
 Policy has optional `send` and `reply` permissions, each naming exact service
-addresses in `targets` and a `required_scope`. The verifier must require that
+addresses (`<service>@<node>`) or node-scoped wildcards (`*@<node>`) in `targets`
+and a `required_scope`. Partial globs (`foo*@node`, `*@*`) are refused. A node-scoped
+`*@<node>` entry admits any live recipient on `<node>` (an `svc` service, an `instance`,
+or a `subagent`). The verifier must require that
 scope and verify it on the actual token. In `Policy::validate`, `send.targets`
 may be empty (an empty allowlist is valid: `xmsg_send` is not advertised or
 callable, while `xmsg_list` is advertised when `send.required_scope` is held
@@ -65,13 +68,23 @@ if self
 
 `xmsg_list(node?, kind?, status?, within?)` is gated by `send.required_scope`
 (no new scope). It queries the leaf's existing `xmsg list` and filters the
-returned recipients to `send.targets` with live status on healthy nodes;
-optional filters (`node`, `kind`, `status`, `within` in `1..=604800` when
+returned recipients to `send.targets` with live status on healthy nodes: exact
+`<service>@<node>` entries admit only `svc` services, while `*@<node>` entries
+admit that node's live `svc` services, `instance` sessions and `subagent`s.
+Optional filters (`node`, `kind`, `status`, `within` in `1..=604800` when
 `status` is `"inactive"`) only narrow that permitted set and never widen it,
 and an empty policy returns `{"recipients": []}` with no fleet or node
-metadata. Anonymous, instance and label matches
-cannot satisfy service discovery. Reply targets come from an owned, attested
-inbound correlation in this store, rather than caller-selected reply addresses.
+metadata. For `xmsg_send`, exact `<service>@<node>` entries admit only live
+`svc` services; `*@<node>` entries resolve `<instance-id or label>@<node>`,
+`<parent>/<child>@<node>` and `<service>@<node>` through the leaf's live
+`xmsg list` view on healthy `<node>`, refusing ambiguous labels (`> 1` live
+matches). Reply targets come from an owned, attested inbound correlation in
+this store, rather than caller-selected reply addresses: an inbound service
+origin (`origin.service` set, `origin.id` unset) is admitted by either exact
+`<service>@<origin.node>` or `*@<origin.node>` in `reply.targets`, whereas an
+inbound session or subagent origin (`origin.id` set, `origin.service` unset)
+requires `*@<origin.node>` specifically in `reply.targets` (exact
+`<service>@<node>` never admits replies to sessions on that node).
 
 `RequestId` is required and explicitly parsed. It accepts 1 to 128 ASCII letters,
 digits and `.`, `_`, `:`, `-`. Missing, null, numeric and unknown arguments refuse.

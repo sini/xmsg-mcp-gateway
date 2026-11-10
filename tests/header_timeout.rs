@@ -330,6 +330,7 @@ async fn descriptor_pressure(fixture: &Fixture) -> (tokio::process::Child, Strin
         child.try_wait().unwrap().is_none(),
         "server terminated on recoverable accept error"
     );
+    tokio::spawn(async move { while let Ok(Some(_)) = logs.next_line().await {} });
     (child, address, held)
 }
 

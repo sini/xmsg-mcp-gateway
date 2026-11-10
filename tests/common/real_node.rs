@@ -162,7 +162,11 @@ impl Prepared {
             "allow":["list","send","reply"], "principals":[other.config.service],
             "targets":[self.config.service], "from":["127.0.0.1/32"]});
         for (key, value) in grants.as_object().unwrap() {
-            peer[key] = value.clone();
+            if value.is_null() {
+                peer.as_object_mut().unwrap().remove(key);
+            } else {
+                peer[key] = value.clone();
+            }
         }
         let peers = serde_json::json!({"peers":{other.config.expected_node.clone():peer}});
         private_file(
@@ -371,6 +375,10 @@ impl Node {
     pub async fn restart_with_reply_ttl(&mut self, binary: &Path, seconds: u64) {
         self.reply_ttl_secs = seconds;
         self.restart(binary).await;
+    }
+    #[allow(dead_code)]
+    pub fn sessions_dir(&self) -> PathBuf {
+        self._temp.path().join("sessions")
     }
     #[allow(dead_code)]
     pub fn stop(&mut self) {

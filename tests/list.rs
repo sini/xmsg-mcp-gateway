@@ -25,6 +25,8 @@ struct ListBus {
     list_delay: Arc<Mutex<std::time::Duration>>,
     last_list_frame: Arc<Mutex<Option<Value>>>,
     list_response: Arc<Mutex<Value>>,
+    sent_frames: Arc<Mutex<Vec<Value>>>,
+    reply_frames: Arc<Mutex<Vec<Value>>>,
 }
 
 impl Drop for ListBus {
@@ -151,6 +153,10 @@ async fn setup_list_bus(policy: Policy) -> (fixture::Fixture, ListBus) {
     let response_source = list_response.clone();
     let list_delay = Arc::new(Mutex::new(std::time::Duration::ZERO));
     let delay_source = list_delay.clone();
+    let sent_frames = Arc::new(Mutex::new(Vec::new()));
+    let sent_sink = sent_frames.clone();
+    let reply_frames = Arc::new(Mutex::new(Vec::new()));
+    let reply_sink = reply_frames.clone();
 
     let agent_task = tokio::spawn(async move {
         loop {
@@ -168,6 +174,37 @@ async fn setup_list_bus(policy: Policy) -> (fixture::Fixture, ListBus) {
                     }
                     *last_frame_sink.lock().unwrap() = Some(frame);
                     response_source.lock().unwrap().clone()
+                }
+                "send" => {
+                    let mut guard = sent_sink.lock().unwrap();
+                    let idx = guard.len() + 1;
+                    let address = frame["to"].clone();
+                    guard.push(frame);
+                    json!({
+                        "status": "ok",
+                        "message_id": format!("01ARZ3NDEKTSV4RRFFQ69G5S{idx:02}"),
+                        "address": address,
+                        "outcome": "delivered"
+                    })
+                }
+                "reply" => {
+                    let mut guard = reply_sink.lock().unwrap();
+                    let idx = guard.len() + 1;
+                    let message_id = frame["message_id"].clone();
+                    let text = frame["text"].clone();
+                    guard.push(frame);
+                    json!({
+                        "status": "ok",
+                        "reply": {
+                            "seq": idx as i64,
+                            "messageId": message_id,
+                            "createdAt": 1000 + idx as i64,
+                            "replierSessionId": "gateway",
+                            "text": text,
+                            "pushOutcome": "delivered",
+                            "pushedMessageId": format!("01ARZ3NDEKTSV4RRFFQ69G5R{idx:02}")
+                        }
+                    })
                 }
                 other => panic!("unexpected agent action {other}"),
             };
@@ -213,6 +250,8 @@ async fn setup_list_bus(policy: Policy) -> (fixture::Fixture, ListBus) {
             list_delay,
             last_list_frame,
             list_response,
+            sent_frames,
+            reply_frames,
         },
     )
 }
@@ -666,4 +705,609 @@ fn set_outbound_policy_accepts_empty_send_targets_and_refuses_empty_reply_target
         ),
         Err(outbound::Error::Configuration)
     ));
+}
+
+#[tokio::test]
+async fn xmsg_list_with_node_scoped_wildcard_returns_node_sessions_subagents_and_services_only() {
+    let policy = Policy {
+        send: Some(Permission {
+            targets: BTreeSet::from(["*@node".into(), "beta@peer.node".into()]),
+            required_scope: "identity:read".into(),
+        }),
+        reply: Some(Permission {
+            targets: BTreeSet::from(["*@node".into()]),
+            required_scope: "identity:read".into(),
+        }),
+    };
+    let (fixture, bus) = setup_list_bus(policy).await;
+    {
+        let mut store = Store::open(&fixture.store_file).unwrap();
+        for invalid in [
+            "foo*@node",
+            "*foo@node",
+            "*@*",
+            "svc@*",
+            "*@node*",
+            "@node",
+            "svc@",
+        ] {
+            assert!(
+                matches!(
+                    store.set_outbound_policy(
+                        "grant",
+                        3,
+                        &Policy {
+                            send: Some(Permission {
+                                targets: BTreeSet::from([invalid.into()]),
+                                required_scope: "identity:read".into(),
+                            }),
+                            reply: None,
+                        },
+                    ),
+                    Err(outbound::Error::Configuration)
+                ),
+                "invalid target pattern {invalid} was accepted"
+            );
+        }
+    }
+    *bus.list_response.lock().unwrap() = json!({
+        "status": "ok",
+        "nodes": [
+            {"node": "node", "status": "ok"},
+            {"node": "peer.node", "status": "ok"},
+            {"node": "other.node", "status": "ok"},
+            {"node": "down.node", "status": "unreachable: connection refused"}
+        ],
+        "recipients": [
+            {
+                "address": "alpha@node",
+                "node": "node",
+                "kind": "service",
+                "harness": "svc",
+                "status": "live",
+                "user": "alice"
+            },
+            {
+                "address": "session@node",
+                "node": "node",
+                "kind": "instance",
+                "harness": "claude",
+                "status": "live",
+                "user": "alice",
+                "label": "work"
+            },
+            {
+                "address": "session/sub-a@node",
+                "node": "node",
+                "kind": "subagent",
+                "harness": "claude",
+                "status": "live",
+                "user": "alice",
+                "label": "researcher"
+            },
+            {
+                "address": "inactive-session@node",
+                "node": "node",
+                "kind": "instance",
+                "harness": "claude",
+                "status": "inactive",
+                "user": "alice"
+            },
+            {
+                "address": "beta@peer.node",
+                "node": "peer.node",
+                "kind": "service",
+                "harness": "svc",
+                "status": "live",
+                "user": "bob"
+            },
+            {
+                "address": "peer-session@peer.node",
+                "node": "peer.node",
+                "kind": "instance",
+                "harness": "claude",
+                "status": "live",
+                "user": "bob"
+            },
+            {
+                "address": "other-session@other.node",
+                "node": "other.node",
+                "kind": "instance",
+                "harness": "claude",
+                "status": "live",
+                "user": "carol"
+            },
+            {
+                "address": "down-session@down.node",
+                "node": "down.node",
+                "kind": "instance",
+                "harness": "claude",
+                "status": "live",
+                "user": "dave"
+            }
+        ]
+    });
+    let serving = Serving::from_owner_file(&fixture.config_file)
+        .await
+        .unwrap();
+    let (status, value, _) = fixture::request(
+        &serving,
+        "good-token",
+        rpc("tools/call", json!({"name": "xmsg_list", "arguments": {}})),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{value}");
+    assert_eq!(
+        value["result"]["structuredContent"],
+        json!({
+            "recipients": [
+                {
+                    "address": "alpha@node",
+                    "node": "node",
+                    "kind": "service",
+                    "status": "live"
+                },
+                {
+                    "address": "beta@peer.node",
+                    "node": "peer.node",
+                    "kind": "service",
+                    "status": "live"
+                },
+                {
+                    "address": "session/sub-a@node",
+                    "node": "node",
+                    "kind": "subagent",
+                    "status": "live"
+                },
+                {
+                    "address": "session@node",
+                    "node": "node",
+                    "kind": "instance",
+                    "status": "live"
+                }
+            ]
+        })
+    );
+
+    let (status, instances_only, _) = fixture::request(
+        &serving,
+        "good-token",
+        rpc(
+            "tools/call",
+            json!({"name": "xmsg_list", "arguments": {"kind": "instance"}}),
+        ),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{instances_only}");
+    assert_eq!(
+        instances_only["result"]["structuredContent"],
+        json!({
+            "recipients": [
+                {
+                    "address": "session@node",
+                    "node": "node",
+                    "kind": "instance",
+                    "status": "live"
+                }
+            ]
+        })
+    );
+}
+
+type RpcResponse = (axum::http::StatusCode, Value, fixture::Probe);
+const FIRST_CALL_ATTEMPTS: usize = 3;
+const FIRST_CALL_WALL_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
+async fn confirmed_first_call(serving: &Serving, request: Value) -> RpcResponse {
+    let started = std::time::Instant::now();
+    let mut response = tokio::time::timeout(
+        FIRST_CALL_WALL_BUDGET,
+        fixture::request(serving, "good-token", request.clone()),
+    )
+    .await
+    .expect("first-call confirmation wall budget exhausted");
+    for attempt in 0..FIRST_CALL_ATTEMPTS {
+        assert!(
+            started.elapsed() < FIRST_CALL_WALL_BUDGET,
+            "first-call confirmation wall budget exhausted"
+        );
+        let (status, value, _) = &response;
+        assert_eq!(
+            *status,
+            axum::http::StatusCode::OK,
+            "first-call transport refusal: {value}"
+        );
+        assert_eq!(value["id"], request["id"], "first-call response id changed");
+        assert!(
+            value.get("error").is_none(),
+            "first-call RPC failure: {value}"
+        );
+        let result = &value["result"]["structuredContent"];
+        if result["state"] == "confirmed" {
+            return response;
+        }
+        assert!(
+            matches!(result["state"].as_str(), Some("pending" | "unknown")),
+            "first-call unexpected state: {value}"
+        );
+        assert!(
+            attempt + 1 < FIRST_CALL_ATTEMPTS,
+            "first-call confirmation attempts exhausted: {value}"
+        );
+        let remaining = FIRST_CALL_WALL_BUDGET
+            .checked_sub(started.elapsed())
+            .expect("first-call confirmation wall budget exhausted");
+        response = tokio::time::timeout(
+            remaining,
+            fixture::request(serving, "good-token", request.clone()),
+        )
+        .await
+        .expect("first-call confirmation wall budget exhausted");
+    }
+    unreachable!("fixed attempt loop returns or fails")
+}
+
+#[tokio::test]
+async fn node_scoped_targets_send_to_sessions_and_subagents_and_enforce_reply_origin_policy() {
+    let policy = Policy {
+        send: Some(Permission {
+            targets: BTreeSet::from(["*@sini.bitstream".into(), "genie@sini.other".into()]),
+            required_scope: "identity:read".into(),
+        }),
+        reply: Some(Permission {
+            targets: BTreeSet::from(["genie@sini.bitstream".into()]),
+            required_scope: "identity:read".into(),
+        }),
+    };
+    let (fixture, bus) = setup_list_bus(policy).await;
+    *bus.list_response.lock().unwrap() = json!({
+        "status": "ok",
+        "nodes": [
+            {"node": "sini.bitstream", "status": "ok"},
+            {"node": "sini.other", "status": "ok"},
+            {"node": "sini.unpermitted", "status": "ok"}
+        ],
+        "recipients": [
+            {
+                "address": "genie@sini.bitstream",
+                "node": "sini.bitstream",
+                "kind": "service",
+                "harness": "svc",
+                "status": "live",
+                "user": "sini"
+            },
+            {
+                "address": "sess-1@sini.bitstream",
+                "node": "sini.bitstream",
+                "kind": "instance",
+                "harness": "claude",
+                "status": "live",
+                "user": "sini",
+                "label": "work"
+            },
+            {
+                "address": "sess-1/sub-a@sini.bitstream",
+                "node": "sini.bitstream",
+                "kind": "subagent",
+                "harness": "claude",
+                "status": "live",
+                "user": "sini",
+                "label": "researcher"
+            },
+            {
+                "address": "sess-2@sini.bitstream",
+                "node": "sini.bitstream",
+                "kind": "instance",
+                "harness": "claude",
+                "status": "live",
+                "user": "sini",
+                "label": "dup-label"
+            },
+            {
+                "address": "sess-3@sini.bitstream",
+                "node": "sini.bitstream",
+                "kind": "instance",
+                "harness": "claude",
+                "status": "live",
+                "user": "sini",
+                "label": "dup-label"
+            },
+            {
+                "address": "genie@sini.other",
+                "node": "sini.other",
+                "kind": "service",
+                "harness": "svc",
+                "status": "live",
+                "user": "sini"
+            },
+            {
+                "address": "sess-1@sini.other",
+                "node": "sini.other",
+                "kind": "instance",
+                "harness": "claude",
+                "status": "live",
+                "user": "sini",
+                "label": "work"
+            },
+            {
+                "address": "sess-1@sini.unpermitted",
+                "node": "sini.unpermitted",
+                "kind": "instance",
+                "harness": "claude",
+                "status": "live",
+                "user": "sini",
+                "label": "work"
+            }
+        ]
+    });
+
+    {
+        let sql = rusqlite::Connection::open(&fixture.store_file).unwrap();
+        let owner = fixture.binding.subject.as_str();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        for (upstream_id, origin_json) in [
+            (
+                "01ARZ3NDEKTSV4RRFFQ69G5M01",
+                json!({"id": "sess-1", "service": null, "node": "sini.bitstream"}).to_string(),
+            ),
+            (
+                "01ARZ3NDEKTSV4RRFFQ69G5M02",
+                json!({"id": "sess-1/sub-a", "service": null, "node": "sini.bitstream"})
+                    .to_string(),
+            ),
+            (
+                "01ARZ3NDEKTSV4RRFFQ69G5M03",
+                json!({"id": "sess-1", "service": null, "node": "sini.unpermitted"}).to_string(),
+            ),
+            (
+                "01ARZ3NDEKTSV4RRFFQ69G5M04",
+                json!({"id": null, "service": "genie", "node": "sini.bitstream"}).to_string(),
+            ),
+        ] {
+            for revision in [3i64, 4i64] {
+                let id_for_rev = if revision == 3 {
+                    upstream_id.to_string()
+                } else {
+                    format!("{upstream_id}-r4")
+                };
+                sql.execute(
+                    "INSERT INTO custody_items (bus,upstream_id,event_id,grant_id,grant_revision,mailbox,owner,origin,text,envelope,in_reply_to,fingerprint,received_at,expires_at,held) VALUES ('bus',?1,?2,'grant',?3,'gateway@bus',?4,?5,'inbound text','{}',NULL,?6,?7,?8,1)",
+                    rusqlite::params![
+                        id_for_rev,
+                        format!("ev-{id_for_rev}"),
+                        revision,
+                        owner,
+                        origin_json,
+                        format!("fp-{id_for_rev}"),
+                        now,
+                        now + 86400
+                    ],
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    let serving = Serving::from_owner_file(&fixture.config_file)
+        .await
+        .unwrap();
+
+    // Oracle (1) + point (b): send to live session (by ID and by unique label) and to live subagent
+    // (`<parent-id>/<child>@<node>` and `<parent-label>/<child>@<node>`) on admitted `*@sini.bitstream`,
+    // plus exact service `genie@sini.other` (Oracle 5).
+    for (req_id, to, body) in [
+        (
+            "send-session-id",
+            "sess-1@sini.bitstream",
+            "hello session id",
+        ),
+        (
+            "send-session-label",
+            "work@sini.bitstream",
+            "hello session label",
+        ),
+        (
+            "send-subagent-id",
+            "sess-1/sub-a@sini.bitstream",
+            "hello subagent id",
+        ),
+        (
+            "send-subagent-label",
+            "work/sub-a@sini.bitstream",
+            "hello subagent via parent label",
+        ),
+        (
+            "send-exact-service",
+            "genie@sini.other",
+            "hello exact service",
+        ),
+    ] {
+        let before = bus.sent_frames.lock().unwrap().len();
+        let (_, sent, _) = confirmed_first_call(
+            &serving,
+            rpc(
+                "tools/call",
+                json!({
+                    "name": "xmsg_send",
+                    "arguments": {"request_id": req_id, "to": to, "text": body}
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(sent["result"]["structuredContent"]["state"], "confirmed");
+        let frames = bus.sent_frames.lock().unwrap();
+        assert_eq!(frames.len(), before + 1);
+        assert_eq!(frames.last().unwrap()["to"], to);
+        assert!(frames.last().unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .ends_with(body));
+    }
+
+    // Ambiguous label on admitted node (`dup-label@sini.bitstream`) and Oracle (2): same session on
+    // non-admitted node (`sess-1@sini.unpermitted`) or on node with only exact service policy
+    // (`sess-1@sini.other`) are refused with no bus send.
+    let sent_before_refusals = bus.sent_frames.lock().unwrap().len();
+    for (req_id, refused_to) in [
+        ("send-ambiguous-label", "dup-label@sini.bitstream"),
+        ("send-unpermitted-node", "sess-1@sini.unpermitted"),
+        ("send-unpermitted-label", "work@sini.unpermitted"),
+        ("send-unpermitted-subagent", "sess-1/sub-a@sini.unpermitted"),
+        ("send-session-on-service-only-node", "sess-1@sini.other"),
+    ] {
+        let (status, value, _) = fixture::request(
+            &serving,
+            "good-token",
+            rpc(
+                "tools/call",
+                json!({
+                    "name": "xmsg_send",
+                    "arguments": {"request_id": req_id, "to": refused_to, "text": "must refuse"}
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::FORBIDDEN,
+            "target {refused_to} was not refused: {value}"
+        );
+    }
+    assert_eq!(
+        bus.sent_frames.lock().unwrap().len(),
+        sent_before_refusals,
+        "refused sends must not publish to agent.sock"
+    );
+
+    // Oracle (3) ruling cell: with `reply.targets = ["genie@sini.bitstream"]` only (revision 2),
+    // a reply to a session origin or subagent origin on `sini.bitstream` is refused, whereas a
+    // reply to the exact service `genie@sini.bitstream` is admitted.
+    for (req_id, msg_id) in [
+        (
+            "reply-session-under-service-policy",
+            "01ARZ3NDEKTSV4RRFFQ69G5M01",
+        ),
+        (
+            "reply-subagent-under-service-policy",
+            "01ARZ3NDEKTSV4RRFFQ69G5M02",
+        ),
+    ] {
+        let (status, value, _) = fixture::request(
+            &serving,
+            "good-token",
+            rpc(
+                "tools/call",
+                json!({
+                    "name": "xmsg_reply",
+                    "arguments": {"request_id": req_id, "message_id": msg_id, "text": "must refuse"}
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::FORBIDDEN,
+            "exact service reply policy admitted session origin {msg_id}: {value}"
+        );
+    }
+    assert_eq!(bus.reply_frames.lock().unwrap().len(), 0);
+
+    let (_, exact_reply, _) = confirmed_first_call(
+        &serving,
+        rpc(
+            "tools/call",
+            json!({
+                "name": "xmsg_reply",
+                "arguments": {
+                    "request_id": "reply-exact-service",
+                    "message_id": "01ARZ3NDEKTSV4RRFFQ69G5M04",
+                    "text": "allowed service reply"
+                }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        exact_reply["result"]["structuredContent"]["state"],
+        "confirmed"
+    );
+    assert_eq!(bus.reply_frames.lock().unwrap().len(), 1);
+
+    // Switch reply policy to `["*@sini.bitstream"]` (revision 4): replies to session and subagent
+    // origins on `sini.bitstream` succeed, while a reply to a session origin on `sini.unpermitted`
+    // is refused.
+    {
+        let mut store = Store::open(&fixture.store_file).unwrap();
+        store
+            .set_outbound_policy(
+                "grant",
+                3,
+                &Policy {
+                    send: Some(Permission {
+                        targets: BTreeSet::from([
+                            "*@sini.bitstream".into(),
+                            "genie@sini.other".into(),
+                        ]),
+                        required_scope: "identity:read".into(),
+                    }),
+                    reply: Some(Permission {
+                        targets: BTreeSet::from(["*@sini.bitstream".into()]),
+                        required_scope: "identity:read".into(),
+                    }),
+                },
+            )
+            .unwrap();
+    }
+
+    for (req_id, msg_id) in [
+        ("reply-session-admitted", "01ARZ3NDEKTSV4RRFFQ69G5M01-r4"),
+        ("reply-subagent-admitted", "01ARZ3NDEKTSV4RRFFQ69G5M02-r4"),
+    ] {
+        let before = bus.reply_frames.lock().unwrap().len();
+        let (_, replied, _) = confirmed_first_call(
+            &serving,
+            rpc(
+                "tools/call",
+                json!({
+                    "name": "xmsg_reply",
+                    "arguments": {"request_id": req_id, "message_id": msg_id, "text": "hello back"}
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(replied["result"]["structuredContent"]["state"], "confirmed");
+        let frames = bus.reply_frames.lock().unwrap();
+        assert_eq!(frames.len(), before + 1);
+        assert_eq!(frames.last().unwrap()["message_id"], msg_id);
+    }
+
+    let replies_before_refusal = bus.reply_frames.lock().unwrap().len();
+    let (status, value, _) = fixture::request(
+        &serving,
+        "good-token",
+        rpc(
+            "tools/call",
+            json!({
+                "name": "xmsg_reply",
+                "arguments": {
+                    "request_id": "reply-session-unpermitted",
+                    "message_id": "01ARZ3NDEKTSV4RRFFQ69G5M03-r4",
+                    "text": "must refuse"
+                }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        axum::http::StatusCode::FORBIDDEN,
+        "session reply on unpermitted node was not refused: {value}"
+    );
+    assert_eq!(
+        bus.reply_frames.lock().unwrap().len(),
+        replies_before_refusal
+    );
 }
