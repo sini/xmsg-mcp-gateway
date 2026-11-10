@@ -54,6 +54,7 @@ enum Command {
     },
     Init,
     MigrateCustody,
+    MigrateCustodySummaries,
     MigrateOutbound,
     MigrateRetirement,
     MigrateEvents {
@@ -179,6 +180,10 @@ async fn run(cli: Cli) -> Result<(), CommandError> {
         (Some(state), Command::Init) => {
             Store::initialize(&state)?;
             println!("authority store initialized");
+        }
+        (Some(state), Command::MigrateCustodySummaries) => {
+            Store::open(&state)?.migrate_custody_summaries()?;
+            println!("custody observations folded into bounded summaries");
         }
         (Some(state), Command::MigrateCustody) => {
             Store::open(&state)?.migrate_custody()?;

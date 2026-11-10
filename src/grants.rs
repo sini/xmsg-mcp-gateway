@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use thiserror::Error;
 
+pub(crate) const SUMMARY_APPLICATION_ID: i64 = 0x584d4753;
 pub(crate) const LEGACY_APPLICATION_ID: i64 = 0x584d4757;
 pub(crate) const RETIREMENT_APPLICATION_ID: i64 = 0x584d4752;
 const APPLICATION_ID: i64 = LEGACY_APPLICATION_ID;
@@ -119,7 +120,7 @@ impl Store {
         let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if !matches!(
             application,
-            LEGACY_APPLICATION_ID | RETIREMENT_APPLICATION_ID
+            LEGACY_APPLICATION_ID | RETIREMENT_APPLICATION_ID | SUMMARY_APPLICATION_ID
         ) || !(SCHEMA_VERSION..=MAX_SUPPORTED_SCHEMA_VERSION).contains(&version)
         {
             return Err(Error::InvalidStore);

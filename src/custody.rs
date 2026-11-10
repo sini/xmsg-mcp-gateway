@@ -86,6 +86,11 @@ pub struct Status {
     pub oldest_pending_age_secs: Option<i64>,
     pub possible_known_loss: bool,
     pub offline_uncertainty: bool,
+    pub coalesced_uncertainty: bool,
+    pub gap_observations: i64,
+    pub gap_first_seen: Option<i64>,
+    pub gap_last_seen: Option<i64>,
+    pub widest_gap_secs: Option<i64>,
     pub expired_metadata: i64,
     pub expired_content: i64,
     pub expired_tombstones: i64,
@@ -138,6 +143,72 @@ pub(crate) fn validate_schema(connection: &Connection) -> Result<(), GrantError>
         .prepare("SELECT bus, upstream_id, first_seen, expires_at FROM custody_pending LIMIT 0")?;
     connection.prepare("SELECT bus, connected, disconnected_at, reconnected_at, outages, expired_first_seen, last_observed_at FROM custody_links LIMIT 0")?;
     connection.prepare("SELECT bus, gap_start, gap_end, expires_at FROM custody_gaps LIMIT 0")?;
+    let marker: i64 = connection.pragma_query_value(None, "application_id", |r| r.get(0))?;
+    if marker == crate::grants::SUMMARY_APPLICATION_ID {
+        connection.prepare("SELECT bus,reason,observations,max_size,first_seen,last_seen,expires_at FROM custody_refusal_summaries LIMIT 0")?;
+        connection.prepare("SELECT bus,observations,gap_start,gap_end,widest,widest_expires_at,expires_at,last_start,last_end,last_expires_at FROM custody_gap_summary LIMIT 0")?;
+    }
+    Ok(())
+}
+
+const SUMMARY_SCHEMA: &str = "
+CREATE TABLE custody_refusal_summaries (
+ bus TEXT NOT NULL, reason TEXT NOT NULL CHECK(reason IN ('conflict','refusal')),
+ observations INTEGER NOT NULL CHECK(observations>0), max_size INTEGER NOT NULL CHECK(max_size>=0), first_seen INTEGER NOT NULL,
+ last_seen INTEGER NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY(bus,reason));
+CREATE TABLE custody_gap_summary (
+ bus TEXT PRIMARY KEY NOT NULL, observations INTEGER NOT NULL CHECK(observations>0),
+ gap_start INTEGER NOT NULL, gap_end INTEGER NOT NULL, widest INTEGER NOT NULL,
+ widest_expires_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+ last_start INTEGER NOT NULL, last_end INTEGER NOT NULL, last_expires_at INTEGER NOT NULL);
+";
+
+fn create_summaries(tx: &rusqlite::Transaction<'_>) -> Result<(), Error> {
+    tx.execute_batch(SUMMARY_SCHEMA)?;
+    tx.execute_batch("INSERT INTO custody_refusal_summaries
+        SELECT bus,CASE WHEN reason='conflict' THEN 'conflict' ELSE 'refusal' END,
+          COUNT(*),MAX(size),MIN(first_seen),MAX(first_seen),MAX(expires_at)
+        FROM custody_metadata GROUP BY bus,CASE WHEN reason='conflict' THEN 'conflict' ELSE 'refusal' END;")?;
+    let gaps: Vec<(String, i64, i64, i64)> = {
+        let mut query = tx.prepare("SELECT bus,gap_start,gap_end,expires_at FROM custody_gaps ORDER BY bus,gap_end,gap_start")?;
+        let rows = query
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<Result<_, _>>()?;
+        rows
+    };
+    for (bus, start, end, expiry) in gaps {
+        record_gap(tx, &bus, start, end, expiry)?;
+    }
+    tx.execute("DELETE FROM custody_metadata", [])?;
+    tx.execute("DELETE FROM custody_gaps", [])?;
+    tx.pragma_update(
+        None,
+        "application_id",
+        crate::grants::SUMMARY_APPLICATION_ID,
+    )?;
+    Ok(())
+}
+
+fn record_gap(
+    tx: &rusqlite::Transaction<'_>,
+    bus: &str,
+    start: i64,
+    end: i64,
+    expiry: i64,
+) -> Result<(), Error> {
+    let previous: Option<i64> = tx.query_row("SELECT last_expires_at FROM custody_gap_summary WHERE bus=?1 AND last_start=?2 AND last_end=?3",params![bus,start,end],|r|r.get(0)).optional()?;
+    let expiry = previous.map_or(expiry, |stored| stored.min(expiry));
+    let width = end.saturating_sub(start);
+    tx.execute("INSERT INTO custody_gap_summary(bus,observations,gap_start,gap_end,widest,widest_expires_at,expires_at,last_start,last_end,last_expires_at)
+        VALUES(?1,1,?2,?3,?4,?5,?5,?2,?3,?5)
+        ON CONFLICT(bus) DO UPDATE SET
+        observations=CASE WHEN observations<9223372036854775807 THEN observations+1 ELSE observations END,
+        gap_start=MIN(gap_start,excluded.gap_start),gap_end=MAX(gap_end,excluded.gap_end),
+        widest_expires_at=CASE WHEN excluded.widest>widest THEN excluded.widest_expires_at WHEN excluded.widest=widest THEN MAX(widest_expires_at,excluded.widest_expires_at) ELSE widest_expires_at END,
+        widest=MAX(widest,excluded.widest),
+        expires_at=CASE WHEN last_start=excluded.last_start AND last_end=excluded.last_end THEN expires_at ELSE MAX(expires_at,excluded.expires_at) END,
+        last_expires_at=excluded.last_expires_at,
+        last_start=excluded.last_start,last_end=excluded.last_end",params![bus,start,end,width,expiry])?;
     Ok(())
 }
 
@@ -172,17 +243,30 @@ fn expire(tx: &rusqlite::Transaction<'_>, limits: &Limits, now: i64) -> Result<(
     if version >= crate::grants::EVENTS_SCHEMA_VERSION {
         crate::event_store::record_expiry(tx, now)?;
     }
-    tx.execute("DELETE FROM custody_gaps WHERE expires_at<=?1", [now])?;
+    tx.execute(
+        "DELETE FROM custody_gap_summary WHERE expires_at<=?1",
+        [now],
+    )?;
+    let expired_observations = {
+        let mut query =
+            tx.prepare("SELECT observations FROM custody_refusal_summaries WHERE expires_at<=?1")?;
+        let mut rows = query.query([now])?;
+        let mut total = 0_i64;
+        while let Some(row) = rows.next()? {
+            total = total.saturating_add(row.get::<_, i64>(0)?);
+        }
+        total
+    };
+    tx.execute(
+        "DELETE FROM custody_refusal_summaries WHERE expires_at<=?1",
+        [now],
+    )?;
+    tx.execute("UPDATE custody_counters SET value=MIN(9223372036854775807-value,?1)+value WHERE name='expired_metadata'", [expired_observations])?;
     tx.execute("UPDATE custody_links SET expired_first_seen = (SELECT MIN(first_seen) FROM (SELECT expired_first_seen AS first_seen UNION ALL SELECT first_seen FROM custody_pending WHERE bus = custody_links.bus AND expires_at<=?1)) WHERE EXISTS(SELECT 1 FROM custody_pending WHERE bus=custody_links.bus AND expires_at<=?1)", [now])?;
     let pending = tx.execute("DELETE FROM custody_pending WHERE expires_at<=?1", [now])?;
     tx.execute(
         "UPDATE custody_counters SET value=value+?1 WHERE name='expired_pending'",
         [pending as i64],
-    )?;
-    let expired = tx.execute("DELETE FROM custody_metadata WHERE expires_at <= ?1", [now])?;
-    tx.execute(
-        "UPDATE custody_counters SET value=value+?1 WHERE name='expired_metadata'",
-        [expired as i64],
     )?;
     if version >= crate::grants::EVENTS_SCHEMA_VERSION {
         tx.execute("UPDATE custody_outbox SET state='expired',body=NULL WHERE event_id IN (SELECT event_id FROM custody_items WHERE expires_at<=?1)", [now])?;
@@ -218,6 +302,15 @@ impl Store {
         if !(CUSTODY_SCHEMA_VERSION..=MAX_SUPPORTED_SCHEMA_VERSION).contains(&version) {
             return Err(Error::MigrationRequired);
         }
+        let marker: i64 = self
+            .connection
+            .pragma_query_value(None, "application_id", |r| r.get(0))?;
+        if marker != crate::grants::SUMMARY_APPLICATION_ID {
+            return Err(Error::MigrationRequired);
+        }
+        self.connection.prepare("SELECT observations,max_size,first_seen,last_seen,expires_at FROM custody_refusal_summaries LIMIT 0")?;
+        self.connection
+            .prepare("SELECT widest,expires_at,last_expires_at FROM custody_gap_summary LIMIT 0")?;
         Ok(())
     }
 
@@ -238,6 +331,7 @@ impl Store {
         limits: &Limits,
         at: SystemTime,
     ) -> Result<(), Error> {
+        self.require_custody_ready()?;
         let deadlines = limits.windows(at)?;
         let now = deadlines.observed;
         if bus.trim().is_empty() {
@@ -269,23 +363,7 @@ impl Store {
                 let (_, proposed_expiry) =
                     crate::deadline::window(observation_at, limits.metadata_retention_secs)
                         .map_err(|_| Error::Configuration)?;
-                let stored_expiry: Option<i64> = tx.query_row(
-                    "SELECT MIN(expires_at) FROM custody_gaps WHERE bus=?1 AND gap_start=?2 AND gap_end=?3",
-                    params![bus, start, observed], |row| row.get(0),
-                )?;
-                let expiry =
-                    stored_expiry.map_or(proposed_expiry, |stored| stored.min(proposed_expiry));
-                tx.execute(
-                    "DELETE FROM custody_gaps WHERE bus=?1 AND gap_start=?2 AND gap_end=?3",
-                    params![bus, start, observed],
-                )?;
-                tx.execute("DELETE FROM custody_gaps WHERE bus=?1 AND gap_end-gap_start<=?2 AND expires_at<=?3", params![bus, observed-start, expiry])?;
-                let count: i64 =
-                    tx.query_row("SELECT COUNT(*) FROM custody_gaps", [], |row| row.get(0))?;
-                if count >= limits.max_gap_intervals {
-                    return Err(Error::MetadataFull);
-                }
-                tx.execute("INSERT INTO custody_gaps(bus,gap_start,gap_end,expires_at) VALUES (?1,?2,?3,?4)", params![bus, start, observed, expiry])?;
+                record_gap(&tx, bus, start, observed, proposed_expiry)?;
             }
         }
         tx.execute(
@@ -323,6 +401,7 @@ impl Store {
         at: SystemTime,
         effective_reply_ttl_secs: i64,
     ) -> Result<Status, Error> {
+        self.require_custody_ready()?;
         let now = limits.windows(at)?.observed;
         if effective_reply_ttl_secs <= 0 {
             return Err(Error::Configuration);
@@ -332,7 +411,7 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         expire(&tx, limits, now)?;
         let (held_items, expired_items): (i64, i64) = tx.query_row("SELECT COALESCE(SUM(text IS NOT NULL),0), COALESCE(SUM(text IS NULL),0) FROM custody_items WHERE bus=?1", [&scope.bus_instance], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        let (refusals, quarantines): (i64, i64) = tx.query_row("SELECT COALESCE(SUM(reason!='conflict'),0), COALESCE(SUM(reason='conflict'),0) FROM custody_metadata WHERE bus=?1", [&scope.bus_instance], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let (refusals, quarantines): (i64, i64) = tx.query_row("SELECT COALESCE(MAX(CASE WHEN reason!='conflict' THEN observations ELSE 0 END),0), COALESCE(MAX(CASE WHEN reason='conflict' THEN observations ELSE 0 END),0) FROM custody_refusal_summaries WHERE bus=?1", [&scope.bus_instance], |row| Ok((row.get(0)?, row.get(1)?)))?;
         let pending: i64 = tx.query_row(
             "SELECT COUNT(*) FROM custody_pending WHERE bus=?1",
             [&scope.bus_instance],
@@ -341,7 +420,7 @@ impl Store {
         let first_seen: Option<i64> = tx.query_row("SELECT MIN(first_seen) FROM (SELECT first_seen FROM custody_pending WHERE bus=?1 UNION ALL SELECT expired_first_seen FROM custody_links WHERE bus=?1)", [&scope.bus_instance], |row| row.get(0))?;
         let oldest_pending_age_secs = first_seen.map(|first| now.saturating_sub(first).max(0));
         let offline_uncertainty: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM custody_gaps WHERE bus=?1 AND (gap_end-gap_start)>=?3) OR EXISTS(SELECT 1 FROM custody_links WHERE bus=?1 AND (?2-CASE WHEN connected=0 THEN disconnected_at ELSE last_observed_at END)>=?3)",
+            "SELECT EXISTS(SELECT 1 FROM custody_gap_summary WHERE bus=?1 AND widest>=?3) OR EXISTS(SELECT 1 FROM custody_links WHERE bus=?1 AND (?2-CASE WHEN connected=0 THEN disconnected_at ELSE last_observed_at END)>=?3)",
             params![scope.bus_instance, now, effective_reply_ttl_secs],
             |row| row.get(0),
         )?;
@@ -352,6 +431,7 @@ impl Store {
                 |row| row.get(0),
             )
         };
+        let gap: Option<(i64,i64,i64,i64,i64)> = tx.query_row("SELECT observations,gap_start,gap_end,widest,widest_expires_at FROM custody_gap_summary WHERE bus=?1",[&scope.bus_instance],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
         let status = Status {
             held_items,
             expired_items,
@@ -362,6 +442,11 @@ impl Store {
                 .is_some_and(|age| age >= effective_reply_ttl_secs),
             oldest_pending_age_secs,
             offline_uncertainty,
+            coalesced_uncertainty: gap.is_some_and(|g| g.0 > 1 || g.4 <= now),
+            gap_observations: gap.map_or(0, |g| g.0),
+            gap_first_seen: gap.map(|g| g.1),
+            gap_last_seen: gap.map(|g| g.2),
+            widest_gap_secs: gap.map(|g| g.3),
             expired_metadata: counter("expired_metadata")?,
             expired_content: counter("expired_content")?,
             expired_tombstones: counter("expired_tombstones")?,
@@ -369,6 +454,23 @@ impl Store {
         };
         tx.commit()?;
         Ok(status)
+    }
+
+    pub fn migrate_custody_summaries(&mut self) -> Result<(), Error> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        let marker: i64 = tx.pragma_query_value(None, "application_id", |r| r.get(0))?;
+        if !(CUSTODY_SCHEMA_VERSION..=MAX_SUPPORTED_SCHEMA_VERSION).contains(&version) {
+            return Err(Error::MigrationRequired);
+        }
+        if marker == crate::grants::SUMMARY_APPLICATION_ID {
+            return Err(GrantError::NoChange.into());
+        }
+        create_summaries(&tx)?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn migrate_custody(&mut self) -> Result<(), Error> {
@@ -406,6 +508,7 @@ impl Store {
                 gap_end INTEGER NOT NULL, expires_at INTEGER NOT NULL);
              INSERT INTO custody_counters VALUES ('expired_metadata', 0), ('expired_content', 0), ('expired_tombstones', 0), ('expired_pending', 0);",
         )?;
+        create_summaries(&tx)?;
         tx.pragma_update(None, "user_version", CUSTODY_SCHEMA_VERSION)?;
         tx.commit()?;
         Ok(())
@@ -429,6 +532,10 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if !(CUSTODY_SCHEMA_VERSION..=MAX_SUPPORTED_SCHEMA_VERSION).contains(&version) {
+            return Err(Error::MigrationRequired);
+        }
+        let marker: i64 = tx.pragma_query_value(None, "application_id", |r| r.get(0))?;
+        if marker != crate::grants::SUMMARY_APPLICATION_ID {
             return Err(Error::MigrationRequired);
         }
         expire(&tx, limits, now)?;
@@ -493,23 +600,12 @@ impl Store {
             return Ok(Acceptance::Deferred);
         }
         if conflict || refused {
-            let reason = if conflict {
-                "conflict"
-            } else if oversized {
-                "oversized"
-            } else {
-                "capacity"
-            };
-            let known: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM custody_metadata WHERE bus=?1 AND upstream_id=?2 AND fingerprint=?3 AND reason=?4)", params![scope.bus_instance, delivery.message_id(), hash, reason], |row| row.get(0))?;
-            let records: i64 =
-                tx.query_row("SELECT COUNT(*) FROM custody_metadata", [], |row| {
-                    row.get(0)
-                })?;
-            if !known && records >= limits.max_metadata {
-                return Err(Error::MetadataFull);
-            }
+            let reason = if conflict { "conflict" } else { "refusal" };
             let bounded_size = i64::try_from(size).map_err(|_| Error::Configuration)?;
-            tx.execute("INSERT OR IGNORE INTO custody_metadata (bus, upstream_id, fingerprint, origin, size, reason, first_seen, expires_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)", params![scope.bus_instance, delivery.message_id(), hash, origin, bounded_size, reason, now, deadlines.metadata_expires])?;
+            tx.execute("INSERT INTO custody_refusal_summaries(bus,reason,observations,max_size,first_seen,last_seen,expires_at) VALUES(?1,?2,1,?5,?3,?3,?4)
+                ON CONFLICT(bus,reason) DO UPDATE SET
+                observations=CASE WHEN observations<9223372036854775807 THEN observations+1 ELSE observations END,
+                max_size=MAX(max_size,excluded.max_size),first_seen=MIN(first_seen,excluded.first_seen),last_seen=MAX(last_seen,excluded.last_seen),expires_at=MAX(expires_at,excluded.expires_at)", params![scope.bus_instance,reason,now,deadlines.metadata_expires,bounded_size])?;
             tx.commit()?;
             return Ok(if conflict {
                 Acceptance::Quarantined
@@ -579,6 +675,253 @@ mod retention_tests {
     }
 
     #[test]
+    fn rolling_gap_keeps_widest_uncertainty_without_blocking_live_observation() {
+        let (_directory, mut store) = store();
+        let limits = Limits {
+            metadata_retention_secs: 10,
+            ..Limits::default()
+        };
+        let at = |n| UNIX_EPOCH + Duration::from_secs(n);
+        store
+            .record_bus_link("node", true, &limits, at(100))
+            .unwrap();
+        store
+            .record_bus_link("node", true, &limits, at(120))
+            .unwrap();
+        for second in 121..=145 {
+            store
+                .record_bus_link("node", true, &limits, at(second))
+                .unwrap();
+        }
+        let scope = Scope {
+            bus_instance: "node".into(),
+            grant_id: "unused".into(),
+        };
+        let status = store.custody_status(&scope, &limits, at(145), 15).unwrap();
+        assert!(
+            status.offline_uncertainty,
+            "summary forgot the widest interval"
+        );
+        assert!(
+            status.coalesced_uncertainty,
+            "rolling witness lost coalesced uncertainty"
+        );
+        assert_eq!(status.widest_gap_secs, Some(20));
+        assert_eq!(status.gap_observations, 26);
+        assert!(
+            !status.possible_known_loss,
+            "summary fabricated a known message loss"
+        );
+        store
+            .record_bus_link("node", true, &limits, at(146))
+            .expect("stale widest witness blocked live readiness");
+    }
+
+    #[test]
+    fn summaries_saturate_without_breaking_status_or_expiry() {
+        let (_directory, mut store) = store();
+        let limits = Limits::default();
+        store
+            .record_bus_link("node", true, &limits, UNIX_EPOCH + Duration::from_secs(100))
+            .unwrap();
+        store.connection.execute_batch("INSERT INTO custody_refusal_summaries VALUES ('node','conflict',9223372036854775807,1,1,2,200),('node','refusal',9223372036854775807,1,1,2,200);").unwrap();
+        store
+            .record_bus_link("node", true, &limits, UNIX_EPOCH + Duration::from_secs(101))
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE custody_gap_summary SET observations=9223372036854775807",
+                [],
+            )
+            .unwrap();
+        store
+            .record_bus_link("node", true, &limits, UNIX_EPOCH + Duration::from_secs(102))
+            .unwrap();
+        let count: i64 = store
+            .connection
+            .query_row("SELECT observations FROM custody_gap_summary", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, i64::MAX, "gap observation count did not saturate");
+        let scope = Scope {
+            bus_instance: "node".into(),
+            grant_id: "unused".into(),
+        };
+        let status = store
+            .custody_status(&scope, &limits, UNIX_EPOCH + Duration::from_secs(101), 15)
+            .unwrap();
+        assert_eq!((status.refusals, status.quarantines), (i64::MAX, i64::MAX));
+        let status = store
+            .custody_status(&scope, &limits, UNIX_EPOCH + Duration::from_secs(200), 15)
+            .unwrap();
+        assert_eq!(
+            status.expired_metadata,
+            i64::MAX,
+            "expiry total did not saturate"
+        );
+        store.connection.execute_batch("UPDATE custody_counters SET value=0 WHERE name='expired_metadata'; INSERT INTO custody_refusal_summaries VALUES ('node','refusal',9007199254740993,1,1,2,300);").unwrap();
+        let status = store
+            .custody_status(&scope, &limits, UNIX_EPOCH + Duration::from_secs(300), 15)
+            .unwrap();
+        assert_eq!(
+            status.expired_metadata, 9007199254740993,
+            "expiry total lost integer precision"
+        );
+    }
+
+    #[test]
+    fn explicit_summary_migration_preserves_history_and_rolls_back_failure() {
+        let (directory, mut store) = store();
+        store.connection.execute_batch("DROP TABLE custody_refusal_summaries; DROP TABLE custody_gap_summary;
+            INSERT INTO custody_metadata VALUES ('node','one','hash-one','origin',1,'conflict',10,800),('node','two','hash-two','origin',1,'oversized',20,900);
+            INSERT INTO custody_gaps VALUES ('node',1,101,800),('node',200,201,900);
+            INSERT INTO custody_items VALUES ('node','accepted','event','grant',1,'mailbox','owner','origin','original body','envelope',NULL,'original fingerprint',10,1000,1);
+            INSERT INTO custody_pending VALUES ('node','pending',10,900);
+            CREATE TRIGGER fail_fold BEFORE DELETE ON custody_metadata BEGIN SELECT RAISE(ABORT,'forced fold failure'); END;").unwrap();
+        store
+            .connection
+            .execute("INSERT INTO custody_outbox VALUES ('event','held')", [])
+            .unwrap();
+        fn unchanged_rows(store: &Store) -> Vec<Vec<rusqlite::types::Value>> {
+            [
+                "custody_items",
+                "custody_pending",
+                "custody_outbox",
+                "grants",
+                "custody_links",
+                "custody_counters",
+            ]
+            .iter()
+            .flat_map(|table| {
+                let mut query = store
+                    .connection
+                    .prepare(&format!("SELECT * FROM {table} ORDER BY 1"))
+                    .unwrap();
+                let columns = query.column_count();
+                query
+                    .query_map([], |r| (0..columns).map(|n| r.get(n)).collect())
+                    .unwrap()
+                    .collect::<Result<Vec<Vec<rusqlite::types::Value>>, _>>()
+                    .unwrap()
+            })
+            .collect()
+        }
+        let original = unchanged_rows(&store);
+        store
+            .connection
+            .pragma_update(
+                None,
+                "application_id",
+                crate::grants::RETIREMENT_APPLICATION_ID,
+            )
+            .unwrap();
+        assert!(store.migrate_custody_summaries().is_err());
+        let marker: i64 = store
+            .connection
+            .pragma_query_value(None, "application_id", |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            marker,
+            crate::grants::RETIREMENT_APPLICATION_ID,
+            "failed fold changed writer marker"
+        );
+        assert!(
+            store
+                .connection
+                .prepare("SELECT * FROM custody_gap_summary")
+                .is_err(),
+            "failed fold retained partial schema"
+        );
+        let old: i64 = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM custody_metadata", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(old, 2, "failed fold dropped durable evidence");
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_fold")
+            .unwrap();
+        store.migrate_custody_summaries().unwrap();
+        assert_eq!(unchanged_rows(&store),original,"migration changed accepted content, original fingerprints, pending IDs, outbox or authority");
+        let marker: i64 = store
+            .connection
+            .pragma_query_value(None, "application_id", |r| r.get(0))
+            .unwrap();
+        assert_ne!(marker, crate::grants::LEGACY_APPLICATION_ID);
+        assert_ne!(
+            marker,
+            crate::grants::RETIREMENT_APPLICATION_ID,
+            "old reader accepts summary store"
+        );
+        let content: (String, String) = store
+            .connection
+            .query_row("SELECT text,fingerprint FROM custody_items", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(
+            content,
+            ("original body".into(), "original fingerprint".into())
+        );
+        let summary: (i64, i64, i64) = store
+            .connection
+            .query_row(
+                "SELECT observations,widest,expires_at FROM custody_gap_summary",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            summary,
+            (2, 100, 900),
+            "migration lost widest or retained expiry"
+        );
+        let pending: i64 = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM custody_pending", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(pending, 1);
+        drop(store);
+        Store::open(&directory.path().join("store.db")).unwrap();
+    }
+
+    #[test]
+    fn thousand_shrinking_gaps_keep_observation_ready() {
+        let (_directory, mut store) = store();
+        let limits = Limits::default();
+        let mut seconds = 100;
+        store
+            .record_bus_link(
+                "node",
+                true,
+                &limits,
+                UNIX_EPOCH + Duration::from_secs(seconds),
+            )
+            .unwrap();
+        for width in (1..=1001).rev() {
+            seconds += width;
+            assert!(
+                store
+                    .record_bus_link(
+                        "node",
+                        true,
+                        &limits,
+                        UNIX_EPOCH + Duration::from_secs(seconds)
+                    )
+                    .is_ok(),
+                "shrinking gaps exhausted readiness at width {width}"
+            );
+        }
+        let count: i64 = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM custody_gap_summary", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "gap summary row bound missing");
+    }
+
+    #[test]
     fn fractional_gap_retention_preserves_the_complete_lifetime() {
         for nanos in [1, 999_999_999] {
             for lifetime in [1, 86_400] {
@@ -594,7 +937,9 @@ mod retention_tests {
                 store.record_bus_link("node", false, &limits, at).unwrap();
                 let expires: i64 = store
                     .connection
-                    .query_row("SELECT expires_at FROM custody_gaps", [], |row| row.get(0))
+                    .query_row("SELECT expires_at FROM custody_gap_summary", [], |row| {
+                        row.get(0)
+                    })
                     .unwrap();
                 let remaining = (UNIX_EPOCH + Duration::from_secs(expires as u64))
                     .duration_since(at)
@@ -615,7 +960,9 @@ mod retention_tests {
                     .unwrap();
                 let visible: i64 = store
                     .connection
-                    .query_row("SELECT COUNT(*) FROM custody_gaps", [], |row| row.get(0))
+                    .query_row("SELECT COUNT(*) FROM custody_gap_summary", [], |row| {
+                        row.get(0)
+                    })
                     .unwrap();
                 assert_eq!(visible, 1, "gap expired before its guaranteed lifetime");
                 store
@@ -628,7 +975,9 @@ mod retention_tests {
                     .unwrap();
                 let visible: i64 = store
                     .connection
-                    .query_row("SELECT COUNT(*) FROM custody_gaps", [], |row| row.get(0))
+                    .query_row("SELECT COUNT(*) FROM custody_gap_summary", [], |row| {
+                        row.get(0)
+                    })
                     .unwrap();
                 assert_eq!(visible, 0, "expired gap remained observable");
             }
@@ -662,17 +1011,17 @@ mod retention_tests {
                 UNIX_EPOCH + Duration::new(101, 999_999_999),
             )
             .unwrap();
-        let (count, expires): (i64, i64) = store
+        let (count, expires, last_expires, widest_expires): (i64, i64, i64, i64) = store
             .connection
             .query_row(
-                "SELECT COUNT(*), MIN(expires_at) FROM custody_gaps",
+                "SELECT COUNT(*), MIN(expires_at), MIN(last_expires_at), MIN(widest_expires_at) FROM custody_gap_summary",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap();
         assert_eq!(
-            (count, expires),
-            (1, 102),
+            (count, expires, last_expires, widest_expires),
+            (1, 102, 102, 102),
             "repeat extended the same gap's retention"
         );
     }
@@ -705,7 +1054,7 @@ mod expiry_boundary_tests {
             store
                 .connection
                 .execute(
-                    "INSERT INTO custody_gaps VALUES (?1,99,100,?2)",
+                    "INSERT INTO custody_gap_summary VALUES (?1,1,99,100,1,?2,?2,99,100,?2)",
                     params![scope.bus_instance, expiry],
                 )
                 .unwrap();
@@ -716,7 +1065,13 @@ mod expiry_boundary_tests {
                     params![scope.bus_instance, created, expiry],
                 )
                 .unwrap();
-            store.connection.execute("INSERT INTO custody_metadata VALUES (?1,'message','fingerprint','origin',1,'oversized',?2,?3)", params![scope.bus_instance, created, expiry]).unwrap();
+            store
+                .connection
+                .execute(
+                    "INSERT INTO custody_refusal_summaries VALUES (?1,'refusal',1,1,?2,?2,?3)",
+                    params![scope.bus_instance, created, expiry],
+                )
+                .unwrap();
             store.connection.execute("INSERT INTO custody_items VALUES (?1,'message','event','fixture',1,'gateway','owner','origin','body','envelope',NULL,'fingerprint',?2,?3,1)", params![scope.bus_instance, created, expiry]).unwrap();
             store
                 .connection
@@ -733,7 +1088,9 @@ mod expiry_boundary_tests {
             let gap_count = |store: &Store| -> i64 {
                 store
                     .connection
-                    .query_row("SELECT COUNT(*) FROM custody_gaps", [], |row| row.get(0))
+                    .query_row("SELECT COUNT(*) FROM custody_gap_summary", [], |row| {
+                        row.get(0)
+                    })
                     .unwrap()
             };
             let outbox = |store: &Store| -> String {
