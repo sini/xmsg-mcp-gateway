@@ -331,7 +331,7 @@ CASES.extend([
     ("retryable-unknown", "src/serving.rs", '"reconciliation_required":false', '"reconciliation_required":true',
      "messaging", "an_accepted_operation_across_restart_recovers_its_original_receipt_and_key",
      "within-lifetime uncertainty must permit same-key retry"),
-    ("expired-unknown", "src/serving.rs", '"reconciliation_required":true', '"reconciliation_required":false',
+    ("expired-unknown", "src/serving.rs", 'tool_result(json!({"state":"unknown",\n            "request_id":request_id,"reconciliation_required":true}))', 'tool_result(json!({"state":"unknown",\n            "request_id":request_id,"reconciliation_required":false}))',
      "messaging", "expired_mcp_uncertainty_requires_reconciliation_without_resubmission",
      "expired uncertainty must require reconciliation"),
     ("same-tick-health", "src/session.rs", "match snapshot.endpoint.health() {", "match Ok::<(), ClientError>(()) {",
@@ -367,8 +367,16 @@ CASES.append(
 )
 
 
+CASES.append((
+    "broker-expired-unknown", "src/serving.rs",
+    'Outcome::ExpiredUnknown => return Ok(json!({"state":"unknown","request_id":request_id,"reconciliation_required":true}))',
+    'Outcome::ExpiredUnknown => return Ok(json!({"state":"unknown","request_id":request_id,"reconciliation_required":false}))',
+    "broker_bridge", "expired_broker_uncertainty_requires_reconciliation_without_retry_advice",
+    "expired broker uncertainty must require reconciliation",
+))
+
 def main():
-    if len(CASES) != 37:
+    if len(CASES) != 38:
         raise RuntimeError("wiring mutant inventory drift")
     for name, filename, before, *_ in CASES:
         if (ROOT / filename).read_text().count(before) != 1:

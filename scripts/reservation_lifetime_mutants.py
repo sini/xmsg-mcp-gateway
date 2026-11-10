@@ -124,7 +124,7 @@ def units():
 
 def acceptance():
     source = (ROOT / "tests/messaging.rs").read_text()
-    site = 'fixture.config["messaging"]["manifest"]["dedup_lifetime_secs"] = json!(3600);'
+    site = "let acceptance_window_secs = 3600;"
     assert source.count(site) == 1, "acceptance-window site drift"
     nonce = uuid.uuid4().hex
     for label, variant, expected in (

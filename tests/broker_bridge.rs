@@ -144,9 +144,15 @@ async fn setup_mode(auto_reply: bool) -> (fixture::Fixture, Bus) {
                         .starts_with("[External message via gateway@bus; gateway correlation gw-"));
                     let request: Value =
                         serde_json::from_str(text.split_once('\n').unwrap().1).unwrap();
-                    assert_eq!(request["kind"], "gist_read");
+                    assert!(matches!(
+                        request["kind"].as_str(),
+                        Some("gist_read" | "gist" | "gist_update" | "gist_comment")
+                    ));
                     assert!(request.get("request_id").is_none());
-                    let result = json!({"thread":"bridge","acted":true,"reason":"read","redactions":[],"url":"https://gist.github.com/abc","gist":{"untrusted":true,"id":"abc","url":"https://gist.github.com/abc","description":"example","owner":null,"revision":"revision","files":{"resource":"safe".repeat(2000)}}});
+                    let mut result = json!({"thread":"bridge","acted":true,"reason":"read","redactions":[],"url":"https://gist.github.com/abc","gist":{"untrusted":true,"id":"abc","url":"https://gist.github.com/abc","description":"example","owner":null,"revision":"revision","files":{"resource":"safe".repeat(2000)}}});
+                    if request["kind"] != "gist_read" {
+                        result.as_object_mut().unwrap().remove("gist");
+                    }
                     if auto_reply {
                         queued.lock().unwrap().push_back(json!({"action":"deliver","messageId":"result-wire","fromName":"untrusted label","text":result.to_string(),"envelope":"peer data","origin":{"id":null,"service":"genie","node":"node"},"inReplyTo":"request-wire"}));
                     }
@@ -509,5 +515,154 @@ async fn broker_status_rechecks_send_ceiling_at_the_final_result_read() {
         bus.sends.load(Ordering::SeqCst),
         1,
         "read-only status published work"
+    );
+}
+
+#[tokio::test]
+async fn broker_result_survives_effect_expiry_until_result_retirement() {
+    let (fixture, bus) = setup().await;
+    let serving = Serving::from_owner_file(&fixture.config_file)
+        .await
+        .unwrap();
+    let request = rpc(
+        "tools/call",
+        json!({"name":"gist_read","arguments":{"request_id":"separate-windows","id":"abc"}}),
+    );
+    let (_, value, _) = fixture::request(&serving, "good-token", request.clone()).await;
+    assert_eq!(
+        value["result"]["structuredContent"]["broker"]["state"], "confirmed",
+        "{value}"
+    );
+    let database = rusqlite::Connection::open(&fixture.store_file).unwrap();
+    database.execute(
+        "UPDATE outbound_reservations SET retry_until=created_at WHERE request_id='separate-windows'",
+        [],
+    ).unwrap();
+    let status_request = rpc(
+        "tools/call",
+        json!({"name":"xmsg_message_status","arguments":{"request_id":"separate-windows"}}),
+    );
+    let (_, value, _) = fixture::request(&serving, "good-token", status_request.clone()).await;
+    assert_eq!(
+        value["result"]["structuredContent"]["broker"]["result"]["gist"]["files"]["resource"],
+        "safe".repeat(2000),
+        "broker result was lost at the shorter effect horizon: {value}"
+    );
+    assert_eq!(bus.sends.load(Ordering::SeqCst), 1);
+    database.execute(
+        "UPDATE outbound_reservations SET recovery_until=created_at WHERE request_id='separate-windows'",
+        [],
+    ).unwrap();
+    let (_, value, _) = fixture::request(&serving, "good-token", status_request).await;
+    assert_eq!(
+        value["result"]["structuredContent"]["state"], "expired",
+        "{value}"
+    );
+    assert_eq!(value["result"]["structuredContent"]["not_reexecuted"], true);
+    assert!(
+        value["result"]["structuredContent"].get("broker").is_none(),
+        "retired content reappeared: {value}"
+    );
+    drop(serving);
+    let serving = Serving::from_owner_file(&fixture.config_file)
+        .await
+        .unwrap();
+    let (_, value, _) = fixture::request(&serving, "good-token", request).await;
+    assert_eq!(
+        value["result"]["structuredContent"]["state"], "expired",
+        "{value}"
+    );
+    assert_eq!(value["result"]["structuredContent"]["not_reexecuted"], true);
+    assert_eq!(
+        bus.sends.load(Ordering::SeqCst),
+        1,
+        "expired gist ID became a fresh effect"
+    );
+    let rows: i64 = database
+        .query_row(
+            "SELECT COUNT(*) FROM outbound_reservations WHERE request_id='separate-windows'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        rows, 0,
+        "retired broker proposal still consumes active quota"
+    );
+}
+
+#[tokio::test]
+async fn retired_gist_write_request_id_never_reexecutes() {
+    let (fixture, bus) = setup().await;
+    let serving = Serving::from_owner_file(&fixture.config_file)
+        .await
+        .unwrap();
+    let request = rpc(
+        "tools/call",
+        json!({"name":"gist","arguments":{
+            "request_id":"retired-write","title":"fixture","body":"","files":{"example":"body"}
+        }}),
+    );
+    let (_, value, _) = fixture::request(&serving, "good-token", request.clone()).await;
+    assert_eq!(
+        value["result"]["structuredContent"]["broker"]["state"], "confirmed",
+        "{value}"
+    );
+    assert_eq!(bus.sends.load(Ordering::SeqCst), 1);
+    rusqlite::Connection::open(&fixture.store_file).unwrap().execute(
+        "UPDATE outbound_reservations SET recovery_until=created_at WHERE request_id='retired-write'", [],
+    ).unwrap();
+    drop(serving);
+    let serving = Serving::from_owner_file(&fixture.config_file)
+        .await
+        .unwrap();
+    let (_, value, _) = fixture::request(&serving, "good-token", request).await;
+    assert_eq!(
+        bus.sends.load(Ordering::SeqCst),
+        1,
+        "retired gist write was published again"
+    );
+    assert_eq!(
+        value["result"]["structuredContent"]["state"], "expired",
+        "{value}"
+    );
+    assert_eq!(value["result"]["structuredContent"]["not_reexecuted"], true);
+}
+
+#[tokio::test]
+async fn expired_broker_uncertainty_requires_reconciliation_without_retry_advice() {
+    let (fixture, bus) = setup().await;
+    let serving = Serving::from_owner_file(&fixture.config_file)
+        .await
+        .unwrap();
+    let request = rpc(
+        "tools/call",
+        json!({"name":"gist_read","arguments":{
+            "request_id":"expired-broker-unknown","id":"abc"
+        }}),
+    );
+    let (_, value, _) = fixture::request(&serving, "good-token", request.clone()).await;
+    assert_eq!(
+        value["result"]["structuredContent"]["broker"]["state"], "confirmed",
+        "{value}"
+    );
+    rusqlite::Connection::open(&fixture.store_file).unwrap().execute(
+        "UPDATE outbound_reservations SET receipt=NULL,state='unknown',retry_until=created_at WHERE request_id='expired-broker-unknown'", [],
+    ).unwrap();
+    let (_, value, _) = fixture::request(&serving, "good-token", request).await;
+    let result = &value["result"]["structuredContent"];
+    assert_eq!(result["state"], "unknown", "{value}");
+    assert_eq!(
+        result["reconciliation_required"], true,
+        "expired broker uncertainty must require reconciliation"
+    );
+    assert!(
+        result.get("retry").is_none(),
+        "expired broker result gave blind retry advice"
+    );
+    assert_eq!(
+        bus.sends.load(Ordering::SeqCst),
+        1,
+        "expired broker request was resubmitted"
     );
 }

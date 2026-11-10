@@ -182,7 +182,9 @@ impl Store {
             tx.execute("UPDATE outbound_reservations SET retry_until=?4,recovery_until=?5 WHERE owner=?1 AND operation=?2 AND request_id=?3",params![owner,op,id,e,r])?;
         }
         tx.execute("INSERT OR IGNORE INTO outbound_retired(owner,request_id,sender,grant_id) SELECT r.owner,r.request_id,r.sender,r.grant_id FROM outbound_reservations r JOIN grants g ON g.id=r.grant_id WHERE g.service=?1 AND r.recovery_until<=?2",params![service,at])?;
+        tracing::debug!(target: "gateway_outbound_retirement_witness", "retirement witnesses staged");
         tx.execute("DELETE FROM outbound_reservations WHERE rowid IN (SELECT r.rowid FROM outbound_reservations r JOIN grants g ON g.id=r.grant_id WHERE g.service=?1 AND r.recovery_until<=?2)",params![service,at])?;
+        tracing::debug!(target: "gateway_outbound_retirement_reclaimed", "retired content staged for reclamation");
         tx.execute("INSERT INTO outbound_retirement_clock(service,last_observed) VALUES(?1,?2) ON CONFLICT(service) DO UPDATE SET last_observed=MAX(last_observed,excluded.last_observed)",params![service,at])?;
         tx.commit()?;
         Ok(())

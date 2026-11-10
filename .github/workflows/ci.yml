@@ -51,7 +51,7 @@ jobs:
           assert summaries, "no Rust test summaries"
           counts = [tuple(map(int, row)) for row in summaries]
           assert all(not row[1] and not any(row[3:]) for row in counts), "failed or filtered Rust tests"
-          expected_passed, expected_ignored = (184, 83) if sys.platform == "linux" else (180, 2)
+          expected_passed, expected_ignored = (208, 86) if sys.platform == "linux" else (204, 2)
           assert sum(row[0] for row in counts) == expected_passed, "executed Rust test count mismatch"
           assert sum(row[2] for row in counts) == expected_ignored, "private-node deferral count mismatch"
           print(f"Rust test completion guard: {expected_passed} passed; {expected_ignored} private-node cases run in mandatory transport/custody job")
@@ -62,6 +62,11 @@ jobs:
         run: |
           python3 scripts/events_mutants.py | tee events-mutants.log
           grep -Fx 'g5-events-mutants-complete:22/22' events-mutants.log
+      - name: Reservation retirement source mutant
+        if: runner.os == 'Linux'
+        run: |
+          python3 scripts/retirement_mutants.py | tee retirement-mutants.log
+          grep -Fx 'retirement-mutants-complete:1/1' retirement-mutants.log
       - name: Grant source mutants
         if: runner.os == 'Linux'
         run: python3 scripts/grant_mutants.py
@@ -148,6 +153,15 @@ jobs:
           python3 scripts/outbound_checks.py | tee outbound-checks.log
           grep -Fx 'outbound-checks-complete:17' outbound-checks.log
           grep -Fx 'copied-control-cached-artifact:refused:custody_outbound' outbound-checks.log
+      - name: Reservation retirement with the pinned daemon
+        run: |
+          revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')
+          export XMSG_GATEWAY_BIN="$PWD/.artifacts/transport/$revision/xmsg"
+          cargo test --locked --test outbound_retirement -- --ignored --nocapture 2>&1 | tee retirement-transport.log
+          grep -F '3 passed; 0 failed; 0 ignored' retirement-transport.log
+          grep -Fx 'outbound-retirement-complete:send-reply-cross-operation-restart' retirement-transport.log
+          grep -Fx 'outbound-retirement-complete:gist-quota-reclaimed-old-id-fenced' retirement-transport.log
+          grep -Fx 'outbound-retirement-complete:inflight-lease-and-outcome-preserved' retirement-transport.log
       - name: Outbound custody source mutants
         run: |
           revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')
@@ -167,7 +181,7 @@ jobs:
           revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')
           export XMSG_GATEWAY_BIN="$PWD/.artifacts/transport/$revision/xmsg"
           python3 scripts/wiring_mutants.py | tee wiring-mutants.log
-          grep -Fx 'wiring-mutants-complete:37' wiring-mutants.log
+          grep -Fx 'wiring-mutants-complete:38' wiring-mutants.log
       - name: Bounded uncertainty acceptance source mutant
         run: |
           revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')

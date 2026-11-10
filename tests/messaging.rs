@@ -72,6 +72,7 @@ fn migrated_fixture(node: &real_node::Node) -> serving_fixture::Fixture {
     let mut fixture = serving_fixture::Fixture::new();
     owner(&fixture, &["migrate-custody"]);
     owner(&fixture, &["migrate-outbound"]);
+    owner(&fixture, &["migrate-retirement"]);
     configure(&mut fixture, node);
     fixture
 }
@@ -521,6 +522,7 @@ async fn messaging_requires_explicit_migration_and_a_complete_budget() {
     cli_refuses(&fixture).await;
     owner(&fixture, &["migrate-custody"]);
     owner(&fixture, &["migrate-outbound"]);
+    owner(&fixture, &["migrate-retirement"]);
     fixture.config["request_timeout_ms"] = json!(10000);
     save(&fixture);
     assert!(
@@ -551,6 +553,7 @@ async fn absent_messaging_is_identity_only_and_partial_messaging_is_not() {
     drop(serving);
     owner(&fixture, &["migrate-custody"]);
     owner(&fixture, &["migrate-outbound"]);
+    owner(&fixture, &["migrate-retirement"]);
     configure(&mut fixture, &node);
     let present = serving_fixture::Probe::default();
     drop(
@@ -606,6 +609,7 @@ async fn real_mcp_send_keeps_request_identity_and_owner_policy() {
     let mut fixture = serving_fixture::Fixture::new();
     owner(&fixture, &["migrate-custody"]);
     owner(&fixture, &["migrate-outbound"]);
+    owner(&fixture, &["migrate-retirement"]);
     policy(
         &fixture,
         "2",
@@ -713,6 +717,7 @@ async fn cancelling_a_handler_does_not_cancel_the_accepted_operation() {
     let mut fixture = serving_fixture::Fixture::new();
     owner(&fixture, &["migrate-custody"]);
     owner(&fixture, &["migrate-outbound"]);
+    owner(&fixture, &["migrate-retirement"]);
     policy(
         &fixture,
         "2",
@@ -1130,9 +1135,9 @@ async fn expired_mcp_uncertainty_requires_reconciliation_without_resubmission() 
 
     let binary = real_node::pinned_binary();
     let node = step("daemon startup", real_node::Node::start(&binary)).await;
-    let mut fixture = migrated_fixture(&node);
-    fixture.config["messaging"]["manifest"]["dedup_lifetime_secs"] = json!(3600);
-    save(&fixture);
+    let fixture = migrated_fixture(&node);
+    let acceptance_window_secs = 3600;
+    let acceptance_store = fixture.store_file.clone();
     policy(
         &fixture,
         "2",
@@ -1159,8 +1164,15 @@ async fn expired_mcp_uncertainty_requires_reconciliation_without_resubmission() 
                 .oneshot(request)
                 .with_subscriber(observer::AtEvent {
                     target: "gateway_outbound_reserved",
-                    // Exercise slow work after reservation without exhausting the acceptance window.
-                    action: || std::thread::sleep(Duration::from_millis(2100)),
+                    // Age fixture data, then exercise slow work inside the acceptance window.
+                    action: move || {
+                        let database = rusqlite::Connection::open(&acceptance_store).unwrap();
+                        database.execute(
+                            "UPDATE outbound_reservations SET retry_until=created_at+?1 WHERE request_id='expire-uncertainty'",
+                            [acceptance_window_secs],
+                        ).unwrap();
+                        std::thread::sleep(Duration::from_millis(2100));
+                    },
                 }),
         )
         .await
