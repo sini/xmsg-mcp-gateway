@@ -499,11 +499,23 @@ pub fn read_request(
     let mut tls = rustls::StreamOwned::new(rustls::ServerConnection::new(tls).unwrap(), socket);
     let mut reader = BufReader::new(&mut tls);
     let mut line = String::new();
-    assert_ne!(
-        reader.read_line(&mut line).unwrap(),
-        0,
-        "partial provider request ended before its request line"
-    );
+    match reader.read_line(&mut line) {
+        Ok(0) => return None,
+        Err(error)
+            if line.is_empty()
+                && matches!(
+                    error.kind(),
+                    std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::BrokenPipe
+                ) =>
+        {
+            return None
+        }
+        Err(error) => panic!("provider fixture request line failed: {error}"),
+        Ok(_) => {}
+    }
     if strict_request {
         assert_eq!(line, "POST /introspect HTTP/1.1\r\n");
     }

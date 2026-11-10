@@ -70,6 +70,12 @@ async fn setup() -> (fixture::Fixture, Bus) {
     setup_mode(true).await
 }
 async fn setup_mode(auto_reply: bool) -> (fixture::Fixture, Bus) {
+    setup_with_list_delay(auto_reply, std::time::Duration::ZERO).await
+}
+async fn setup_with_list_delay(
+    auto_reply: bool,
+    list_delay: std::time::Duration,
+) -> (fixture::Fixture, Bus) {
     let mut fixture = fixture::Fixture::new();
     for claims in fixture.tokens.lock().unwrap().values_mut() {
         claims["scope"] = json!("identity:read events:subscribe");
@@ -115,7 +121,15 @@ async fn setup_mode(auto_reply: bool) -> (fixture::Fixture, Bus) {
             children.spawn(async move{
             let mut stream=BufReader::new(stream);let mut line=String::new();stream.read_line(&mut line).await.unwrap();
             stream.get_mut().write_all(format!("{}\n",json!({"status":"ok","address":"gateway@bus","node":"bus","reply_ttl_secs":604800,"idempotency_ttl_secs":604800,"svc_queue_cap":1000,"max_body_bytes":65536})).as_bytes()).await.unwrap();
-            loop {line.clear();if stream.read_line(&mut line).await.unwrap()==0{break;}let frame:Value=serde_json::from_str(&line).unwrap();
+            loop {
+                line.clear();
+                let length = match stream.read_line(&mut line).await {
+                    Ok(length) => length,
+                    Err(error) if line.is_empty() && error.kind() == std::io::ErrorKind::ConnectionReset => break,
+                    Err(error) => panic!("fake service request failed: {error}"),
+                };
+                if length == 0 { break; }
+                let frame: Value = serde_json::from_str(&line).unwrap();
                 let response=match frame["action"].as_str().unwrap(){"poll"=>queued.lock().unwrap().front().cloned().unwrap_or(json!({"action":"timeout"})),"ack"=>{queued.lock().unwrap().pop_front();json!({"status":"ok"})},other=>panic!("unexpected {other}")};
                 stream.get_mut().write_all(format!("{response}\n").as_bytes()).await.unwrap();
             }
@@ -134,6 +148,7 @@ async fn setup_mode(auto_reply: bool) -> (fixture::Fixture, Bus) {
             let frame: Value = serde_json::from_str(&line).unwrap();
             let response = match frame["action"].as_str().unwrap() {
                 "list" => {
+                    tokio::time::sleep(list_delay).await;
                     json!({"status":"ok","nodes":[{"node":"node","status":"ok"}],"recipients":[{"address":"genie@node","node":"node","kind":"service","harness":"svc","status":"live","user":"fixture"}]})
                 }
                 "send" => {
@@ -171,7 +186,8 @@ async fn setup_mode(auto_reply: bool) -> (fixture::Fixture, Bus) {
     fixture.config["events"] =
         json!({"grant_id":"grant","key_file":keyfile,"dispatch_timeout_ms":13000});
     fixture.config["broker"] = json!({"destination":"genie@node"});
-    fixture.config["messaging"] = json!({"xmsg":{"service":"gateway","expected_node":"bus","daemon_uid":std::fs::metadata(directory).unwrap().uid(),"register_socket":register,"agent_socket":agent,"operation_timeout_ms":1000},"manifest":{"reply_ttl_secs":604800,"idempotency_ttl_secs":604800,"svc_queue_cap":1000,"dedup_lifetime_secs":604800,"max_framed_bytes":65536},"result_recovery_secs":604800,"submission_timeout_ms":1000,"max_reservations":100,"max_retained_bytes":1048576});
+    let dispatch_timeout_ms = if auto_reply { 5000 } else { 1000 };
+    fixture.config["messaging"] = json!({"xmsg":{"service":"gateway","expected_node":"bus","daemon_uid":std::fs::metadata(directory).unwrap().uid(),"register_socket":register,"agent_socket":agent,"operation_timeout_ms":dispatch_timeout_ms},"manifest":{"reply_ttl_secs":604800,"idempotency_ttl_secs":604800,"svc_queue_cap":1000,"dedup_lifetime_secs":604800,"max_framed_bytes":65536},"result_recovery_secs":604800,"submission_timeout_ms":dispatch_timeout_ms,"max_reservations":100,"max_retained_bytes":1048576});
     fixture::private_file(
         &fixture.config_file,
         &serde_json::to_vec(&fixture.config).unwrap(),
@@ -592,6 +608,32 @@ async fn broker_result_survives_effect_expiry_until_result_retirement() {
 }
 
 #[tokio::test]
+async fn broker_fixture_covers_pre_send_shared_runner_delay() {
+    let (fixture, bus) = setup_with_list_delay(true, std::time::Duration::from_millis(1500)).await;
+    let serving = Serving::from_owner_file(&fixture.config_file)
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    let (status, value, probe) = fixture::request(&serving, "good-token", rpc("tools/call",json!({"name":"gist","arguments":{"request_id":"delayed-list","title":"fixture","body":"","files":{"example":"body"}}}))).await;
+    eprintln!(
+        "delayed-list-control: elapsed_us={} response={:?}",
+        started.elapsed().as_micros(),
+        probe.response.lock().unwrap()
+    );
+    assert_eq!(
+        status,
+        axum::http::StatusCode::OK,
+        "delayed pre-send lookup failed: {value}"
+    );
+    assert_eq!(
+        value["result"]["structuredContent"]["broker"]["state"], "confirmed",
+        "delayed pre-send lookup failed: {value}"
+    );
+    assert_eq!(bus.sends.load(Ordering::SeqCst), 1);
+    assert!(started.elapsed() >= std::time::Duration::from_millis(1500));
+}
+
+#[tokio::test]
 async fn retirement_http_diagnostics_preserve_non_json_failure() {
     let (fixture, bus) = setup().await;
     let serving = Serving::from_owner_file(&fixture.config_file)
@@ -628,10 +670,12 @@ async fn retired_gist_write_request_id_never_reexecutes() {
             "request_id":"retired-write","title":"fixture","body":"","files":{"example":"body"}
         }}),
     );
+    let request_started_us = started.elapsed().as_micros();
     let (status, value, probe) = fixture::request(&serving, "good-token", request.clone()).await;
+    let (_, raw_body, request_elapsed_us) = probe.response.lock().unwrap().clone().unwrap();
     eprintln!(
         "retirement-request-diagnostics {}",
-        json!({"provider_origin_us":fixture.started.duration_since(started).as_micros(),"setup_us":setup_us,"broker_ready_us":ready_us,"request_finished_us":started.elapsed().as_micros(),"http_status":status.as_u16(),"raw_response":probe.response.lock().unwrap().clone(),"provider_timing_us":fixture.provider_timing.lock().unwrap().clone(),"provider_requests":fixture.requests.load(Ordering::SeqCst),"bus_sends":bus.sends.load(Ordering::SeqCst)})
+        json!({"provider_origin_us":fixture.started.duration_since(started).as_micros(),"setup_us":setup_us,"broker_ready_us":ready_us,"request_started_us":request_started_us,"request_elapsed_us":request_elapsed_us,"request_finished_us":started.elapsed().as_micros(),"http_status":status.as_u16(),"raw_body":raw_body,"provider_timing_us":fixture.provider_timing.lock().unwrap().clone(),"provider_requests":fixture.requests.load(Ordering::SeqCst),"bus_sends":bus.sends.load(Ordering::SeqCst)})
     );
     assert_eq!(
         value["result"]["structuredContent"]["broker"]["state"], "confirmed",

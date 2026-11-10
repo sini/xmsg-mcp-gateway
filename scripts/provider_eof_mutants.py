@@ -40,13 +40,13 @@ def main():
             )
             output = result.stdout + result.stderr
             if arm == "positive":
-                assert result.returncode == 0 and "4 passed" in output, output
+                assert result.returncode == 0 and "5 passed" in output, output
             else:
                 assert result.returncode != 0, "ignored-header-EOF mutant survived"
                 assert REFUSAL in output and f"{TEST} - should panic ... FAILED" in output, output
-                assert "3 passed; 1 failed" in output, output
+                assert "4 passed; 1 failed" in output, output
                 print(
-                    f"named mutant refusal: {REFUSAL}; 3 passed; 1 failed", flush=True
+                    f"named mutant refusal: {REFUSAL}; 4 passed; 1 failed", flush=True
                 )
             print(f"provider-eof-{arm}: verified", flush=True)
 

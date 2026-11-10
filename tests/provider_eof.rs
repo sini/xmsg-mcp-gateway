@@ -113,3 +113,59 @@ fn idle_cancelled_tls_connection_does_not_panic_the_provider_fixture() {
         drop(idle_client);
     }
 }
+
+#[test]
+fn cancelled_tls_before_http_does_not_panic_or_delay_shutdown() {
+    for graceful in [false, true] {
+        let mut fixture = serving_fixture::Fixture::new();
+        let url = reqwest::Url::parse(
+            fixture.config["verifier"]["introspection_url"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        let certificate = rustls::pki_types::CertificateDer::from_pem_slice(
+            &std::fs::read(&fixture.keys.roots).unwrap(),
+        )
+        .unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(certificate).unwrap();
+        let config = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let mut connection = rustls::ClientConnection::new(
+            std::sync::Arc::new(config),
+            "provider.test".try_into().unwrap(),
+        )
+        .unwrap();
+        let mut socket = std::net::TcpStream::connect(("127.0.0.1", url.port().unwrap())).unwrap();
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        socket
+            .set_write_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        while connection.is_handshaking() {
+            connection.complete_io(&mut socket).unwrap();
+        }
+        let started = std::time::Instant::now();
+        if graceful {
+            connection.send_close_notify();
+            connection.write_tls(&mut socket).unwrap();
+        }
+        drop(socket);
+        fixture.stop_provider();
+        assert_eq!(
+            fixture.requests.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "cancelled pre-request client delayed fixture shutdown"
+        );
+        eprintln!(
+            "cancelled-provider-control: graceful={graceful} elapsed_us={}",
+            started.elapsed().as_micros()
+        );
+    }
+}
