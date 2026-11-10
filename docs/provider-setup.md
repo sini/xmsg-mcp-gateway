@@ -31,7 +31,9 @@ LAN/tailnet provider endpoints are accepted by default, and optional
 A local Kanidm 1.11.2 experiment returned its OAuth client name as audience even
 when an MCP resource was requested. Direct use did not pass the exact-resource
 gate. A local broker experiment worked, but does not establish live hosted
-compatibility or decide the production provider architecture. Use a compatible
+compatibility or decide the production provider architecture. For a replicable
+Keycloak 26.8.1 broker configuration (standalone or federated to Kanidm / OIDC),
+see [Keycloak OAuth broker setup](oauth-keycloak.md). Use a compatible
 provider or reviewed broker; do not relax audience validation or reuse an unrelated
 application's credentials. This repository does not implement an authorization server.
 
