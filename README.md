@@ -51,6 +51,11 @@ cargo run --locked -- --state .state/grants.db enable grant-id 1
 cargo run --locked -- --state .state/grants.db disable grant-id 2
 ```
 
+Existing custody databases from earlier releases also require `migrate-custody-summaries`.
+Stop every gateway process and back up the database first; see the
+[explicit migration and rollback procedure](docs/custody.md). Fresh
+`migrate-custody` databases already include summaries.
+
 The owner supplies `binding.json` with exactly these fields:
 
 ```json
