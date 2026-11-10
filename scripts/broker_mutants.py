@@ -1,4 +1,4 @@
-"""Broker production-source oracles using the existing fresh-artifact mutation harness."""
+"""Broker authority and fixture oracles using the fresh-artifact mutation harness."""
 
 from pathlib import Path
 
@@ -26,19 +26,20 @@ CASES = [
     Case("post-send-deadline-label", "broker_bridge", "post_send_deadline_is_unknown_and_status_never_resubmits", MCP, (Edit("src/outbound.rs", "            Ok(Outcome::Unknown)\n        }\n    }?;", "            Err(Error::Deadline)\n        }\n    }?;"),)),
     Case("confirmed-recovery-phase", "broker_bridge", "confirmed_broker_recovery_failures_never_claim_no_submission", MCP, (Edit("src/serving.rs", "confirmed_submission = true;", "confirmed_submission = false;"),)),
     Case("authorized-deadline-response", "broker_bridge", "authorized_ack_deadline_has_body_without_claiming_rollback", MCP, (Edit("src/serving.rs", "Some(id) => tool_unavailable(id, false),", "Some(_id) => unavailable(),"),)),
+    Case("fixture-retry-new-id", "broker_bridge", "first_call_recovery_retries_identical_requests_after_pending", MCP, (Edit(MCP, "let retry = request.clone();", 'let mut retry = request.clone(); retry["params"]["arguments"]["request_id"] = serde_json::json!(format!("{}-new", original_id.as_str().unwrap()));'),)),
 
 ]
 
 
 def main():
-    assert len(CASES) == 10, "broker mutant inventory drift"
+    assert len(CASES) == 11, "broker mutant inventory drift"
     harness.ROOT = ROOT
     harness.EVIDENCE = ROOT / ".artifacts/broker-mutants"
     harness.CASES = CASES
     harness.BASELINE_TARGETS = ["lib", "broker_bridge"]
     harness.NONCE_TEST = "broker_build_nonce_receipt"
     harness.main()
-    print("broker-mutants-complete:10/10", flush=True)
+    print("broker-mutants-complete:11/11", flush=True)
 
 
 if __name__ == "__main__":
