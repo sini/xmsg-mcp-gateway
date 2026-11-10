@@ -587,6 +587,7 @@ pub async fn list(
     {
         Ok(listed) => listed,
         Err(xmsg::client::ClientError::Refused { code }) if code == "unknown_peer" => {
+            crate::dispatch_outcome::emit("xmsg_list", "pre_effect_unavailable", "unknown_peer");
             xmsg::client::ListResult {
                 recipients: Vec::new(),
                 nodes: Vec::new(),

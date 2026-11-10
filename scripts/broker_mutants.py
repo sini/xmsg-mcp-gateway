@@ -25,7 +25,7 @@ CASES = [
     Case("final-result-authority", "broker_bridge", "broker_status_rechecks_send_ceiling_at_the_final_result_read", MCP, (Edit("src/serving.rs", current, stale),)),
     Case("post-send-deadline-label", "broker_bridge", "post_send_deadline_is_unknown_and_status_never_resubmits", MCP, (Edit("src/outbound.rs", "            Ok(Outcome::Unknown)\n        }\n    }?;", "            Err(Error::Deadline)\n        }\n    }?;"),)),
     Case("confirmed-recovery-phase", "broker_bridge", "confirmed_broker_recovery_failures_never_claim_no_submission", MCP, (Edit("src/serving.rs", "confirmed_submission = true;", "confirmed_submission = false;"),)),
-    Case("authorized-deadline-response", "broker_bridge", "authorized_ack_deadline_has_body_without_claiming_rollback", MCP, (Edit("src/serving.rs", "Some(id) => tool_unavailable(id, false),", "Some(_id) => unavailable(),"),)),
+    Case("authorized-deadline-response", "broker_bridge", "authorized_ack_deadline_has_body_without_claiming_rollback", MCP, (Edit("src/serving.rs", "tool_unavailable(&context.id, false)", "unavailable()"),)),
     Case("fixture-retry-new-id", "broker_bridge", "first_call_recovery_retries_identical_requests_after_pending", MCP, (Edit(MCP, "let retry = request.clone();", 'let mut retry = request.clone(); retry["params"]["arguments"]["request_id"] = serde_json::json!(format!("{}-new", original_id.as_str().unwrap()));'),)),
     Case("fixture-list-budget", "list", "xmsg_list_returns_only_permitted_send_targets_with_live_status_and_never_unpermitted", "tests/list.rs", (Edit("tests/common/serving_fixture.rs", "pub const HAPPY_DISPATCH_TIMEOUT_MS: u64 = 5000;", "pub const HAPPY_DISPATCH_TIMEOUT_MS: u64 = 1000;"),)),
 

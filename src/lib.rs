@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod broker;
 mod deadline;
+mod dispatch_outcome;
 pub mod grants;
 mod reads;
 pub mod serving;

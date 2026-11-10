@@ -235,12 +235,51 @@ async fn run(cli: Cli) -> Result<(), CommandError> {
     Ok(())
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("invalid logging configuration")]
+struct LoggingConfigurationError;
+
+fn logging_override(
+    value: Result<String, std::env::VarError>,
+) -> Result<Option<String>, LoggingConfigurationError> {
+    match value {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(LoggingConfigurationError),
+    }
+}
+
+fn default_subscriber<W>(
+    writer: W,
+    explicit: Option<&str>,
+) -> Result<impl tracing::Subscriber + Send + Sync, LoggingConfigurationError>
+where
+    W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
+{
+    use tracing_subscriber::prelude::*;
+    let filter: tracing_subscriber::filter::Targets = explicit
+        .unwrap_or("warn,gateway_dispatch=info")
+        .parse()
+        .map_err(|_| LoggingConfigurationError)?;
+    Ok(tracing_subscriber::registry().with(
+        tracing_subscriber::fmt::layer()
+            .with_writer(writer)
+            .with_filter(filter),
+    ))
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::WARN)
-        .with_writer(std::io::stderr)
-        .init();
+    use tracing_subscriber::util::SubscriberInitExt;
+    let subscriber = logging_override(std::env::var("RUST_LOG"))
+        .and_then(|explicit| default_subscriber(std::io::stderr, explicit.as_deref()));
+    match subscriber {
+        Ok(subscriber) => subscriber.init(),
+        Err(error) => {
+            eprintln!("gateway command failed: {error}");
+            std::process::exit(1);
+        }
+    }
     if let Err(error) = run(Cli::parse()).await {
         eprintln!("gateway command failed: {error}");
         std::process::exit(1);
@@ -271,4 +310,80 @@ fn private_document(file: &std::path::Path, limit: u64) -> Result<Vec<u8>, Comma
         return Err(CommandError::OwnerDocument);
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod logging_tests {
+    #[test]
+    fn actual_default_subscriber_enables_only_dispatch_info_and_existing_warnings() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+        #[derive(Clone)]
+        struct Captured(Arc<Mutex<Vec<u8>>>);
+        impl Write for Captured {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+            type Writer = Captured;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+        for (explicit, visible) in [(None, true), (Some("warn"), false)] {
+            let capture = Captured(Arc::new(Mutex::new(Vec::new())));
+            tracing::subscriber::with_default(
+                super::default_subscriber(capture.clone(), explicit).unwrap(),
+                || {
+                    tracing::info!(target:"gateway_dispatch",operation="xmsg_send",class="pre_effect_unavailable",kind="not_found","dispatch outcome");
+                    tracing::info!(target:"gateway_registration",address="CANARY_ADDRESS_34","CANARY_REGISTRATION_34");
+                    tracing::warn!(target:"default_warning_control","existing warning retained");
+                },
+            );
+            let text = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+            assert_eq!(
+                text.contains("dispatch outcome"),
+                visible,
+                "actual subscriber ignored default/explicit filter: {text}"
+            );
+            assert!(
+                !text.contains("CANARY_"),
+                "default subscriber exposed other INFO data: {text}"
+            );
+            assert!(
+                text.contains("existing warning retained"),
+                "default subscriber lost existing WARN: {text}"
+            );
+            eprintln!(
+                "actual-default-subscriber-control: explicit_warn={} {text}",
+                explicit.is_some()
+            );
+        }
+        let capture = Captured(Arc::new(Mutex::new(Vec::new())));
+        assert!(super::default_subscriber(
+            capture,
+            Some("gateway_dispatch=CANARY_INVALID_LEVEL_34")
+        )
+        .is_err());
+        assert_eq!(
+            super::LoggingConfigurationError.to_string(),
+            "invalid logging configuration"
+        );
+        assert!(super::logging_override(Err(std::env::VarError::NotPresent))
+            .unwrap()
+            .is_none());
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            assert!(super::logging_override(Err(std::env::VarError::NotUnicode(
+                std::ffi::OsString::from_vec(vec![0xff])
+            )))
+            .is_err());
+        }
+    }
 }

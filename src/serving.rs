@@ -1,3 +1,4 @@
+use crate::dispatch_outcome as diagnostic;
 use std::collections::BTreeSet;
 use std::error::Error as _;
 use std::fs::File;
@@ -741,8 +742,18 @@ fn tool_unavailable(id: &Value, pre_effect: bool) -> Response {
 
 #[derive(Clone)]
 struct PendingReply {
+    operation: &'static str,
     id: Value,
     request_id: String,
+}
+
+struct DispatchContext {
+    id: Value,
+    operation: Option<&'static str>,
+}
+fn invalid_dispatch(operation: &'static str, id: &Value, message: &str) -> Response {
+    diagnostic::emit(operation, "invalid", "arguments");
+    rpc_error(id, -32602, message)
 }
 
 fn tool_result(data: Value) -> Value {
@@ -896,18 +907,28 @@ async fn broker_call(
     mut store: Store,
     progress: Arc<OnceLock<PendingReply>>,
     deadline: tokio::time::Instant,
+    operation: &'static str,
 ) -> Response {
     let pending = PendingReply {
+        operation,
         id: id.clone(),
         request_id: request.request_id.as_str().to_owned(),
     };
     let _ = progress.set(pending.clone());
     let Some(messaging) = &app.messaging else {
+        diagnostic::emit(operation, "pre_effect_unavailable", "messaging_unavailable");
         return tool_unavailable(&id, true);
     };
     let snapshot = match messaging.session.snapshot() {
         Ok(s) => s,
-        Err(_) => return tool_unavailable(&id, true),
+        Err(error) => {
+            diagnostic::emit(
+                operation,
+                "pre_effect_unavailable",
+                diagnostic::session(&error),
+            );
+            return tool_unavailable(&id, true);
+        }
     };
     let (send, receive) = tokio::sync::oneshot::channel();
     let task_app = app.clone();
@@ -953,7 +974,21 @@ async fn broker_call(
         while tasks.try_join_next().is_some() {}
         tasks.spawn(broker_work);
     }
-    match tokio::time::timeout_at(deadline, receive).await {
+    let result = tokio::time::timeout_at(deadline, receive).await;
+    match &result {
+        Ok(Ok(Ok(value))) => match value.get("state").and_then(Value::as_str) {
+            Some("pending") => diagnostic::emit(operation, "pending", "pending"),
+            Some("unknown" | "expired") => diagnostic::emit(operation, "unknown", "unknown"),
+            _ => {}
+        },
+        Ok(Ok(Err((confirmed, error)))) => {
+            let (class, kind) = diagnostic::broker(error, *confirmed);
+            diagnostic::emit(operation, class, kind);
+        }
+        Ok(Err(_)) => diagnostic::emit(operation, "pending", "worker_result_unavailable"),
+        Err(_) => diagnostic::emit(operation, "pending", "request_deadline"),
+    }
+    match result {
         Ok(Ok(Ok(value))) => rpc_result(&id, tool_result(value)),
         Ok(Ok(Err((
             _,
@@ -996,15 +1031,23 @@ async fn messaging_call(
         ),
     };
     if !permission_enabled(&app, permission) {
+        diagnostic::emit(operation, "denied", "policy");
         return StatusCode::FORBIDDEN.into_response();
     }
-    let snapshot = match app
-        .messaging
-        .as_ref()
-        .and_then(|messaging| messaging.session.snapshot().ok())
-    {
-        Some(snapshot) => snapshot,
-        None => return tool_unavailable(&id, true),
+    let Some(messaging) = app.messaging.as_ref() else {
+        diagnostic::emit(operation, "pre_effect_unavailable", "messaging_unavailable");
+        return tool_unavailable(&id, true);
+    };
+    let snapshot = match messaging.session.snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            diagnostic::emit(
+                operation,
+                "pre_effect_unavailable",
+                diagnostic::session(&error),
+            );
+            return tool_unavailable(&id, true);
+        }
     };
     tracing::info!(target: "gateway_dispatch", operation, "dispatch");
     let (send, receive) = tokio::sync::oneshot::channel();
@@ -1038,14 +1081,30 @@ async fn messaging_call(
         tasks.spawn(work);
     }
     let pending = PendingReply {
+        operation,
         id: id.clone(),
         request_id: request_id.clone(),
     };
     let _ = progress.set(pending.clone());
     let result = match receive.await {
         Ok(result) => result,
-        Err(_) => return pending_response(&pending),
+        Err(_) => {
+            diagnostic::emit(operation, "pending", "worker_result_unavailable");
+            return pending_response(&pending);
+        }
     };
+    match &result {
+        Err(error) => {
+            let (class, kind) = diagnostic::outbound(error);
+            diagnostic::emit(operation, class, kind);
+        }
+        Ok(Outcome::Pending) => diagnostic::emit(operation, "pending", "pending"),
+        Ok(Outcome::Unknown | Outcome::ExpiredUnknown) => {
+            diagnostic::emit(operation, "unknown", "unknown")
+        }
+        Ok(Outcome::Expired) => diagnostic::emit(operation, "unknown", "expired"),
+        Ok(Outcome::Confirmed(_)) => {}
+    }
     match result {
         Ok(Outcome::Pending) => pending_response(&pending),
         Ok(Outcome::Unknown) => rpc_result(
@@ -1088,9 +1147,25 @@ async fn mcp(State(app): State<Arc<App>>, request: Request) -> Response {
     )
     .await
     .unwrap_or_else(|_| match progress.get() {
-        Some(pending) => pending_response(pending),
+        Some(pending) => {
+            diagnostic::emit(pending.operation, "pending", "request_deadline");
+            pending_response(pending)
+        }
         None => match dispatched.get() {
-            Some(id) => tool_unavailable(id, false),
+            Some(context) => {
+                if let Some(operation) = context.operation {
+                    diagnostic::emit(
+                        operation,
+                        if operation == "xmsg_ack" {
+                            "unknown"
+                        } else {
+                            "pre_effect_unavailable"
+                        },
+                        "request_deadline",
+                    );
+                }
+                tool_unavailable(&context.id, false)
+            }
             None => unavailable(),
         },
     })
@@ -1100,7 +1175,7 @@ async fn mcp_request(
     app: Arc<App>,
     request: Request,
     progress: Arc<OnceLock<PendingReply>>,
-    dispatched: Arc<OnceLock<Value>>,
+    dispatched: Arc<OnceLock<DispatchContext>>,
 ) -> Response {
     let broker_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     if !permitted_request(&app, &request) {
@@ -1285,27 +1360,44 @@ async fn mcp_request(
                 Ok(call) => call,
                 Err(_) => return rpc_error(&id, -32602, "Invalid params"),
             };
-            let _ = dispatched.set(id.clone());
+            let operation = diagnostic::operation(&call.name);
+            let _ = dispatched.set(DispatchContext {
+                id: id.clone(),
+                operation: Some(operation),
+            });
             if crate::broker::NAMES.contains(&call.name.as_str()) {
                 if !broker_permitted(&app, &policy, &grant) {
+                    diagnostic::emit(operation, "denied", "policy");
                     return StatusCode::FORBIDDEN.into_response();
                 }
                 let destination = &app.broker.as_ref().unwrap().destination;
                 let request = match crate::broker::parse(&call.name, call.arguments, destination) {
                     Ok(request) => request,
-                    Err(_) => return rpc_error(&id, -32602, "Invalid gist arguments"),
+                    Err(_) => return invalid_dispatch(operation, &id, "Invalid gist arguments"),
                 };
-                return broker_call(app, token, id, request, store, progress, broker_deadline)
-                    .await;
+                return broker_call(
+                    app,
+                    token,
+                    id,
+                    request,
+                    store,
+                    progress,
+                    broker_deadline,
+                    operation,
+                )
+                .await;
             }
             if matches!(call.name.as_str(), "xmsg_ack" | "xmsg_message_status") {
                 let Some(events) = &app.events else {
+                    diagnostic::emit(operation, "pre_effect_unavailable", "tool_unavailable");
                     return rpc_error(&id, -32004, "Tool not yet available");
                 };
                 if grant.grant_id != events.selected_grant {
+                    diagnostic::emit(operation, "denied", "policy");
                     return StatusCode::FORBIDDEN.into_response();
                 }
                 let Some(messaging) = &app.messaging else {
+                    diagnostic::emit(operation, "pre_effect_unavailable", "messaging_unavailable");
                     return tool_unavailable(&id, false);
                 };
                 let (bus, mailbox) = messaging.session.custody_scope();
@@ -1319,7 +1411,7 @@ async fn mcp_request(
                 };
                 let request = match request {
                     Ok(request) => request,
-                    Err(_) => return rpc_error(&id, -32602, "Invalid params"),
+                    Err(_) => return invalid_dispatch(operation, &id, "Invalid params"),
                 };
                 let broker_request_id = match &request {
                     recovery::Request::Status(args) => Some(args.request_id.clone()),
@@ -1383,6 +1475,30 @@ async fn mcp_request(
                     })
                 })
                 .await;
+                match &result {
+                    Ok(Err(error)) => {
+                        let (class, kind) = diagnostic::recovery(error);
+                        diagnostic::emit(
+                            operation,
+                            if operation == "xmsg_ack" && class == "pre_effect_unavailable" {
+                                "unknown"
+                            } else {
+                                class
+                            },
+                            kind,
+                        );
+                    }
+                    Err(_) => diagnostic::emit(
+                        operation,
+                        if operation == "xmsg_ack" {
+                            "unknown"
+                        } else {
+                            "pre_effect_unavailable"
+                        },
+                        "worker_join",
+                    ),
+                    Ok(Ok(_)) => {}
+                }
                 return match result {
                     Ok(Ok(data)) => rpc_result(&id, tool_result(data)),
                     Ok(Err(recovery::Error::Arguments)) => rpc_error(&id, -32602, "Invalid params"),
@@ -1406,9 +1522,10 @@ async fn mcp_request(
                 };
                 let request = match request {
                     Ok(request) => request,
-                    Err(_) => return rpc_error(&id, -32602, "Invalid params"),
+                    Err(_) => return invalid_dispatch(operation, &id, "Invalid params"),
                 };
                 let Some(messaging) = &app.messaging else {
+                    diagnostic::emit(operation, "pre_effect_unavailable", "messaging_unavailable");
                     return tool_unavailable(&id, false);
                 };
                 let (bus, mailbox) = messaging.session.custody_scope();
@@ -1417,6 +1534,14 @@ async fn mcp_request(
                     reads::dispatch(store, &identity, &bus, &mailbox, request)
                 })
                 .await;
+                match &result {
+                    Ok(Err(error)) => {
+                        let (class, kind) = diagnostic::reads(error);
+                        diagnostic::emit(operation, class, kind);
+                    }
+                    Err(_) => diagnostic::emit(operation, "pre_effect_unavailable", "worker_join"),
+                    Ok(Ok(_)) => {}
+                }
                 return match result {
                     Ok(Ok(data)) => rpc_result(&id, tool_result(data)),
                     Ok(Err(reads::Error::Arguments)) => {
@@ -1430,23 +1555,32 @@ async fn mcp_request(
             }
             if call.name == "xmsg_list" && app.messaging.is_some() {
                 if !list_enabled(&app, &policy.send) {
+                    diagnostic::emit(operation, "denied", "policy");
                     return StatusCode::FORBIDDEN.into_response();
                 }
                 let arguments =
                     match serde_json::from_value::<outbound::ListArguments>(call.arguments) {
                         Ok(arguments) if arguments.validate().is_ok() => arguments,
-                        _ => return rpc_error(&id, -32602, "Invalid params"),
+                        _ => return invalid_dispatch(operation, &id, "Invalid params"),
                     };
                 let Some(messaging) = &app.messaging else {
+                    diagnostic::emit(operation, "pre_effect_unavailable", "messaging_unavailable");
                     return tool_unavailable(&id, false);
                 };
                 let snapshot = match messaging.session.snapshot() {
                     Ok(snapshot) => snapshot,
-                    Err(_) => return tool_unavailable(&id, false),
+                    Err(error) => {
+                        diagnostic::emit(
+                            operation,
+                            "pre_effect_unavailable",
+                            diagnostic::session(&error),
+                        );
+                        return tool_unavailable(&id, false);
+                    }
                 };
                 let mut list_store = store;
                 tracing::info!(target: "gateway_dispatch", operation = "xmsg_list", "dispatch");
-                return match outbound::list(
+                let result = outbound::list(
                     &mut list_store,
                     &snapshot.endpoint,
                     &app.verifier,
@@ -1454,11 +1588,18 @@ async fn mcp_request(
                     &arguments,
                     &messaging.limits,
                 )
-                .await
-                {
+                .await;
+                if let Err(error) = &result {
+                    let (class, kind) = diagnostic::outbound(error);
+                    diagnostic::emit(operation, class, kind);
+                }
+                return match result {
                     Ok(listed) => match serde_json::to_value(listed) {
                         Ok(data) => rpc_result(&id, tool_result(data)),
-                        Err(_) => tool_unavailable(&id, false),
+                        Err(_) => {
+                            diagnostic::emit(operation, "pre_effect_unavailable", "encoding");
+                            tool_unavailable(&id, false)
+                        }
                     },
                     Err(
                         outbound::Error::Denied | outbound::Error::Authority(GrantError::Denied),
@@ -1481,15 +1622,16 @@ async fn mcp_request(
                 };
                 let request = match request {
                     Ok(request) => request,
-                    Err(_) => return rpc_error(&id, -32602, "Invalid params"),
+                    Err(_) => return invalid_dispatch(operation, &id, "Invalid params"),
                 };
                 return messaging_call(app, token, id, request, policy, store, progress).await;
             }
             if call.name != "xmsg_identity" {
+                diagnostic::emit(operation, "invalid", "tool_unavailable");
                 return rpc_error(&id, -32004, "Tool not yet available");
             }
             if serde_json::from_value::<Empty>(call.arguments).is_err() {
-                return rpc_error(&id, -32602, "Invalid params");
+                return invalid_dispatch(operation, &id, "Invalid params");
             }
             tracing::info!(target: "gateway_dispatch", operation = "xmsg_identity", "dispatch");
             let mut data = json!({"service":identity.service(),"subject":identity.subject(),"issuer":identity.issuer(),
@@ -1500,17 +1642,26 @@ async fn mcp_request(
                     let (bus, mailbox) = messaging.session.custody_scope();
                     match events.health(&identity, bus, mailbox) {
                         Ok(summary) => data["events_status"] = summary,
-                        Err(events::Error::Authority(GrantError::Denied)) => {
-                            return StatusCode::FORBIDDEN.into_response()
+                        Err(error) => {
+                            let (class, kind) = diagnostic::identity(&error);
+                            diagnostic::emit(operation, class, kind);
+                            return if matches!(error, events::Error::Authority(GrantError::Denied))
+                            {
+                                StatusCode::FORBIDDEN.into_response()
+                            } else {
+                                tool_unavailable(&id, false)
+                            };
                         }
-                        Err(_) => return tool_unavailable(&id, false),
                     }
                 }
             }
             json!({"content":[{"type":"text","text":data.to_string()}],"structuredContent":data,"isError":false})
         }
         "events/list" | "events/subscribe" | "events/unsubscribe" => {
-            let _ = dispatched.set(id.clone());
+            let _ = dispatched.set(DispatchContext {
+                id: id.clone(),
+                operation: None,
+            });
             let Some(events) = &app.events else {
                 return rpc_error(&id, -32004, "Events not yet available");
             };

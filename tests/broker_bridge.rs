@@ -58,6 +58,7 @@ struct Bus {
     tasks: Vec<tokio::task::JoinHandle<()>>,
     sends: Arc<AtomicUsize>,
     pending: Arc<Mutex<VecDeque<Value>>>,
+    list_error: Arc<Mutex<Option<String>>>,
 }
 impl Drop for Bus {
     fn drop(&mut self) {
@@ -139,6 +140,8 @@ async fn setup_with_list_delay(
     let sends = Arc::new(AtomicUsize::new(0));
     let counter = sends.clone();
     let pending = queued.clone();
+    let list_error = Arc::new(Mutex::new(None::<String>));
+    let worker_list_error = list_error.clone();
     let agent_task = tokio::spawn(async move {
         loop {
             let (stream, _) = agent_listener.accept().await.unwrap();
@@ -151,7 +154,12 @@ async fn setup_with_list_delay(
                     if !list_delay.is_zero() {
                         tokio::time::sleep(list_delay).await;
                     }
-                    json!({"status":"ok","nodes":[{"node":"node","status":"ok"}],"recipients":[{"address":"genie@node","node":"node","kind":"service","harness":"svc","status":"live","user":"fixture"}]})
+                    let error = worker_list_error.lock().unwrap().clone();
+                    if let Some(code) = error {
+                        json!({"status":"error","error":code})
+                    } else {
+                        json!({"status":"ok","nodes":[{"node":"node","status":"ok"}],"recipients":[{"address":"genie@node","node":"node","kind":"service","harness":"svc","status":"live","user":"fixture"}]})
+                    }
                 }
                 "send" => {
                     counter.fetch_add(1, Ordering::SeqCst);
@@ -204,6 +212,7 @@ async fn setup_with_list_delay(
             tasks: vec![service, agent_task],
             sends,
             pending,
+            list_error,
         },
     )
 }
@@ -1262,4 +1271,239 @@ async fn first_call_recovery_retries_identical_requests_after_pending() {
         );
         eprintln!("broker-first-call-recovery-control:{mode}:confirmed:one-send");
     }
+}
+
+#[derive(Clone, Default)]
+struct OutcomeCapture(Arc<Mutex<Vec<std::collections::BTreeMap<String, String>>>>);
+impl tracing::Subscriber for OutcomeCapture {
+    fn enabled(&self, m: &tracing::Metadata<'_>) -> bool {
+        m.target() == "gateway_dispatch" && *m.level() == tracing::Level::INFO
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Fields(std::collections::BTreeMap<String, String>);
+        impl tracing::field::Visit for Fields {
+            fn record_str(&mut self, f: &tracing::field::Field, v: &str) {
+                self.0.insert(f.name().into(), v.into());
+            }
+            fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+                self.0.insert(f.name().into(), format!("{v:?}"));
+            }
+        }
+        let mut fields = Fields(Default::default());
+        event.record(&mut fields);
+        self.0.lock().unwrap().push(fields.0);
+    }
+}
+async fn captured_call(serving: &Serving, body: Value) -> (Value, OutcomeCapture) {
+    use axum::{
+        body::{to_bytes, Body},
+        http::Request,
+    };
+    use tower::ServiceExt;
+    use tracing::instrument::WithSubscriber;
+    let capture = OutcomeCapture::default();
+    let request = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("host", "gateway.example")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer good-token")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = serving
+        .router()
+        .oneshot(request)
+        .with_subscriber(capture.clone())
+        .await
+        .unwrap();
+    let bytes = to_bytes(response.into_body(), 100_000).await.unwrap();
+    let value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap()
+    };
+    (value, capture)
+}
+fn assert_static_outcome(capture: &OutcomeCapture, operation: &str, class: &str, kind: &str) {
+    let events = capture.0.lock().unwrap();
+    let text = format!("{events:?}");
+    for private in ["CANARY_", "good-token", "genie@node"] {
+        assert!(
+            !text.contains(private),
+            "tool outcome leaked request data: {text}"
+        );
+    }
+    let outcomes: Vec<_> = events.iter().filter(|e| e.contains_key("class")).collect();
+    assert_eq!(
+        outcomes.len(),
+        1,
+        "dispatch failure did not log exactly one INFO outcome: {text}"
+    );
+    assert_eq!(outcomes[0].get("operation").unwrap(), operation);
+    assert_eq!(outcomes[0].get("class").unwrap(), class);
+    assert_eq!(outcomes[0].get("kind").unwrap(), kind);
+    eprintln!("observed-static-outcome: {text}");
+}
+#[tokio::test]
+async fn dispatch_outcomes_are_single_static_info_records_without_request_canaries() {
+    let (fixture, bus) = setup().await;
+    let serving = Serving::from_owner_file(&fixture.config_file)
+        .await
+        .unwrap();
+    let input = rpc(
+        "tools/call",
+        json!({"name":"gist","arguments":{"request_id":"CANARY_REQUEST_34","title":"CANARY_TITLE_34","body":"CANARY_BODY_34","files":{"CANARY_FILE_34":"CANARY_CONTENT_34"}}}),
+    );
+    for (code, kind) in [
+        ("not_found", "not_found"),
+        ("unavailable", "unavailable"),
+        ("denied", "denied"),
+        ("CANARY_UNTRUSTED_REFUSAL_34", "unrecognized"),
+    ] {
+        *bus.list_error.lock().unwrap() = Some(code.into());
+        let (value, capture) = captured_call(&serving, input.clone()).await;
+        assert_eq!(value["error"]["code"], -32004, "{value}");
+        assert_static_outcome(&capture, "gist", "pre_effect_unavailable", kind);
+        let (value,capture)=captured_call(&serving,rpc("tools/call",json!({"name":"xmsg_send","arguments":{"request_id":"CANARY_SEND_REQUEST_34","to":"genie@node","text":"CANARY_SEND_BODY_34"}}))).await;
+        assert_eq!(value["error"]["code"], -32004, "{value}");
+        assert_static_outcome(&capture, "xmsg_send", "pre_effect_unavailable", kind);
+    }
+    assert_eq!(bus.sends.load(Ordering::SeqCst), 0);
+    *bus.list_error.lock().unwrap() = Some("unknown_peer".into());
+    let (_, capture) = captured_call(
+        &serving,
+        rpc("tools/call", json!({"name":"xmsg_list","arguments":{}})),
+    )
+    .await;
+    assert_static_outcome(
+        &capture,
+        "xmsg_list",
+        "pre_effect_unavailable",
+        "unknown_peer",
+    );
+    *bus.list_error.lock().unwrap() = None;
+    for (operation, arguments) in [
+        (
+            "xmsg_reply",
+            json!({"request_id":"CANARY_REPLY_34","message_id":12,"text":"CANARY_BODY_34"}),
+        ),
+        ("xmsg_inbox", json!({"limit":0})),
+        ("xmsg_read_message", json!({"message_id":12})),
+        ("xmsg_ack", json!({"message_id":12})),
+        ("xmsg_message_status", json!({"request_id":12})),
+        (
+            "xmsg_identity",
+            json!({"CANARY_ARGUMENT_34":"CANARY_VALUE_34"}),
+        ),
+        ("xmsg_list", json!({"CANARY_ARGUMENT_34":"CANARY_VALUE_34"})),
+    ] {
+        let (value, capture) = captured_call(
+            &serving,
+            rpc(
+                "tools/call",
+                json!({"name":operation,"arguments":arguments}),
+            ),
+        )
+        .await;
+        assert_eq!(value["error"]["code"], -32602, "{operation}: {value}");
+        assert_static_outcome(&capture, operation, "invalid", "arguments");
+    }
+    let started = std::time::Instant::now();
+    let mut confirmed = false;
+    for attempt in 0..FIRST_CALL_ATTEMPTS {
+        let remaining = FIRST_CALL_WALL_BUDGET
+            .checked_sub(started.elapsed())
+            .expect("logging first-call wall budget exhausted");
+        let (value, capture) =
+            tokio::time::timeout(remaining, captured_call(&serving, input.clone()))
+                .await
+                .expect("logging first-call wall budget exhausted");
+        assert_eq!(value["id"], input["id"], "logging recovery changed RPC ID");
+        assert!(
+            value.get("error").is_none(),
+            "logging first-call RPC failure: {value}"
+        );
+        let result = &value["result"]["structuredContent"];
+        assert_eq!(
+            result["request_id"], input["params"]["arguments"]["request_id"],
+            "logging recovery changed request ID"
+        );
+        if result["broker"]["state"] == "confirmed" {
+            assert!(
+                capture
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|e| !e.contains_key("class")),
+                "successful dispatch logged a failure outcome"
+            );
+            confirmed = true;
+            break;
+        }
+        let state = result["state"]
+            .as_str()
+            .expect("logging recovery omitted pending/unknown state");
+        assert!(
+            matches!(state, "pending" | "unknown"),
+            "unexpected logging recovery result: {value}"
+        );
+        let kind = {
+            let events = capture.0.lock().unwrap();
+            events
+                .iter()
+                .find(|e| e.contains_key("class"))
+                .and_then(|e| e.get("kind"))
+                .cloned()
+                .expect("logging recovery omitted outcome")
+        };
+        assert!(
+            if state == "pending" {
+                matches!(kind.as_str(), "pending" | "request_deadline")
+            } else {
+                kind == "unknown"
+            },
+            "unexpected logging recovery kind: {kind}"
+        );
+        assert_static_outcome(&capture, "gist", state, &kind);
+        assert!(
+            attempt + 1 < FIRST_CALL_ATTEMPTS,
+            "logging confirmation attempts exhausted: {value}"
+        );
+    }
+    assert!(confirmed, "logging first call never confirmed");
+    assert_eq!(
+        bus.sends.load(Ordering::SeqCst),
+        1,
+        "logging recovery duplicated bus submission"
+    );
+    rusqlite::Connection::open(&fixture.store_file).unwrap().execute("UPDATE outbound_reservations SET state='unknown',receipt=NULL WHERE request_id='CANARY_REQUEST_34'",[]).unwrap();
+    let (value, capture) = captured_call(
+        &serving,
+        rpc(
+            "tools/call",
+            json!({"name":"xmsg_message_status","arguments":{"request_id":"CANARY_REQUEST_34"}}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        value["result"]["structuredContent"]["results"][0]["state"], "unknown",
+        "{value}"
+    );
+    assert!(
+        capture
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|e| !e.contains_key("class")),
+        "successful status read logged a failure outcome"
+    );
 }

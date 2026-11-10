@@ -24,7 +24,7 @@ CASES = [
         "src/serving.rs",
         """let request = match request {
                     Ok(request) => request,
-                    Err(_) => return rpc_error(&id, -32602, "Invalid params"),
+                    Err(_) => return invalid_dispatch(operation, &id, "Invalid params"),
                 };
                 return messaging_call(app, token, id, request, policy, store, progress).await;""",
         """let request = match request {
@@ -36,7 +36,7 @@ CASES = [
                         }
                         request
                     },
-                    Err(_) => return rpc_error(&id, -32602, "Invalid params"),
+                    Err(_) => return invalid_dispatch(operation, &id, "Invalid params"),
                 };
                 return messaging_call(app, token, id, request, policy, store, progress).await;""",
         "messaging",
@@ -251,8 +251,14 @@ CASES.append(
     (
         "deadline-pending-response",
         "src/serving.rs",
-        "Some(pending) => pending_response(pending),",
-        "Some(_) => unavailable(),",
+        """Some(pending) => {
+            diagnostic::emit(pending.operation, "pending", "request_deadline");
+            pending_response(pending)
+        }""",
+        """Some(pending) => {
+            diagnostic::emit(pending.operation, "pending", "request_deadline");
+            unavailable()
+        }""",
         "messaging",
         "handler_deadline_reports_pending_without_cancelling_accepted_work",
         "handler deadline hid its pending request",
