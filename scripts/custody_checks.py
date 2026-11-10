@@ -37,13 +37,14 @@ MARKERS = [
     "total-capacity-permanent",
     "byte-capacity",
     "idle-maintenance",
+    "thousand-refusals",
 ]
 
 
 def require_complete(result):
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert (
-        "22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out" in result.stdout
+        "23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out" in result.stdout
     ), "custody profile count/skip mismatch"
     for marker in MARKERS:
         assert result.stdout.count(f"gateway-custody-complete:{marker}") == 1, (
@@ -60,7 +61,7 @@ def main():
     evidence.mkdir(parents=True, exist_ok=True)
     (evidence / "profile.log").write_text(result.stdout + result.stderr)
     require_complete(result)
-    print("custody profile:22/22, zero ignored, all completion markers", flush=True)
+    print("custody profile:23/23, zero ignored, all completion markers", flush=True)
     missing = live(
         executable,
         None,
@@ -111,7 +112,7 @@ def main():
         "custody missing-binary and early-return controls: expected refusals",
         flush=True,
     )
-    print("custody-checks-complete:22", flush=True)
+    print("custody-checks-complete:23", flush=True)
 
 
 if __name__ == "__main__":
