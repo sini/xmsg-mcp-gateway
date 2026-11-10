@@ -41,6 +41,7 @@ async fn setup_list_bus(policy: Policy) -> (fixture::Fixture, ListBus) {
     let mut store = Store::open(&fixture.store_file).unwrap();
     store.migrate_custody().unwrap();
     store.migrate_outbound().unwrap();
+    store.migrate_retirement().unwrap();
     store.set_outbound_policy("grant", 2, &policy).unwrap();
 
     let register = directory.join("register.sock");
@@ -188,6 +189,7 @@ async fn setup_list_bus(policy: Policy) -> (fixture::Fixture, ListBus) {
             "dedup_lifetime_secs": 604800,
             "max_framed_bytes": 65536
         },
+        "result_recovery_secs": 604800,
         "submission_timeout_ms": 1000,
         "max_reservations": 100,
         "max_retained_bytes": 1048576
@@ -234,6 +236,10 @@ async fn xmsg_list_returns_only_permitted_send_targets_with_live_status_and_neve
         .find(|tool| tool["name"] == "xmsg_list")
         .expect("xmsg_list tool must be advertised when send scope is held");
     assert_eq!(list_tool["inputSchema"]["additionalProperties"], false);
+    assert_eq!(
+        list_tool["inputSchema"]["properties"]["within"],
+        json!({"type": "integer", "minimum": 1, "maximum": 604800})
+    );
 
     let (status, value, _) = fixture::request(
         &serving,
@@ -313,6 +319,22 @@ async fn xmsg_list_returns_only_permitted_send_targets_with_live_status_and_neve
     assert_eq!(
         value["result"]["structuredContent"],
         json!({"recipients": []})
+    );
+
+    *bus.list_response.lock().unwrap() = json!({"status": "error", "code": "internal_error"});
+    let (status, value, _) = fixture::request(
+        &serving,
+        "good-token",
+        rpc("tools/call", json!({"name": "xmsg_list", "arguments": {}})),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{value}");
+    assert_eq!(value["id"], "list-rpc");
+    assert_eq!(value["error"]["code"], -32004);
+    assert_eq!(value["error"]["message"], "Tool temporarily unavailable");
+    assert!(
+        value["error"].get("data").is_none(),
+        "read-only xmsg_list unavailable error must not claim a submission status: {value}"
     );
 }
 
@@ -540,6 +562,7 @@ async fn xmsg_list_filters_only_narrow_and_never_widen_policy_targets() {
         json!({"kind": "unknown"}),
         json!({"status": "unknown"}),
         json!({"within": 0}),
+        json!({"within": 604801, "status": "inactive"}),
         json!({"within": 86400, "status": "live"}),
     ] {
         let (status, value, _) = fixture::request(
@@ -557,4 +580,76 @@ async fn xmsg_list_filters_only_narrow_and_never_widen_policy_targets() {
             "invalid arguments {invalid_arguments} should be rejected with -32602: {value}"
         );
     }
+}
+
+#[test]
+fn set_outbound_policy_accepts_empty_send_targets_and_refuses_empty_reply_targets() {
+    let fixture = fixture::Fixture::new();
+    let directory = fixture.keys._directory.path();
+    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut store = Store::open(&fixture.store_file).unwrap();
+    store.migrate_custody().unwrap();
+    store.migrate_outbound().unwrap();
+    store.migrate_retirement().unwrap();
+
+    let empty_send_file = directory.join("empty-send-policy.json");
+    fixture::private_file(
+        &empty_send_file,
+        &serde_json::to_vec(&json!({
+            "send": {"targets": [], "required_scope": "identity:read"},
+            "reply": null
+        }))
+        .unwrap(),
+    );
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_xmsg-mcp-gateway"))
+        .arg("--state")
+        .arg(&fixture.store_file)
+        .args(["set-outbound-policy", "grant", "2"])
+        .arg(&empty_send_file)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "set-outbound-policy CLI rejected empty send targets: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "outbound policy changed at revision 3"
+    );
+
+    let empty_reply_file = directory.join("empty-reply-policy.json");
+    fixture::private_file(
+        &empty_reply_file,
+        &serde_json::to_vec(&json!({
+            "send": null,
+            "reply": {"targets": [], "required_scope": "identity:read"}
+        }))
+        .unwrap(),
+    );
+    let refused = std::process::Command::new(env!("CARGO_BIN_EXE_xmsg-mcp-gateway"))
+        .arg("--state")
+        .arg(&fixture.store_file)
+        .args(["set-outbound-policy", "grant", "3"])
+        .arg(&empty_reply_file)
+        .output()
+        .unwrap();
+    assert!(
+        !refused.status.success(),
+        "set-outbound-policy CLI accepted empty reply targets"
+    );
+    assert!(matches!(
+        store.set_outbound_policy(
+            "grant",
+            3,
+            &Policy {
+                send: None,
+                reply: Some(Permission {
+                    targets: BTreeSet::new(),
+                    required_scope: "identity:read".into(),
+                }),
+            },
+        ),
+        Err(outbound::Error::Configuration)
+    ));
 }

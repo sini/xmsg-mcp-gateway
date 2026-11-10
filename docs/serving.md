@@ -5,7 +5,7 @@ grants. Its public resource metadata advertises the canonical resource and issue
 from the owner's configuration. `initialize`, `ping`, `tools/list`,
 `notifications/initialized` and `xmsg_identity` are implemented. Standard `_meta`
 progress tokens are accepted but unused. An optional owner-file messaging section
-enables authorized `xmsg_send` and `xmsg_reply`, plus mailbox-scoped
+enables authorized `xmsg_list`, `xmsg_send` and `xmsg_reply`, plus mailbox-scoped
 `xmsg_inbox` and `xmsg_read_message` recovery reads. An optional [Events profile](events.md)
 adds subscription methods, inbound polling, signed callback delivery,
 `xmsg_message_status` and `xmsg_ack`. An optional [gist broker](#optional-gist-broker)
@@ -57,7 +57,16 @@ The service name uses xmsg's shared validator. The retained registration supplie
 the actual mailbox, node and effective TTL/capacity values; config supplies no bus
 address. Explicit custody, outbound and retirement migrations are required before messaging.
 Only the owner CLI/store changes per-grant policy. Empty send/reply policy
-advertises no send/reply tools and refuses those calls. An enabled grant with
+(`{"send":null,"reply":null}`) advertises no `xmsg_list`, `xmsg_send` or
+`xmsg_reply` tools and refuses those calls. In `Policy::validate`,
+`send.targets` may be empty (`{"send":{"targets":[],"required_scope":"..."},"reply":null}`),
+while `reply.targets` must still be non-empty (`if self.reply.as_ref().is_some_and(|permission| permission.targets.is_empty()) { return Err(Error::Configuration); }`).
+When `send` is configured and its `required_scope` is required by the verifier,
+`xmsg_list(node?, kind?, status?, within?)` (`within` integer `1..=604800`) is
+advertised and returns only the grant's `send.targets` with live status from the
+bus (returning `{"recipients": []}` with no fleet or node metadata when
+`send.targets` is empty, and omitting `xmsg_send` unless `send.targets` is
+non-empty); optional filters only narrow that set and never widen it. An enabled grant with
 a registered mailbox still exposes its scoped recovery reads.
 
 The real-node cells

@@ -6,7 +6,7 @@ observation instant. Repeated access never extends an existing stored expiry.
 Physical reclaim follows the existing access/heartbeat cadence, which bounds its
 lag; no background purger is introduced.
 
-The Rust listener exposes this library through `xmsg_send` and `xmsg_reply` when
+The Rust listener exposes this library through `xmsg_list`, `xmsg_send` and `xmsg_reply` when
 an owner-file `messaging` profile is configured and the verifier scopes and
 owner-set grant policy permit each operation. Without that section the listener
 serves identity only. Invalid or incomplete messaging configuration refuses
@@ -47,7 +47,29 @@ input to the CLI, not an MCP argument or listener activation switch.
 
 Policy has optional `send` and `reply` permissions, each naming exact service
 addresses in `targets` and a `required_scope`. The verifier must require that
-scope and verify it on the actual token. Anonymous, instance and label matches
+scope and verify it on the actual token. In `Policy::validate`, `send.targets`
+may be empty (an empty allowlist is valid: `xmsg_send` is not advertised or
+callable, while `xmsg_list` is advertised when `send.required_scope` is held
+and returns `{"recipients": []}`), whereas `reply.targets` must still be
+non-empty:
+
+```rust
+if self
+    .reply
+    .as_ref()
+    .is_some_and(|permission| permission.targets.is_empty())
+{
+    return Err(Error::Configuration);
+}
+```
+
+`xmsg_list(node?, kind?, status?, within?)` is gated by `send.required_scope`
+(no new scope). It queries the leaf's existing `xmsg list` and filters the
+returned recipients to `send.targets` with live status on healthy nodes;
+optional filters (`node`, `kind`, `status`, `within` in `1..=604800` when
+`status` is `"inactive"`) only narrow that permitted set and never widen it,
+and an empty policy returns `{"recipients": []}` with no fleet or node
+metadata. Anonymous, instance and label matches
 cannot satisfy service discovery. Reply targets come from an owned, attested
 inbound correlation in this store, rather than caller-selected reply addresses.
 

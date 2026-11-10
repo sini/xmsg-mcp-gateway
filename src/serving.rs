@@ -804,7 +804,7 @@ fn tools(app: &App, policy: &Policy, grant: &Authorization) -> Value {
                 "inputSchema":{"type":"object","properties":{"node":{"type":"string","minLength":1},
                     "kind":{"type":"string","enum":["service","instance","subagent"]},
                     "status":{"type":"string","enum":["live","inactive"]},
-                    "within":{"type":"integer","minimum":0}},
+                    "within":{"type":"integer","minimum":1,"maximum":604800}},
                     "required":[],"additionalProperties":false},
                 "annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false},
                 "securitySchemes":[{"type":"oauth2","scopes":app.scopes}]}));
@@ -1438,11 +1438,11 @@ async fn mcp_request(
                         _ => return rpc_error(&id, -32602, "Invalid params"),
                     };
                 let Some(messaging) = &app.messaging else {
-                    return unavailable();
+                    return tool_unavailable(&id, false);
                 };
                 let snapshot = match messaging.session.snapshot() {
                     Ok(snapshot) => snapshot,
-                    Err(_) => return unavailable(),
+                    Err(_) => return tool_unavailable(&id, false),
                 };
                 let mut list_store = store;
                 tracing::info!(target: "gateway_dispatch", operation = "xmsg_list", "dispatch");
@@ -1458,16 +1458,16 @@ async fn mcp_request(
                 {
                     Ok(listed) => match serde_json::to_value(listed) {
                         Ok(data) => rpc_result(&id, tool_result(data)),
-                        Err(_) => unavailable(),
+                        Err(_) => tool_unavailable(&id, false),
                     },
                     Err(
                         outbound::Error::Denied | outbound::Error::Authority(GrantError::Denied),
                     ) => StatusCode::FORBIDDEN.into_response(),
-                    Err(outbound::Error::Authentication(error)) => {
-                        auth_response(error, &app.challenge)
+                    Err(outbound::Error::Authentication(auth::Error::InvalidToken)) => {
+                        auth_response(auth::Error::InvalidToken, &app.challenge)
                     }
                     Err(outbound::Error::Configuration) => rpc_error(&id, -32602, "Invalid params"),
-                    Err(_) => unavailable(),
+                    Err(_) => tool_unavailable(&id, false),
                 };
             }
             if matches!(call.name.as_str(), "xmsg_send" | "xmsg_reply") && app.messaging.is_some() {
