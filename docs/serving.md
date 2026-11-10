@@ -254,7 +254,24 @@ connection.
 
 Invalid or unapproved credentials receive 401 with the protected-resource metadata
 challenge. Disabled/missing grants and identity-spoofing arguments or metadata
-receive 403. Provider/store failures and request deadlines receive retryable 503.
+receive 403. Failures before authenticated tool dispatch (including provider/store
+admission and body deadlines) retain HTTP 503 with `Retry-After: 1`; authentication
+and authorization failures retain their 401/403 responses. Once a tool or Events
+operation is dispatched, unavailable state returns an HTTP 200 JSON-RPC error
+with the original request ID and code `-32004`, rather than an empty response.
+For send, reply and gist failures proved to precede any new effect in that attempt,
+`error.data` is `{"submitted":false,"retry":"same request_id"}`. This describes
+the current attempt only: an older attempt with that ID may already have submitted.
+Retry with the same ID and identical arguments; never create a fresh ID to bypass
+an uncertain result.
+
+After submission may have occurred, a deadline/disconnect does not cancel it.
+The existing `pending`/`unknown` result and read-only `xmsg_message_status` remain
+the recovery path. Gist result lookup or provider failures after a confirmed
+submission return pending recovery, never `submitted:false`. Revocation still
+withholds the broker result. Unavailable reads, Events operations and local ACK
+writes have a JSON-RPC error body without a claim that a local commit rolled back.
+`tools/list` retains the shared predispatch authentication/admission behavior.
 A content-free event marks each real store-open attempt and identity-tool dispatch;
 no token, request content, subject or secret is logged by these events.
 
