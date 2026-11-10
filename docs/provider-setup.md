@@ -49,9 +49,11 @@ identity and grant enrollment. Do not replace those values with the client name.
 
 The audience option is generic, not a Kanidm-specific authentication mode. A
 provider that already issues resource audiences needs no override. A broker can
-also remain in use. The verifier's introspection credentials identify the lookup
-caller, not the hosted OAuth client; keep their roles distinct and continue to
-check the returned `client_id` against the approved `hosted_client`.
+also remain in use as a fallback when an installation requires exact-resource
+access tokens (see the [Keycloak OAuth broker fallback recipe](oauth-keycloak.md)).
+The verifier's introspection credentials identify the lookup caller, not the
+hosted OAuth client; keep their roles distinct and continue to check the returned
+`client_id` against the approved `hosted_client`.
 
 This audience profile does not establish the hosted client's complete OAuth
 flow. Confirm registration, login, identity reads, refresh, revocation and restart
@@ -68,8 +70,9 @@ canonical `resource` itself as a string or singleton array, plus the configured
 issuer and owner subject, active/unexpired claims and
 `identity:read events:subscribe`. They do not implement Rust's `audience` option.
 Direct Kanidm 1.11.2 therefore still fails this reference's exact-resource gate;
-a compatible provider or reviewed broker is needed for that synthetic path. A
-local broker experiment passed this gate, without establishing hosted compatibility.
+a compatible provider or reviewed broker (such as [Keycloak](oauth-keycloak.md))
+is needed for that synthetic path. A local broker experiment passed this gate,
+without establishing hosted compatibility.
 
 The reference uses Basic introspection credentials configured by `client_id` and
 `client_secret_file`. These identify the lookup caller, not the hosted OAuth
