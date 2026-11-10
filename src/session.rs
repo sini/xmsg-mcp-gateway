@@ -390,7 +390,9 @@ mod tests {
             record(&mut store, "node", false, at, &custody::Limits::default()).unwrap();
             let expiry: i64 = store
                 .connection
-                .query_row("SELECT expires_at FROM custody_gaps", [], |row| row.get(0))
+                .query_row("SELECT expires_at FROM custody_gap_summary", [], |row| {
+                    row.get(0)
+                })
                 .unwrap();
             let remaining = (UNIX_EPOCH + Duration::from_secs(expiry as u64))
                 .duration_since(at)
@@ -430,11 +432,9 @@ mod tests {
                 .unwrap();
             let gap: i64 = store
                 .connection
-                .query_row(
-                    "SELECT MAX(gap_end-gap_start) FROM custody_gaps",
-                    [],
-                    |row| row.get(0),
-                )
+                .query_row("SELECT MAX(widest) FROM custody_gap_summary", [], |row| {
+                    row.get(0)
+                })
                 .unwrap();
             assert!(gap >= true_downtime);
             assert!(

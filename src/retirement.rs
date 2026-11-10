@@ -20,11 +20,14 @@ impl Store {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.pragma_update(
-            None,
-            "application_id",
-            crate::grants::RETIREMENT_APPLICATION_ID,
-        )?;
+        let marker: i64 = tx.pragma_query_value(None, "application_id", |r| r.get(0))?;
+        if marker != crate::grants::SUMMARY_APPLICATION_ID {
+            tx.pragma_update(
+                None,
+                "application_id",
+                crate::grants::RETIREMENT_APPLICATION_ID,
+            )?;
+        }
         tx.execute_batch("CREATE TABLE outbound_retirement_schema(version INTEGER NOT NULL CHECK(version=5));
           INSERT INTO outbound_retirement_schema VALUES(5);
           ALTER TABLE outbound_reservations ADD COLUMN recovery_until INTEGER;
@@ -39,7 +42,10 @@ impl Store {
         let application: i64 = self
             .connection
             .pragma_query_value(None, "application_id", |r| r.get(0))?;
-        if application != crate::grants::RETIREMENT_APPLICATION_ID {
+        if !matches!(
+            application,
+            crate::grants::RETIREMENT_APPLICATION_ID | crate::grants::SUMMARY_APPLICATION_ID
+        ) {
             return Err(Error::MigrationRequired);
         }
         let ready: bool = self
@@ -472,6 +478,9 @@ mod application_marker_tests {
     #[test]
     fn old_reader_exact_marker_predicate_rejects_migrated_store() {
         let (_dir, mut s) = super::tests::setup();
+        s.connection
+            .pragma_update(None, "application_id", crate::grants::LEGACY_APPLICATION_ID)
+            .unwrap();
         let before: i64 = s
             .connection
             .pragma_query_value(None, "application_id", |r| r.get(0))
@@ -489,6 +498,9 @@ mod application_marker_tests {
     #[test]
     fn failed_migration_rolls_back_application_marker_and_ddl() {
         let (_dir, mut s) = super::tests::setup();
+        s.connection
+            .pragma_update(None, "application_id", crate::grants::LEGACY_APPLICATION_ID)
+            .unwrap();
         s.connection
             .execute_batch("CREATE TABLE outbound_request_fences(blocker INTEGER)")
             .unwrap();
