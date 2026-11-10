@@ -746,6 +746,7 @@ async fn submit(
             )?;
             tx.execute("INSERT INTO outbound_reservations (owner,operation,request_id,payload_hash,sender,grant_id,grant_revision,idempotency_key,target,correlation,framed_text,created_at,retry_until,state,recovery_until) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'pending',?14)", params![owner,op,id.as_str(),payload_hash,sender,authority.grant_id,authority.revision,key,target,correlation,framed_text,timestamp,retry_until,recovery_until])?;
             tx.commit()?;
+            tracing::debug!(target: "gateway_outbound_reservation_committed", "pending reservation committed");
             store
                 .reservation(owner, op, id)?
                 .ok_or(Error::Configuration)?

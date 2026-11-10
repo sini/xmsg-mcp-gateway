@@ -395,6 +395,12 @@ async fn manifest_refusal(field: &str, value: serde_json::Value, expected: Manif
     let mut fixture = migrated_fixture(&node);
     drop(fixture.serving().await);
     fixture.config["messaging"]["manifest"][field] = value;
+    // Isolate manifest verification from the independent R >= E validation.
+    fixture.config["messaging"]["result_recovery_secs"] = json!(fixture.config["messaging"]
+        ["manifest"]["idempotency_ttl_secs"]
+        .as_u64()
+        .unwrap()
+        .max(86400));
     save(&fixture);
     match Serving::from_owner_file(&fixture.config_file).await {
         Err(StartupError::Manifest(actual)) => assert_eq!(actual, expected),
@@ -522,6 +528,12 @@ async fn messaging_requires_explicit_migration_and_a_complete_budget() {
     cli_refuses(&fixture).await;
     owner(&fixture, &["migrate-custody"]);
     owner(&fixture, &["migrate-outbound"]);
+    assert!(matches!(
+        Serving::from_owner_file(&fixture.config_file).await,
+        Err(StartupError::Store(
+            xmsg_mcp_gateway::outbound::Error::MigrationRequired
+        ))
+    ));
     owner(&fixture, &["migrate-retirement"]);
     fixture.config["request_timeout_ms"] = json!(10000);
     save(&fixture);
@@ -1163,8 +1175,8 @@ async fn expired_mcp_uncertainty_requires_reconciliation_without_resubmission() 
                 .router()
                 .oneshot(request)
                 .with_subscriber(observer::AtEvent {
-                    target: "gateway_outbound_reserved",
-                    // Age fixture data, then exercise slow work inside the acceptance window.
+                    target: "gateway_outbound_reservation_committed",
+                    // Shorten the fixture deadline before dispatch reads it, then exercise slow work.
                     action: move || {
                         let database = rusqlite::Connection::open(&acceptance_store).unwrap();
                         database.execute(

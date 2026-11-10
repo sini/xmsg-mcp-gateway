@@ -239,6 +239,10 @@ async fn real_pinned_node_custody_wakes_https_and_recovers_owned_body() {
     let binary = real_node::pinned_binary();
     let mut node = real_node::Node::start(&binary).await;
     let mut setup = Setup::new();
+    Store::open(&setup.provider.store_file)
+        .unwrap()
+        .migrate_retirement()
+        .unwrap();
     let callback = http_callback::CallbackFixture::new(&crate::events_test_support::secret(4));
     let target = format!("{}@{}", node.config.service, node.config.expected_node);
     let policy: outbound::Policy = serde_json::from_value(

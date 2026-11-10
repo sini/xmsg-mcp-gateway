@@ -148,7 +148,7 @@ CASES.extend(
         (
             "explicit-messaging-migration",
             "src/serving.rs",
-            "store\n                .require_outbound_ready()",
+            "store\n                .require_retirement_ready()",
             "Ok::<(), outbound::Error>(())",
             "messaging",
             "messaging_requires_explicit_migration_and_a_complete_budget",
