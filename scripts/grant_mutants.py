@@ -114,8 +114,14 @@ CASES = [
     (
         "cli-exit",
         "src/main.rs",
-        "std::process::exit(1);",
-        "std::process::exit(0);",
+        """if let Err(error) = run(Cli::parse()).await {
+        eprintln!("gateway command failed: {error}");
+        std::process::exit(1);
+    }""",
+        """if let Err(error) = run(Cli::parse()).await {
+        eprintln!("gateway command failed: {error}");
+        std::process::exit(0);
+    }""",
         "grant_cli",
         "unknown_stale_and_unchanged_ids_exit_nonzero_and_change_nothing",
     ),

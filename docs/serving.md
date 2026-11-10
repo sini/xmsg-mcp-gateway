@@ -281,6 +281,30 @@ submission return pending recovery, never `submitted:false`. Revocation still
 withholds the broker result. Unavailable reads, Events operations and local ACK
 writes have a JSON-RPC error body without a claim that a local commit rolled back.
 `tools/list` retains the shared predispatch authentication/admission behavior.
+
+The CLI defaults to `warn,gateway_dispatch=info`: dispatch INFO is visible while
+other targets remain at WARN. Set `RUST_LOG` to replace this default with an
+explicit level/target filter; for example, `RUST_LOG=warn` hides dispatch INFO.
+An invalid explicit filter is rejected rather than falling back to the default.
+
+At INFO level, `gateway_dispatch` also emits one `dispatch outcome`
+record for each non-success tool result. Its `operation`, `class` and `kind` are
+closed static labels. Classes are `pre_effect_unavailable`, `pending`, `unknown`,
+`denied`, `conflict` and `invalid`. Known xmsg refusal codes use static labels;
+other peer-supplied codes become `unrecognized`. No addresses, request IDs,
+arguments, bodies, tokens or error Debug/Display values are logged. Existing
+content-free dispatch-start events remain unchanged. A successful call adds no
+outcome record; a successful status read stays quiet even when its historical
+result is pending or unknown.
+
+Pending/unknown results can already have lost the original cause; their kind is
+honestly `pending` or `unknown`, rather than a guessed transport error. A local
+ACK with uncertain commit state logs `unknown`. The existing unknown-peer list
+fallback still returns an empty list, but now records the static
+`xmsg_list/pre_effect_unavailable/unknown_peer` diagnostic before that cause is
+erased. Predispatch rejection and protocol Events calls are outside this tool
+outcome stream.
+
 A content-free event marks each real store-open attempt and identity-tool dispatch;
 no token, request content, subject or secret is logged by these events.
 

@@ -285,7 +285,28 @@ impl Subscriber for Probe {
                 self.opens.fetch_add(1, Ordering::SeqCst);
             }
             "gateway_dispatch" => {
-                self.dispatches.fetch_add(1, Ordering::SeqCst);
+                struct Start(bool);
+                impl tracing::field::Visit for Start {
+                    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                        if field.name() == "message" {
+                            self.0 = value == "dispatch";
+                        }
+                    }
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        if field.name() == "message" {
+                            self.0 = format!("{value:?}") == "dispatch";
+                        }
+                    }
+                }
+                let mut start = Start(false);
+                event.record(&mut start);
+                if start.0 {
+                    self.dispatches.fetch_add(1, Ordering::SeqCst);
+                }
             }
             "gateway_bus_observation" => {
                 self.link_observations.fetch_add(1, Ordering::SeqCst);

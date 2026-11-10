@@ -12,6 +12,8 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
 async fn normal(address: &str) {
+    let mut body = Fixture::call();
+    body["params"]["_meta"] = serde_json::json!({"opaque":"HEADER_BODY_CANARY_34"});
     let response = reqwest::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(3))
@@ -20,7 +22,7 @@ async fn normal(address: &str) {
         .post(format!("http://{address}/mcp"))
         .bearer_auth("good-token")
         .header("content-type", "application/json")
-        .body(Fixture::call().to_string())
+        .body(body.to_string())
         .send()
         .await
         .unwrap();
@@ -47,6 +49,7 @@ async fn header_deadline_is_absolute_and_excludes_body() {
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_xmsg-mcp-gateway"))
         .args(["serve", "--config"])
         .arg(&fixture.config_file)
+        .env_remove("RUST_LOG")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
@@ -60,6 +63,26 @@ async fn header_deadline_is_absolute_and_excludes_body() {
         .unwrap();
     let address = ready.strip_prefix("serving MCP at ").unwrap();
     normal(address).await;
+    let mut invalid = Fixture::call();
+    invalid["id"] = serde_json::json!("HEADER_ID_CANARY_34");
+    invalid["params"]["arguments"] = serde_json::json!({"opaque":"HEADER_ARGUMENT_CANARY_34"});
+    invalid["params"]["_meta"] = serde_json::json!({"opaque":"HEADER_BODY_CANARY_34"});
+    let refused = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .unwrap()
+        .post(format!("http://{address}/mcp"))
+        .bearer_auth("good-token")
+        .header("content-type", "application/json")
+        .body(invalid.to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::OK);
+    let refused: serde_json::Value =
+        serde_json::from_slice(&refused.bytes().await.unwrap()).unwrap();
+    assert_eq!(refused["error"]["code"], -32602);
     let mut socket = TcpStream::connect(address).await.unwrap();
     socket
         .write_all(b"POST /mcp HTTP/1.1\r\nHost: gateway.example\r\nAuthorization: Bearer header-secret-token\r\nX-Drip: ")
@@ -95,7 +118,9 @@ async fn header_deadline_is_absolute_and_excludes_body() {
     );
     normal(address).await;
     let mut socket = TcpStream::connect(address).await.unwrap();
-    let body = Fixture::call().to_string();
+    let mut body = Fixture::call();
+    body["params"]["_meta"] = serde_json::json!({"opaque":"HEADER_BODY_CANARY_34"});
+    let body = body.to_string();
     socket.write_all(format!("POST /mcp HTTP/1.1\r\nHost: gateway.example\r\nAuthorization: Bearer good-token\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).as_bytes()).await.unwrap();
     tokio::time::sleep(Duration::from_millis(700)).await;
     socket.write_all(body.as_bytes()).await.unwrap();
@@ -125,17 +150,36 @@ async fn header_deadline_is_absolute_and_excludes_body() {
         logs.contains("HeaderReadTimeout"),
         "header timeout reason was not emitted: {logs}"
     );
+    let outcomes: Vec<_> = logs
+        .lines()
+        .filter(|line| line.contains("gateway_dispatch: dispatch outcome"))
+        .collect();
+    assert_eq!(
+        outcomes.len(),
+        1,
+        "default CLI did not emit exactly one outcome: {logs}"
+    );
+    assert!(
+        outcomes[0].contains("operation=\"xmsg_identity\"")
+            && outcomes[0].contains("class=\"invalid\"")
+            && outcomes[0].contains("kind=\"arguments\""),
+        "default CLI outcome fields were not static: {logs}"
+    );
     for secret in [
+        "HEADER_ID_CANARY_34",
+        "HEADER_ARGUMENT_CANARY_34",
         "header-secret-token",
         "good-token",
         "tools/call",
-        "xmsg_identity",
+        "HEADER_BODY_CANARY_34",
+        "\"name\":\"xmsg_identity\"",
     ] {
         assert!(
             !logs.contains(secret),
             "transport logs exposed request data: {logs}"
         );
     }
+    eprintln!("actual-cli-static-outcome: {}", outcomes[0]);
 }
 
 #[tokio::test]
