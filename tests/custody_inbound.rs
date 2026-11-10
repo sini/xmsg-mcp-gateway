@@ -160,20 +160,20 @@ async fn oversized_refusal_is_durable_content_free_before_ack() {
         "permanent refusal retained upstream queue slot"
     );
     let persisted = rusqlite::Connection::open(&db).unwrap();
-    let (id, origin, size, reason): (String, String, i64, String) = persisted
+    let (observations, reason, max_size): (i64, String, i64) = persisted
         .query_row(
-            "SELECT upstream_id, origin, size, reason FROM custody_metadata",
+            "SELECT observations,reason,max_size FROM custody_refusal_summaries",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!(id, sent.message_id);
-    assert_eq!(reason, "oversized", "durable refusal missing");
     assert!(
-        size > "private oversized content".len() as i64,
+        max_size > "private oversized content".len() as i64,
         "actual bounded byte size missing"
     );
-    assert!(!origin.contains("private oversized content"));
+    assert_eq!(observations, 1);
+    assert_eq!(reason, "refusal", "durable refusal missing");
+    let _ = sent;
     let count: i64 = persisted
         .query_row("SELECT COUNT(*) FROM custody_items", [], |row| row.get(0))
         .unwrap();
@@ -254,7 +254,7 @@ async fn conflict_is_quarantined_before_the_upstream_ack() {
     let persisted = rusqlite::Connection::open(&db).unwrap();
     let conflicts: i64 = persisted
         .query_row(
-            "SELECT COUNT(*) FROM custody_metadata WHERE reason='conflict'",
+            "SELECT COALESCE(SUM(observations),0) FROM custody_refusal_summaries WHERE reason='conflict'",
             [],
             |row| row.get(0),
         )
@@ -302,6 +302,35 @@ async fn failed_transaction_never_acknowledges_or_retains_partial_custody() {
         ),
         "legacy custody did not refuse before polling"
     );
+    let upstream = rusqlite::Connection::open(
+        node.config
+            .register_socket
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("node.db"),
+    )
+    .unwrap();
+    let before_poll: Option<i64> = upstream
+        .query_row(
+            "SELECT delivered_at FROM svc_pending_messages WHERE id=?1",
+            [&sent.message_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        before_poll, None,
+        "legacy custody polled before explicit migration"
+    );
+    let before_poll_probe = service.poll(0).await.unwrap();
+    assert!(
+        before_poll_probe.is_some(),
+        "legacy custody polled before explicit migration"
+    );
+    assert_eq!(before_poll_probe.unwrap().message_id(), sent.message_id);
+    drop(service);
+    let mut service = node.config.register().await.unwrap();
     let injected = rusqlite::Connection::open(&db).unwrap();
     let version: i64 = injected
         .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -321,6 +350,18 @@ async fn failed_transaction_never_acknowledges_or_retains_partial_custody() {
         .await
         .is_err(),
         "failed custody transaction was not attempted after explicit migration"
+    );
+    let after_poll: Option<i64> = upstream
+        .query_row(
+            "SELECT delivered_at FROM svc_pending_messages WHERE id=?1",
+            [&sent.message_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(after_poll, None, "failed transaction ACKed upstream");
+    assert!(
+        service.poll(0).await.unwrap().is_none(),
+        "forced outbox failure did not exercise an actual poll"
     );
     drop(service);
     node.restart(&binary).await;
@@ -431,7 +472,7 @@ async fn permanent_refusals_do_not_starve_valid_traffic() {
     let persisted = rusqlite::Connection::open(&db).unwrap();
     let refusals: i64 = persisted
         .query_row(
-            "SELECT COUNT(*) FROM custody_metadata WHERE reason='oversized'",
+            "SELECT COALESCE(SUM(observations),0) FROM custody_refusal_summaries WHERE reason='refusal'",
             [],
             |row| row.get(0),
         )
@@ -1002,9 +1043,11 @@ async fn transient_capacity_and_failed_refusal_persistence_keep_redelivery() {
     assert_eq!(status.refusals, 0, "transient deferral became a refusal");
     let inspect = rusqlite::Connection::open(&db).unwrap();
     let records: i64 = inspect
-        .query_row("SELECT COUNT(*) FROM custody_metadata", [], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT COUNT(*) FROM custody_refusal_summaries",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     assert_eq!(records, 0, "transient deferral consumed refusal budget");
     println!("gateway-custody-complete:transient-capacity");
@@ -1168,6 +1211,7 @@ async fn refusal_metadata_is_bounded_and_failed_audit_never_acks() {
     )
     .await
     .unwrap();
+    rusqlite::Connection::open(&db).unwrap().execute_batch("CREATE TRIGGER fail_refusal_audit BEFORE UPDATE ON custody_refusal_summaries BEGIN SELECT RAISE(ABORT,'forced summary audit failure'); END;").unwrap();
     let second = service
         .send(
             service.address().unwrap(),
@@ -1186,7 +1230,7 @@ async fn refusal_metadata_is_bounded_and_failed_audit_never_acks() {
         )
         .await
         .is_err(),
-        "refusal metadata count bound missing"
+        "failed summary audit was accepted"
     );
     drop(service);
     node.restart(&binary).await;
@@ -1462,9 +1506,11 @@ async fn idle_poll_enforces_retention_and_observes_connection_changes() {
     );
     let inspect = rusqlite::Connection::open(&db).unwrap();
     let retained: i64 = inspect
-        .query_row("SELECT COUNT(*) FROM custody_metadata", [], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT COUNT(*) FROM custody_refusal_summaries",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     assert_eq!(retained, 0, "idle receive ignored retention");
     node.restart(&binary).await;
@@ -1535,18 +1581,20 @@ async fn idle_poll_enforces_retention_and_observes_connection_changes() {
         max_gap_intervals: 1,
         ..limits.clone()
     };
-    assert!(
-        xmsg_mcp_gateway::custody::receive_one(
-            &mut store,
-            &mut service,
-            &scope,
-            &bounded,
-            custody_time::at(109)
-        )
-        .await
-        .is_err(),
-        "gap interval budget was not bounded"
-    );
+    xmsg_mcp_gateway::custody::receive_one(
+        &mut store,
+        &mut service,
+        &scope,
+        &bounded,
+        custody_time::at(109),
+    )
+    .await
+    .unwrap();
+    let count: i64 = inspect
+        .query_row("SELECT COUNT(*) FROM custody_gap_summary", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 1, "gap summary row bound missing");
+
     println!("gateway-custody-complete:idle-maintenance");
 }
 
@@ -1581,7 +1629,7 @@ async fn fractional_retention_site(table: &str, tombstone: bool) {
             let mut limits = Limits {
                 content_retention_secs: lifetime,
                 metadata_retention_secs: if tombstone { 2 } else { lifetime },
-                max_item_bytes: if table == "custody_metadata" {
+                max_item_bytes: if table == "custody_refusal_summaries" {
                     1
                 } else {
                     Limits::default().max_item_bytes
@@ -1592,7 +1640,7 @@ async fn fractional_retention_site(table: &str, tombstone: bool) {
             let accepted = store
                 .accept_delivery(&scope, &service, &delivery, &limits, at)
                 .unwrap();
-            if table == "custody_metadata" {
+            if table == "custody_refusal_summaries" {
                 assert_eq!(accepted, Acceptance::Refused);
             } else {
                 assert!(matches!(accepted, Acceptance::Stored { .. }));
@@ -1611,7 +1659,7 @@ async fn fractional_retention_site(table: &str, tombstone: bool) {
                 remaining < Duration::from_secs(lifetime as u64 + 1),
                 "{table}: retention exceeds rounding allowance"
             );
-            if !tombstone {
+            if !tombstone && table != "custody_refusal_summaries" {
                 limits.content_retention_secs += 10;
                 limits.metadata_retention_secs += 10;
                 store
@@ -1701,7 +1749,7 @@ async fn pending_metadata_retains_its_complete_fractional_lifetime() {
 #[tokio::test]
 #[ignore = "mandatory private-node custody profile"]
 async fn refusal_metadata_retains_its_complete_fractional_lifetime() {
-    fractional_retention_site("custody_metadata", false).await;
+    fractional_retention_site("custody_refusal_summaries", false).await;
     println!("gateway-custody-complete:fractional-refusal");
 }
 
@@ -1717,4 +1765,112 @@ async fn held_content_retains_its_complete_fractional_lifetime() {
 async fn tombstone_gc_inherits_the_ceiled_content_anchor() {
     fractional_retention_site("custody_items", true).await;
     println!("gateway-custody-complete:fractional-tombstone");
+}
+
+#[tokio::test]
+#[ignore = "mandatory private-node custody profile"]
+async fn thousand_refusals_do_not_block_a_valid_ack() {
+    let binary = real_node::pinned_binary();
+    let node = real_node::Node::start(&binary).await;
+    let temp = tempfile::tempdir().unwrap();
+    let mut store = authority(&temp.path().join("authority.db"));
+    store.migrate_custody().unwrap();
+    let scope = Scope {
+        bus_instance: "isolated-node-db-1".into(),
+        grant_id: "grant".into(),
+    };
+    let limits = Limits {
+        max_item_bytes: 1,
+        ..Limits::default()
+    };
+    let mut service = node.config.register().await.unwrap();
+    for index in 0..1001 {
+        service
+            .send(
+                service.address().unwrap(),
+                "oversized",
+                Some(&format!("summary-{index}")),
+            )
+            .await
+            .unwrap();
+        let accepted = xmsg_mcp_gateway::custody::receive_one(
+            &mut store,
+            &mut service,
+            &scope,
+            &limits,
+            custody_time::at(100),
+        )
+        .await;
+        assert!(
+            matches!(accepted, Ok(Some(Acceptance::Refused))),
+            "bounded refusal summary blocked ACK at {index}: {accepted:?}"
+        );
+    }
+    let inspect = rusqlite::Connection::open(temp.path().join("authority.db")).unwrap();
+    let rows: i64 = inspect
+        .query_row("SELECT COUNT(*) FROM custody_refusal_summaries", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(rows, 1, "refusal summary row bound missing");
+    inspect
+        .execute(
+            "UPDATE custody_refusal_summaries SET observations=9223372036854775807",
+            [],
+        )
+        .unwrap();
+    service
+        .send(
+            service.address().unwrap(),
+            "saturation witness",
+            Some("summary-saturated"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        xmsg_mcp_gateway::custody::receive_one(
+            &mut store,
+            &mut service,
+            &scope,
+            &limits,
+            custody_time::at(100)
+        )
+        .await
+        .unwrap(),
+        Some(Acceptance::Refused)
+    );
+    assert_eq!(
+        store
+            .custody_status(&scope, &limits, custody_time::at(100), 604800)
+            .unwrap()
+            .refusals,
+        i64::MAX,
+        "refusal observation count did not saturate"
+    );
+    let limits = Limits::default();
+    service
+        .send(
+            service.address().unwrap(),
+            "valid after refusals",
+            Some("summary-valid"),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        xmsg_mcp_gateway::custody::receive_one(
+            &mut store,
+            &mut service,
+            &scope,
+            &limits,
+            custody_time::at(101)
+        )
+        .await
+        .unwrap(),
+        Some(Acceptance::Stored { .. })
+    ));
+    assert!(
+        service.poll(0).await.unwrap().is_none(),
+        "valid delivery was not ACKed"
+    );
+    println!("gateway-custody-complete:thousand-refusals");
 }

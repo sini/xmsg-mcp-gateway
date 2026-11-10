@@ -1,4 +1,5 @@
 use super::*;
+use crate::custody;
 use crate::event_callback_fixture as http_callback;
 use crate::events_test_support::{fixture, Setup};
 use std::collections::VecDeque;
@@ -381,4 +382,123 @@ async fn real_pinned_node_custody_wakes_https_and_recovers_owned_body() {
         .await
         .unwrap();
     println!("events-transport-complete:owned-custody-https");
+}
+
+#[tokio::test]
+async fn summarized_gap_history_keeps_live_session_ready() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    for stale in [false, true] {
+        let mut setup = Setup::new();
+        let _bus = start_bus(&mut setup).await;
+        let limits = custody::Limits {
+            metadata_retention_secs: if stale { 10 } else { 604800 },
+            ..custody::Limits::default()
+        };
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut store = Store::open(&setup.provider.store_file).unwrap();
+        if stale {
+            store
+                .record_bus_link(
+                    "bus",
+                    true,
+                    &limits,
+                    UNIX_EPOCH + Duration::from_secs(now - 45),
+                )
+                .unwrap();
+            store
+                .record_bus_link(
+                    "bus",
+                    true,
+                    &limits,
+                    UNIX_EPOCH + Duration::from_secs(now - 25),
+                )
+                .unwrap();
+            for second in now - 24..now {
+                store
+                    .record_bus_link(
+                        "bus",
+                        true,
+                        &limits,
+                        UNIX_EPOCH + Duration::from_secs(second),
+                    )
+                    .unwrap();
+            }
+        } else {
+            let mut second = now - 501502;
+            store
+                .record_bus_link(
+                    "bus",
+                    true,
+                    &limits,
+                    UNIX_EPOCH + Duration::from_secs(second),
+                )
+                .unwrap();
+            for width in (1..=1001).rev() {
+                second += width;
+                store
+                    .record_bus_link(
+                        "bus",
+                        true,
+                        &limits,
+                        UNIX_EPOCH + Duration::from_secs(second),
+                    )
+                    .expect("shrinking gap history blocked readiness");
+            }
+        }
+        setup.provider.config["events"]["custody_limits"] = json!({"max_items":1000,"max_bytes":67108864,"max_item_bytes":262144,"content_retention_secs":604800,"max_metadata":1000,"metadata_retention_secs":limits.metadata_retention_secs,"max_gap_intervals":1000});
+        fixture::private_file(
+            &setup.provider.config_file,
+            &serde_json::to_vec(&setup.provider.config).unwrap(),
+        );
+        let serving = Serving::from_owner_file(&setup.provider.config_file)
+            .await
+            .expect("coalesced history prevented session startup");
+        assert_eq!(
+            serving.state.messaging.as_ref().unwrap().session.status()["state"],
+            "ready",
+            "historical witness held readiness red"
+        );
+        let status = store
+            .custody_status(
+                &custody::Scope {
+                    bus_instance: "bus".into(),
+                    grant_id: "grant".into(),
+                },
+                &limits,
+                SystemTime::now(),
+                15,
+            )
+            .unwrap();
+        assert!(
+            status.offline_uncertainty,
+            "summary forgot the widest interval"
+        );
+        assert!(
+            status.coalesced_uncertainty,
+            "historical evidence lost coalesced label"
+        );
+        if stale {
+            let expired: bool = setup
+                .db()
+                .query_row(
+                    "SELECT widest_expires_at<=?1 FROM custody_gap_summary WHERE bus='bus'",
+                    [now as i64],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(expired, "fixture did not pass widest interval's own expiry");
+        }
+        serving
+            .state
+            .messaging
+            .as_ref()
+            .unwrap()
+            .session
+            .shutdown()
+            .await
+            .unwrap();
+    }
 }
