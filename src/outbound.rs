@@ -280,6 +280,7 @@ pub enum Receipt {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Outcome {
     Pending,
+    Expired,
     Unknown,
     ExpiredUnknown,
     Confirmed(Receipt),
@@ -497,6 +498,8 @@ async fn dispatch_on_connection(
     selected_grant: Option<&str>,
 ) -> Result<Outcome, Error> {
     store.require_outbound_ready()?;
+    store.require_retirement_ready()?;
+    limits.validate()?;
     let started = std::time::Instant::now();
     let identity = tokio::time::timeout(limits.timeout, verifier.verify(token))
         .await
@@ -516,7 +519,25 @@ async fn dispatch_on_connection(
         identity.resource(),
         identity.subject(),
     ]);
+    let (operation, raw_id, _) = request.parts();
+    if store.outbound_id_retired(&owner, raw_id.as_str())?
+        && store.reservation(&owner, operation, raw_id)?.is_none()
+    {
+        return Ok(Outcome::Expired);
+    }
     let Some(_lease) = store.try_operation_lease(identity.service())? else {
+        if store.outbound_id_conflicts(&owner, raw_id.as_str(), operation)? {
+            return Err(Error::Conflict);
+        }
+        if store.outbound_recovery_expired(
+            &owner,
+            raw_id.as_str(),
+            service.sender(),
+            &initial_grant.grant_id,
+            limits,
+        )? {
+            return Ok(Outcome::Expired);
+        }
         let (op, id, text) = request.parts();
         if let Some(reservation) = store.reservation(&owner, op, id)? {
             let (target, correlation) = match request {
@@ -537,6 +558,15 @@ async fn dispatch_on_connection(
         }
         return Ok(Outcome::Pending);
     };
+    store.retire_outbound_locked(identity.service(), limits, now())?;
+    if store.outbound_id_retired(&owner, raw_id.as_str())?
+        && store.reservation(&owner, operation, raw_id)?.is_none()
+    {
+        return Ok(Outcome::Expired);
+    }
+    if store.outbound_id_conflicts(&owner, raw_id.as_str(), operation)? {
+        return Err(Error::Conflict);
+    }
     let (op, id, _) = request.parts();
     let may_have_submitted = AtomicBool::new(
         store
@@ -696,8 +726,11 @@ async fn submit(
             if !limits.text_fits(&framed_text) {
                 return Err(Error::Oversized);
             }
+            let timestamp_now = SystemTime::now();
             let (timestamp, retry_until) =
-                reservation_times(SystemTime::now(), limits.dedup_lifetime_secs)?;
+                reservation_times(timestamp_now, limits.dedup_lifetime_secs)?;
+            let (_, recovery_until) =
+                reservation_times(timestamp_now, limits.result_recovery_secs)?;
             let tx = store
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -707,7 +740,11 @@ async fn submit(
             {
                 return Err(Error::Capacity);
             }
-            tx.execute("INSERT INTO outbound_reservations (owner,operation,request_id,payload_hash,sender,grant_id,grant_revision,idempotency_key,target,correlation,framed_text,created_at,retry_until,state) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'pending')", params![owner,op,id.as_str(),payload_hash,sender,authority.grant_id,authority.revision,key,target,correlation,framed_text,timestamp,retry_until])?;
+            tx.execute(
+                "INSERT INTO outbound_request_fences(owner,request_id) VALUES(?1,?2)",
+                params![owner, id.as_str()],
+            )?;
+            tx.execute("INSERT INTO outbound_reservations (owner,operation,request_id,payload_hash,sender,grant_id,grant_revision,idempotency_key,target,correlation,framed_text,created_at,retry_until,state,recovery_until) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'pending',?14)", params![owner,op,id.as_str(),payload_hash,sender,authority.grant_id,authority.revision,key,target,correlation,framed_text,timestamp,retry_until,recovery_until])?;
             tx.commit()?;
             store
                 .reservation(owner, op, id)?

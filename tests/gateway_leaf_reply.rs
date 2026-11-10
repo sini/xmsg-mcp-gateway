@@ -48,6 +48,7 @@ async fn mcp_leaf_send_reply_enters_owned_custody_with_attested_origin() {
     let mut store = Store::open(&setup.store_file).unwrap();
     store.migrate_custody().unwrap();
     store.migrate_outbound().unwrap();
+    store.migrate_retirement().unwrap();
     store.migrate_events(&key).unwrap();
     store
         .set_outbound_policy(

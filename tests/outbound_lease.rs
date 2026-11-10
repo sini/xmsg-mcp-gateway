@@ -106,6 +106,7 @@ fn owner_policy_write_waits_for_the_same_service_lease() {
         .unwrap();
     store.migrate_custody().unwrap();
     store.migrate_outbound().unwrap();
+    store.migrate_retirement().unwrap();
     let held = store.try_operation_lease("gateway").unwrap().unwrap();
     let marker = temp.path().join("policy-waiting");
     let document = temp.path().join("policy-command.json");

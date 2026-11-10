@@ -98,6 +98,7 @@ impl Store {
         grant: &str,
         limits: &Limits,
     ) -> Result<bool, Error> {
+        self.require_retirement_ready()?;
         let mut q=self.connection.prepare("SELECT created_at,retry_until,recovery_until FROM outbound_reservations WHERE owner=?1 AND request_id=?2 AND sender=?3 AND grant_id=?4")?;
         let rows = q.query_map(params![owner, id, sender, grant], |r| {
             Ok((
@@ -108,9 +109,6 @@ impl Store {
         })?;
         let now = now();
         let observed:Option<i64>=self.connection.query_row("SELECT c.last_observed FROM outbound_retirement_clock c JOIN grants g ON g.service=c.service WHERE g.id=?1",[grant],|r|r.get(0)).optional()?;
-        if observed.is_some_and(|at| now < at) {
-            return Err(Error::Busy);
-        }
         let mut saw_row = false;
         let mut expired = true;
         for row in rows {
@@ -121,7 +119,7 @@ impl Store {
             {
                 return Err(Error::Busy);
             }
-            if now < created {
+            if now < created || observed.is_some_and(|at| now < at) {
                 return Err(Error::Busy);
             }
             saw_row = true;
@@ -297,6 +295,21 @@ mod tests {
         s.connection
             .execute_batch("DROP TRIGGER refuse_archive;")
             .unwrap();
+        s.connection.execute_batch("CREATE TRIGGER refuse_delete BEFORE DELETE ON outbound_reservations BEGIN SELECT RAISE(ABORT,'forced delete failure'); END;").unwrap();
+        assert!(s
+            .retire_outbound_locked("gateway", &limits(60, 120), 300)
+            .is_err());
+        assert!(!s.outbound_id_retired("o", "one").unwrap());
+        assert_eq!(
+            s.connection
+                .query_row("SELECT COUNT(*) FROM outbound_reservations", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        s.connection
+            .execute_batch("DROP TRIGGER refuse_delete")
+            .unwrap();
         s.retire_outbound_locked("gateway", &limits(60, 120), 300)
             .unwrap();
         assert!(s.outbound_id_retired("o", "one").unwrap());
@@ -344,6 +357,15 @@ mod tests {
         s.retire_outbound_locked("gateway", &limits(60, 120), 129)
             .unwrap();
         assert!(s.outbound_id_retired("o", "one").unwrap());
+        s.connection
+            .execute(
+                "UPDATE outbound_retirement_clock SET last_observed=?1",
+                [now() + 100],
+            )
+            .unwrap();
+        assert!(s
+            .outbound_recovery_expired("o", "one", "gateway@bus", "g", &limits(60, 120))
+            .unwrap());
         s.retire_outbound_locked("gateway", &limits(60, 999), 500)
             .unwrap();
         assert!(s.outbound_id_retired("o", "one").unwrap());
@@ -364,7 +386,6 @@ mod tests {
 
 #[cfg(test)]
 mod staggered_legacy_tests {
-    use super::*;
     #[test]
     fn an_archived_legacy_operation_does_not_hide_the_other_live_outcome() {
         let (_dir, mut s) = super::tests::setup();
@@ -400,7 +421,6 @@ mod staggered_legacy_tests {
 
 #[cfg(test)]
 mod readiness_tests {
-    use super::*;
     #[test]
     fn readiness_rejects_duplicate_version_rows_and_missing_clock() {
         let (_dir, mut s) = super::tests::setup();
@@ -486,5 +506,15 @@ mod application_marker_tests {
             .prepare("SELECT * FROM outbound_retirement_schema")
             .is_err());
         Store::open(&s.file).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    #[test]
+    fn recovery_window_requires_r_at_least_e_and_checked_clock_arithmetic() {
+        assert!(super::tests::limits(60, 59).validate().is_err());
+        assert!(super::tests::limits(60, i64::MAX).validate().is_err());
+        assert!(super::tests::limits(60, 120).validate().is_ok());
     }
 }

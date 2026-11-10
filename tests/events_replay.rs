@@ -71,6 +71,7 @@ impl Setup {
         let mut store = Store::open(&fixture.store_file).unwrap();
         store.migrate_custody().unwrap();
         store.migrate_outbound().unwrap();
+        store.migrate_retirement().unwrap();
         store.migrate_events(&key).unwrap();
         let identity = verifier.verify("good-token").await.unwrap();
         let runtime = Events::with_transport(

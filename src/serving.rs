@@ -315,6 +315,9 @@ impl Serving {
             store
                 .require_outbound_ready()
                 .map_err(StartupError::Store)?;
+            store
+                .require_retirement_ready()
+                .map_err(StartupError::Store)?;
             let limits = outbound::Limits {
                 dedup_lifetime_secs: i64::try_from(messaging.manifest.idempotency_ttl_secs)
                     .map_err(|_| ManifestError::DedupLifetime)?,
@@ -824,13 +827,19 @@ async fn lookup_broker(
     request_id: String,
 ) -> Result<Option<Value>, outbound::Error> {
     tokio::task::spawn_blocking(move || {
-        let store = Store::open_for_dispatch(&app.grant_store)?;
+        let mut store = Store::open_for_dispatch(&app.grant_store)?;
         let events = app.events.as_ref().ok_or(outbound::Error::Configuration)?;
         let config = app.broker.as_ref().ok_or(outbound::Error::Configuration)?;
         let messaging = app
             .messaging
             .as_ref()
             .ok_or(outbound::Error::Configuration)?;
+        let authority = store.authorize(&identity)?;
+        let policy = store.outbound_policy(&authority.grant_id)?;
+        if !config.permitted(&policy, &authority, &events.selected_grant, &app.verifier) {
+            return Err(outbound::Error::Denied);
+        }
+        store.retire_outbound(identity.service(), &messaging.limits)?;
         crate::broker::lookup(
             &store,
             &identity,
@@ -839,7 +848,7 @@ async fn lookup_broker(
             &events.selected_grant,
             config,
             &request_id,
-            messaging.limits.max_framed_bytes,
+            &messaging.limits,
             &app.verifier,
         )
     })
@@ -880,7 +889,9 @@ async fn broker_call(
             let (state,receipt)=match result {
                 Outcome::Confirmed(receipt)=>("pending",Some(receipt)),
                 Outcome::Pending=>("pending",None),
-                Outcome::Unknown|Outcome::ExpiredUnknown=>("unknown",None),
+                Outcome::Unknown=>("unknown",None),
+                Outcome::ExpiredUnknown => return Ok(json!({"state":"unknown","request_id":request_id,"reconciliation_required":true})),
+                Outcome::Expired => return Ok(recovery::expired_result(&request_id)),
             };
             if receipt.is_some() {
                 let identity=Arc::new(task_app.verifier.verify(&token).await?);
@@ -1007,6 +1018,7 @@ async fn messaging_call(
             tool_result(json!({"state":"unknown",
             "request_id":request_id,"reconciliation_required":true})),
         ),
+        Ok(Outcome::Expired) => rpc_result(&id, tool_result(recovery::expired_result(&request_id))),
         Ok(Outcome::Confirmed(receipt)) => rpc_result(
             &id,
             tool_result(json!({"state":"confirmed","request_id":request_id,"receipt":receipt})),
@@ -1265,21 +1277,30 @@ async fn mcp_request(
                 };
                 let broker_configuration = app.broker.clone();
                 let broker_verifier = app.verifier.clone();
-                let broker_bound = messaging.limits.max_framed_bytes;
+                let retirement_limits = messaging.limits.clone();
                 let status_store_file = app.grant_store.clone();
                 let key = events.key.clone();
                 let selected_grant = events.selected_grant.clone();
                 let subscriber = tracing::dispatcher::get_default(Clone::clone);
                 let result = tokio::task::spawn_blocking(move || {
                     tracing::dispatcher::with_default(&subscriber, || {
+                    let mut recovery_store = Store::open_for_dispatch(&status_store_file).map_err(recovery::Error::Authority)?;
+                    let authority = recovery_store.authorize(&identity).map_err(recovery::Error::Authority)?;
+                    if authority.grant_id != selected_grant {
+                        return Err(recovery::Error::Authority(GrantError::Denied));
+                    }
+                    if broker_request_id.is_some() {
+                        recovery_store.retire_outbound(identity.service(), &retirement_limits)?;
+                    }
                     let mut result = recovery::dispatch(
-                        Store::open_for_dispatch(&status_store_file).map_err(recovery::Error::Authority)?,
+                        recovery_store,
                         &identity,
                         &bus,
                         &mailbox,
                         &selected_grant,
                         &key,
                         request,
+                        &retirement_limits,
                     )?;
                     tracing::debug!(target: "gateway_broker_status_result", "submission status read; validate application result next");
                     let broker_result = if let (Some(config), Some(id)) =
@@ -1293,7 +1314,7 @@ async fn mcp_request(
                             &selected_grant,
                             config,
                             id,
-                            broker_bound,
+                            &retirement_limits,
                             &broker_verifier,
                         ))
                     } else {
@@ -1566,3 +1587,25 @@ pub fn owner_events(config_file: &Path) -> Result<events::Events, StartupError> 
 #[cfg(test)]
 #[path = "serving_events_tests.rs"]
 mod events_tests;
+
+#[cfg(test)]
+mod recovery_configuration_tests {
+    use super::*;
+
+    #[test]
+    fn result_recovery_defaults_to_one_day_and_accepts_an_explicit_window() {
+        let mut value = serde_json::json!({
+            "xmsg":{"service":"gateway","expected_node":"bus","daemon_uid":0,
+                "register_socket":"/tmp/register.sock","agent_socket":"/tmp/agent.sock",
+                "max_frame_bytes":65536,"operation_timeout_ms":1000},
+            "manifest":{"reply_ttl_secs":86400,"idempotency_ttl_secs":86400,
+                "svc_queue_cap":100,"dedup_lifetime_secs":3600,"max_framed_bytes":65536},
+            "submission_timeout_ms":1000,"max_reservations":100,"max_retained_bytes":1048576
+        });
+        let default: MessagingConfiguration = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(default.result_recovery_secs, 86400);
+        value["result_recovery_secs"] = serde_json::json!(172800);
+        let explicit: MessagingConfiguration = serde_json::from_value(value).unwrap();
+        assert_eq!(explicit.result_recovery_secs, 172800);
+    }
+}

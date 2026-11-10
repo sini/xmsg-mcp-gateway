@@ -43,6 +43,7 @@ impl Setup {
         let mut store = Store::open(&provider.store_file).unwrap();
         store.migrate_custody().unwrap();
         store.migrate_outbound().unwrap();
+        store.migrate_retirement().unwrap();
         store.migrate_events(&key).unwrap();
         provider.config["events"] =
             json!({"key_file":key_file,"grant_id":"grant","dispatch_timeout_ms":13000});

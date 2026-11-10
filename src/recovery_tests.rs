@@ -1,6 +1,16 @@
 use super::*;
 use crate::events_test_support::Setup;
 use std::sync::atomic::Ordering;
+fn limits() -> crate::outbound::Limits {
+    crate::outbound::Limits {
+        dedup_lifetime_secs: 86400,
+        result_recovery_secs: 86400,
+        max_framed_bytes: 65536,
+        timeout: std::time::Duration::from_secs(1),
+        max_reservations: 100,
+        max_retained_bytes: 1048576,
+    }
+}
 fn ack(store: Store, identity: &VerifiedIdentity, key: &EventKey, id: &str) -> Value {
     dispatch(
         store,
@@ -12,6 +22,7 @@ fn ack(store: Store, identity: &VerifiedIdentity, key: &EventKey, id: &str) -> V
         Request::Ack(AckArguments {
             message_id: id.into(),
         }),
+        &limits(),
     )
     .unwrap()
 }
@@ -129,6 +140,10 @@ async fn responsibility_ack_is_owned_idempotent_contiguous_and_independent_of_su
 #[tokio::test]
 async fn uncertain_status_never_submits_or_reserves_and_scopes_both_operations() {
     let setup = Setup::new();
+    Store::open(&setup.provider.store_file)
+        .unwrap()
+        .migrate_retirement()
+        .unwrap();
     let identity = setup.verifier.verify("good-token").await.unwrap();
     let owner = crate::custody::fingerprint(&[
         identity.service(),
@@ -140,6 +155,7 @@ async fn uncertain_status_never_submits_or_reserves_and_scopes_both_operations()
         setup.db().execute("INSERT INTO outbound_reservations(owner,operation,request_id,payload_hash,sender,grant_id,grant_revision,idempotency_key,target,framed_text,created_at,retry_until,state) VALUES (?1,?2,'request','hash','dot@bus','grant',2,?2,'svc:receiver@peer','body',1,?3,?4)",params![owner,operation,until,state]).unwrap();
     }
     setup.db().execute("INSERT INTO outbound_reservations(owner,operation,request_id,payload_hash,sender,grant_id,grant_revision,idempotency_key,target,framed_text,created_at,retry_until,state) VALUES ('foreign','send','foreign','hash','dot@bus','grant',2,'foreign','svc:receiver@peer','body',1,9999999999,'pending')",[]).unwrap();
+    setup.db().execute("UPDATE outbound_reservations SET created_at=?1,recovery_until=?1+86400,retry_until=MIN(retry_until,?1+86400)", [crate::webhook::signing_time().unwrap()]).unwrap();
     let calls = setup.provider.requests.load(Ordering::SeqCst);
     let read = |id: &str| {
         dispatch(
@@ -152,6 +168,7 @@ async fn uncertain_status_never_submits_or_reserves_and_scopes_both_operations()
             Request::Status(StatusArguments {
                 request_id: id.into(),
             }),
+            &limits(),
         )
         .unwrap()
     };
@@ -381,7 +398,8 @@ async fn transaction_rechecks_selected_grant_for_ack_and_status() {
                 "dot@bus",
                 "wrong-selected-grant",
                 &setup.key,
-                request
+                request,
+                &limits(),
             ),
             Err(Error::Authority(GrantError::Denied))
         ));
@@ -393,5 +411,107 @@ async fn transaction_rechecks_selected_grant_for_ack_and_status() {
                 .get::<_, i64>(0))
             .unwrap(),
         0
+    );
+}
+
+#[tokio::test]
+async fn retired_status_is_distinct_owned_and_does_not_expose_receipts() {
+    let setup = Setup::new();
+    let identity = setup.verifier.verify("good-token").await.unwrap();
+    let mut store = Store::open(&setup.provider.store_file).unwrap();
+    store.migrate_retirement().unwrap();
+    let owner = crate::custody::fingerprint(&[
+        identity.service(),
+        identity.issuer(),
+        identity.resource(),
+        identity.subject(),
+    ]);
+    store.connection.execute("INSERT INTO outbound_retired(owner,request_id,sender,grant_id) VALUES (?1,'retired','dot@bus','grant'),(?1,'foreign','other@bus','grant')", [&owner]).unwrap();
+    let read = |id: &str| {
+        dispatch(
+            Store::open(&setup.provider.store_file).unwrap(),
+            &identity,
+            "bus",
+            "dot@bus",
+            "grant",
+            &setup.key,
+            Request::Status(StatusArguments {
+                request_id: id.into(),
+            }),
+            &limits(),
+        )
+        .unwrap()
+    };
+    assert_eq!(read("retired"), expired_result("retired"));
+    let now = crate::webhook::signing_time().unwrap();
+    setup.db().execute("INSERT INTO outbound_reservations(owner,operation,request_id,payload_hash,sender,grant_id,grant_revision,idempotency_key,target,framed_text,created_at,retry_until,recovery_until,state,receipt) VALUES (?1,'reply','retired','hash','dot@bus','grant',2,'retired-live','svc:receiver@peer','body',?2,?2+86400,?2+86400,'confirmed','{\"known\":true}')", rusqlite::params![owner,now]).unwrap();
+    let mixed = read("retired");
+    assert_eq!(
+        mixed["results"][0]["state"], "confirmed",
+        "archive masked a surviving legacy operation"
+    );
+    assert_eq!(mixed["results"][0]["receipt"]["known"], true);
+    setup.db().execute("INSERT INTO outbound_reservations(owner,operation,request_id,payload_hash,sender,grant_id,grant_revision,idempotency_key,target,framed_text,created_at,retry_until,recovery_until,state,receipt) VALUES (?1,'send','retired','hash','dot@bus','grant',2,'retired-expired','svc:receiver@peer','body',?2,1,1,'confirmed','{\"private\":true}')", rusqlite::params![owner,now]).unwrap();
+    let mixed = read("retired");
+    assert_eq!(mixed["results"][0]["state"], "confirmed");
+    assert_eq!(mixed["results"][1]["state"], "expired");
+    assert!(mixed["results"][1].get("receipt").is_none());
+    assert_eq!(read("foreign"), json!({"state":"not_found"}));
+    assert_eq!(read("unknown"), json!({"state":"not_found"}));
+    assert_eq!(
+        setup
+            .db()
+            .query_row("SELECT COUNT(*) FROM outbound_reservations", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn status_refuses_uninitialized_legacy_cutoffs_and_hides_expired_live_receipts() {
+    let setup = Setup::new();
+    let identity = setup.verifier.verify("good-token").await.unwrap();
+    let mut store = Store::open(&setup.provider.store_file).unwrap();
+    store.migrate_retirement().unwrap();
+    let owner = crate::custody::fingerprint(&[
+        identity.service(),
+        identity.issuer(),
+        identity.resource(),
+        identity.subject(),
+    ]);
+    store.connection.execute("INSERT INTO outbound_reservations(owner,operation,request_id,payload_hash,sender,grant_id,grant_revision,idempotency_key,target,framed_text,created_at,retry_until,state,receipt) VALUES (?1,'send','legacy','hash','dot@bus','grant',2,'legacy','svc:receiver@peer','body',1,1,'confirmed','{\"sensitive\":\"receipt\"}')", [&owner]).unwrap();
+    let read = || {
+        dispatch(
+            Store::open(&setup.provider.store_file).unwrap(),
+            &identity,
+            "bus",
+            "dot@bus",
+            "grant",
+            &setup.key,
+            Request::Status(StatusArguments {
+                request_id: "legacy".into(),
+            }),
+            &limits(),
+        )
+    };
+    assert!(matches!(
+        read(),
+        Err(Error::Broker(crate::outbound::Error::Busy))
+    ));
+    setup
+        .db()
+        .execute("UPDATE outbound_reservations SET recovery_until=1", [])
+        .unwrap();
+    assert_eq!(read().unwrap(), expired_result("legacy"));
+    let receipt: String = setup
+        .db()
+        .query_row("SELECT receipt FROM outbound_reservations", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert!(
+        receipt.contains("sensitive"),
+        "status unexpectedly mutated retained state"
     );
 }

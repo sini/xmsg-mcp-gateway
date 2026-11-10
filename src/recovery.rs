@@ -38,6 +38,11 @@ pub(crate) enum Error {
     Broker(#[from] crate::outbound::Error),
 }
 
+pub(crate) fn expired_result(request_id: &str) -> Value {
+    json!({"state":"expired","request_id":request_id,
+        "not_reexecuted":true,"reconciliation_required":true})
+}
+
 pub(crate) fn owner_key(
     identity: &VerifiedIdentity,
     bus: &str,
@@ -47,6 +52,7 @@ pub(crate) fn owner_key(
     crate::events::owner_key(identity, bus, mailbox, grant)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn dispatch(
     store: Store,
     identity: &VerifiedIdentity,
@@ -55,6 +61,7 @@ pub(crate) fn dispatch(
     selected_grant: &str,
     key: &EventKey,
     request: Request,
+    limits: &crate::outbound::Limits,
 ) -> Result<Value, Error> {
     store.require_events_ready(key)?;
     let tx = store.connection.unchecked_transaction()?;
@@ -72,7 +79,16 @@ pub(crate) fn dispatch(
                 identity.resource(),
                 identity.subject(),
             ]);
-            let mut statement = tx.prepare("SELECT operation,state,receipt,retry_until FROM outbound_reservations WHERE owner=?1 AND request_id=?2 AND sender=?3 AND grant_id=?4 ORDER BY operation")?;
+            if store.outbound_recovery_expired(
+                &owner,
+                &args.request_id,
+                mailbox,
+                &authority.grant_id,
+                limits,
+            )? {
+                return Ok(expired_result(&args.request_id));
+            }
+            let mut statement = tx.prepare("SELECT operation,state,receipt,retry_until,recovery_until FROM outbound_reservations WHERE owner=?1 AND request_id=?2 AND sender=?3 AND grant_id=?4 ORDER BY operation")?;
             let mut matches = Vec::new();
             for row in statement.query_map(
                 params![owner, args.request_id, mailbox, authority.grant_id],
@@ -82,10 +98,17 @@ pub(crate) fn dispatch(
                         r.get::<_, String>(1)?,
                         r.get::<_, Option<String>>(2)?,
                         r.get::<_, i64>(3)?,
+                        r.get::<_, Option<i64>>(4)?,
                     ))
                 },
             )? {
-                let (operation, state, receipt, retry_until) = row?;
+                let (operation, state, receipt, retry_until, recovery_until) = row?;
+                if recovery_until.ok_or(crate::outbound::Error::Busy)? <= now {
+                    let mut value = expired_result(&args.request_id);
+                    value["operation"] = json!(operation);
+                    matches.push(value);
+                    continue;
+                }
                 let effective = if receipt.is_some() {
                     "confirmed"
                 } else if retry_until <= now {
@@ -96,9 +119,16 @@ pub(crate) fn dispatch(
                 let receipt = receipt
                     .map(|raw| serde_json::from_str::<Value>(&raw))
                     .transpose()?;
-                matches.push(json!({"operation":operation,"state":effective,"receipt":receipt}));
+                let mut value = json!({"operation":operation,"state":effective,"receipt":receipt});
+                if effective == "expired_unknown" {
+                    value["reconciliation_required"] = json!(true);
+                }
+                matches.push(value);
             }
             if matches.is_empty() {
+                if store.retired_outbound(&owner, &args.request_id, mailbox, &authority.grant_id)? {
+                    return Ok(expired_result(&args.request_id));
+                }
                 return Ok(json!({"state":"not_found"}));
             }
             Ok(json!({"request_id":args.request_id,"results":matches}))
@@ -159,3 +189,16 @@ pub(crate) fn dispatch(
 #[cfg(test)]
 #[path = "recovery_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod retirement_surface_tests {
+    #[test]
+    fn expired_requests_require_reconciliation_without_retry_advice() {
+        let value = super::expired_result("old-request");
+        assert_eq!(value["state"], "expired");
+        assert_eq!(value["not_reexecuted"], true);
+        assert_eq!(value["reconciliation_required"], true);
+        assert!(value.get("retry").is_none());
+        assert!(value.get("receipt").is_none());
+    }
+}

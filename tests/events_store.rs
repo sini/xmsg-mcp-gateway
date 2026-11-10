@@ -24,6 +24,7 @@ fn base() -> (tempfile::TempDir, Store, std::path::PathBuf) {
     let mut store = Store::initialize(&file).unwrap();
     store.migrate_custody().unwrap();
     store.migrate_outbound().unwrap();
+    store.migrate_retirement().unwrap();
     (dir, store, file)
 }
 fn seed(db: &Connection, id: &str, revision: i64, class: &str) {

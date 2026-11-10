@@ -84,6 +84,7 @@ impl Setup {
         let mut store = Store::open(&provider.store_file).unwrap();
         store.migrate_custody().unwrap();
         store.migrate_outbound().unwrap();
+        store.migrate_retirement().unwrap();
         store.migrate_events(&key).unwrap();
         let callback = Arc::new(Callback {
             calls: AtomicUsize::new(0),

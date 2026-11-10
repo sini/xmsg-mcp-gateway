@@ -247,6 +247,7 @@ async fn maximum_escaped_complete_frame_survives_the_real_listener() {
     let mut fixture = serving_fixture::Fixture::new();
     owner(&fixture, &["migrate-custody"]);
     owner(&fixture, &["migrate-outbound"]);
+    owner(&fixture, &["migrate-retirement"]);
     let policy_file = fixture.keys._directory.path().join("policy.json");
     serving_fixture::private_file(&policy_file, &serde_json::to_vec(&json!({"send":{"targets":["receiver@gateway.fixture"],"required_scope":"identity:read"},"reply":null})).unwrap());
     owner(

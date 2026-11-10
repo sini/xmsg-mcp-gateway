@@ -251,7 +251,7 @@ pub(crate) fn lookup(
     selected: &str,
     config: &Config,
     request_id: &str,
-    max_bytes: usize,
+    limits: &crate::outbound::Limits,
     verifier: &crate::auth::Verifier,
 ) -> Result<Option<Value>, crate::outbound::Error> {
     let now = std::time::SystemTime::now()
@@ -272,10 +272,17 @@ pub(crate) fn lookup(
         identity.resource(),
         identity.subject(),
     ]);
-    let row:Option<(String,String,Option<String>)>=store.connection.query_row("SELECT target,framed_text,receipt FROM outbound_reservations WHERE owner=?1 AND operation='send' AND request_id=?2 AND sender=?3 AND grant_id=?4",rusqlite::params![owner,request_id,mailbox,authority.grant_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-    let Some((target, framed, Some(receipt))) = row else {
+    if store.outbound_recovery_expired(&owner, request_id, mailbox, &authority.grant_id, limits)? {
+        return Ok(None);
+    }
+    let row:Option<(String,String,Option<String>,Option<i64>)>=store.connection.query_row("SELECT target,framed_text,receipt,recovery_until FROM outbound_reservations WHERE owner=?1 AND operation='send' AND request_id=?2 AND sender=?3 AND grant_id=?4",rusqlite::params![owner,request_id,mailbox,authority.grant_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+    let Some((target, framed, Some(receipt), recovery_until)) = row else {
         return Ok(None);
     };
+    if recovery_until.ok_or(crate::outbound::Error::Busy)? <= i64::try_from(now).unwrap_or(i64::MAX)
+    {
+        return Ok(None);
+    }
     if target != config.destination {
         return Ok(None);
     }
@@ -311,7 +318,7 @@ pub(crate) fn lookup(
         &receipt.message_id,
         service,
         node,
-        max_bytes.min(MAX_RESULT_BYTES),
+        limits.max_framed_bytes.min(MAX_RESULT_BYTES),
     )?;
     let mut found: Option<(String, Value)> = None;
     for text in texts {
@@ -332,6 +339,16 @@ mod tests {
     use super::*;
     use crate::events_test_support::Setup;
     use std::collections::BTreeSet;
+    fn limits(bound: usize) -> crate::outbound::Limits {
+        crate::outbound::Limits {
+            dedup_lifetime_secs: 86400,
+            result_recovery_secs: 86400,
+            max_framed_bytes: bound,
+            timeout: std::time::Duration::from_secs(1),
+            max_reservations: 100,
+            max_retained_bytes: 1048576,
+        }
+    }
     fn result(content: &str) -> String {
         json!({"thread":"delegated-gateway","acted":true,"reason":"read","redactions":[],"url":"https://gist.github.com/abc","gist":{"untrusted":true,"id":"abc","url":"https://gist.github.com/abc","description":"example","owner":null,"revision":"revision","files":{"resource":content}}}).to_string()
     }
@@ -339,6 +356,7 @@ mod tests {
         let setup = Setup::new();
         let identity = setup.verifier.verify("good-token").await.unwrap();
         let mut store = Store::open(&setup.provider.store_file).unwrap();
+        store.migrate_retirement().unwrap();
         store
             .set_outbound_policy(
                 "grant",
@@ -366,6 +384,7 @@ mod tests {
             }))
             .unwrap();
         store.connection.execute("INSERT INTO outbound_reservations(owner,operation,request_id,payload_hash,sender,grant_id,grant_revision,idempotency_key,target,framed_text,created_at,retry_until,state,receipt) VALUES (?1,'send','read-1','hash','dot@bus','grant',3,'key','genie@node',?2,1,9999999999,'confirmed',?3)",rusqlite::params![owner,"[External message via dot@bus; gateway correlation key]\n{\"id\":\"abc\",\"kind\":\"gist_read\"}",receipt]).unwrap();
+        store.connection.execute("UPDATE outbound_reservations SET created_at=?1,recovery_until=?1+86400,retry_until=MIN(retry_until,?1+86400)", [crate::webhook::signing_time().unwrap()]).unwrap();
         (
             setup,
             identity,
@@ -408,7 +427,7 @@ mod tests {
             "grant",
             config,
             "read-1",
-            bound,
+            &limits(bound),
             &setup.verifier,
         )
         .unwrap()
@@ -559,7 +578,7 @@ mod tests {
             "foreign",
             &config,
             "read-1",
-            65536,
+            &limits(65536),
             &setup.verifier
         )
         .is_err());
@@ -578,10 +597,63 @@ mod tests {
             "grant",
             &config,
             "read-1",
-            65536,
+            &limits(65536),
             &setup.verifier
         )
         .is_err());
+    }
+    #[tokio::test]
+    async fn broker_result_does_not_expose_expired_or_uninitialized_live_reservations() {
+        let (setup, identity, config) = setup().await;
+        seed(
+            &setup,
+            "good",
+            &result("private result"),
+            json!({"id":null,"service":"genie","node":"node"}),
+            "request-wire",
+            "dot@bus",
+            3,
+            i64::MAX,
+        );
+        assert!(read(&setup, &identity, &config, 65536).is_some());
+        let owner = crate::custody::fingerprint(&[
+            identity.service(),
+            identity.issuer(),
+            identity.resource(),
+            identity.subject(),
+        ]);
+        setup.db().execute("INSERT INTO outbound_retired(owner,request_id,sender,grant_id) VALUES (?1,'read-1','dot@bus','grant')", [&owner]).unwrap();
+        assert!(
+            read(&setup, &identity, &config, 65536).is_some(),
+            "archive hid a live legacy send result"
+        );
+        setup.db().execute("INSERT INTO outbound_reservations(owner,operation,request_id,payload_hash,sender,grant_id,grant_revision,idempotency_key,target,framed_text,created_at,retry_until,recovery_until,state,receipt) SELECT owner,'reply',request_id,payload_hash,sender,grant_id,grant_revision,'other-op',target,framed_text,created_at,retry_until,recovery_until,state,receipt FROM outbound_reservations WHERE operation='send'", []).unwrap();
+        setup
+            .db()
+            .execute(
+                "UPDATE outbound_reservations SET recovery_until=1 WHERE operation='send'",
+                [],
+            )
+            .unwrap();
+        assert!(read(&setup, &identity, &config, 65536).is_none());
+        setup
+            .db()
+            .execute("UPDATE outbound_reservations SET recovery_until=NULL", [])
+            .unwrap();
+        assert!(matches!(
+            lookup(
+                &Store::open(&setup.provider.store_file).unwrap(),
+                &identity,
+                "bus",
+                "dot@bus",
+                "grant",
+                &config,
+                "read-1",
+                &limits(65536),
+                &setup.verifier
+            ),
+            Err(crate::outbound::Error::Busy)
+        ));
     }
     #[test]
     fn action_shape_and_requested_operation_are_validated() {

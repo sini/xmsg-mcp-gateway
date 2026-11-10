@@ -159,6 +159,7 @@ async fn real_mcp_leaf_genie_bridge_scrubs_and_consumes_guard_rewrite() {
     let mut store = Store::open(&setup.store_file).unwrap();
     store.migrate_custody().unwrap();
     store.migrate_outbound().unwrap();
+    store.migrate_retirement().unwrap();
     store.migrate_events(&key).unwrap();
     store
         .set_outbound_policy(
