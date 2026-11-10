@@ -721,8 +721,22 @@ fn rpc_result(id: &Value, result: Value) -> Response {
     Json(json!({"jsonrpc":"2.0", "id": id, "result": result})).into_response()
 }
 fn rpc_error(id: &Value, code: i64, message: &str) -> Response {
-    Json(json!({"jsonrpc":"2.0", "id": id, "error":{"code":code,"message":message}}))
-        .into_response()
+    rpc_error_with_data(id, code, message, None)
+}
+fn rpc_error_with_data(id: &Value, code: i64, message: &str, data: Option<Value>) -> Response {
+    let mut error = json!({"code":code,"message":message});
+    if let Some(data) = data {
+        error["data"] = data;
+    }
+    Json(json!({"jsonrpc":"2.0", "id": id, "error":error})).into_response()
+}
+fn tool_unavailable(id: &Value, pre_effect: bool) -> Response {
+    rpc_error_with_data(
+        id,
+        -32004,
+        "Tool temporarily unavailable",
+        pre_effect.then(|| json!({"submitted":false,"retry":"same request_id"})),
+    )
 }
 
 #[derive(Clone)]
@@ -872,15 +886,17 @@ async fn broker_call(
     };
     let _ = progress.set(pending.clone());
     let Some(messaging) = &app.messaging else {
-        return unavailable();
+        return tool_unavailable(&id, true);
     };
     let snapshot = match messaging.session.snapshot() {
         Ok(s) => s,
-        Err(_) => return unavailable(),
+        Err(_) => return tool_unavailable(&id, true),
     };
     let (send, receive) = tokio::sync::oneshot::channel();
     let task_app = app.clone();
+    let subscriber = tracing::dispatcher::get_default(Clone::clone);
     let broker_work = async move {
+        let mut confirmed_submission = false;
         let result=async {
             let messaging=task_app.messaging.as_ref().ok_or(outbound::Error::Configuration)?;
             let events=task_app.events.as_ref().ok_or(outbound::Error::Configuration)?;
@@ -894,6 +910,8 @@ async fn broker_call(
                 Outcome::Expired => return Ok(recovery::expired_result(&request_id)),
             };
             if receipt.is_some() {
+                confirmed_submission = true;
+                tracing::debug!(target:"gateway_broker_submission_confirmed", "submission receipt available; recovering application result");
                 let identity=Arc::new(task_app.verifier.verify(&token).await?);
                 loop {
                     let value=lookup_broker(task_app.clone(),identity.clone(),snapshot.bus.clone(),snapshot.endpoint.sender().to_owned(),request_id.clone()).await?;
@@ -909,8 +927,10 @@ async fn broker_call(
             }
             Ok::<Value,outbound::Error>(json!({"state":state,"request_id":request_id,"receipt":receipt,"retry":"use the same request_id and identical arguments; status is read-only"}))
         }.await;
-        let _ = send.send(result);
+        let _ = send.send(result.map_err(|error| (confirmed_submission, error)));
     };
+    use tracing::instrument::WithSubscriber;
+    let broker_work = broker_work.with_subscriber(subscriber);
     {
         let mut tasks = app.dispatch_tasks.lock().await;
         while tasks.try_join_next().is_some() {}
@@ -918,17 +938,21 @@ async fn broker_call(
     }
     match tokio::time::timeout_at(deadline, receive).await {
         Ok(Ok(Ok(value))) => rpc_result(&id, tool_result(value)),
-        Ok(Ok(Err(outbound::Error::Denied | outbound::Error::Authority(GrantError::Denied)))) => {
-            StatusCode::FORBIDDEN.into_response()
+        Ok(Ok(Err((
+            _,
+            outbound::Error::Denied | outbound::Error::Authority(GrantError::Denied),
+        )))) => StatusCode::FORBIDDEN.into_response(),
+        Ok(Ok(Err((_, outbound::Error::Authentication(auth::Error::InvalidToken))))) => {
+            auth_response(auth::Error::InvalidToken, &app.challenge)
         }
-        Ok(Ok(Err(outbound::Error::Authentication(error)))) => auth_response(error, &app.challenge),
-        Ok(Ok(Err(outbound::Error::Conflict))) => {
+        Ok(Ok(Err((_, outbound::Error::Conflict)))) => {
             rpc_error(&id, -32009, "request_id payload conflict")
         }
-        Ok(Ok(Err(outbound::Error::Oversized))) => {
+        Ok(Ok(Err((_, outbound::Error::Oversized)))) => {
             rpc_error(&id, -32602, "complete outbound text exceeds bound")
         }
-        Ok(Ok(Err(_))) => unavailable(),
+        Ok(Ok(Err((true, _)))) => pending_response(&pending),
+        Ok(Ok(Err((false, _)))) => tool_unavailable(&id, true),
         _ => pending_response(&pending),
     }
 }
@@ -963,7 +987,7 @@ async fn messaging_call(
         .and_then(|messaging| messaging.session.snapshot().ok())
     {
         Some(snapshot) => snapshot,
-        None => return unavailable(),
+        None => return tool_unavailable(&id, true),
     };
     tracing::info!(target: "gateway_dispatch", operation, "dispatch");
     let (send, receive) = tokio::sync::oneshot::channel();
@@ -1026,25 +1050,32 @@ async fn messaging_call(
         Err(outbound::Error::Denied | outbound::Error::Authority(GrantError::Denied)) => {
             StatusCode::FORBIDDEN.into_response()
         }
-        Err(outbound::Error::Authentication(error)) => auth_response(error, &app.challenge),
+        Err(outbound::Error::Authentication(auth::Error::InvalidToken)) => {
+            auth_response(auth::Error::InvalidToken, &app.challenge)
+        }
         Err(outbound::Error::Conflict) => rpc_error(&id, -32009, "request_id payload conflict"),
         Err(outbound::Error::Oversized) => {
             rpc_error(&id, -32602, "complete outbound text exceeds bound")
         }
-        Err(_) => unavailable(),
+        Err(_) => tool_unavailable(&id, true),
     }
 }
 
 async fn mcp(State(app): State<Arc<App>>, request: Request) -> Response {
     let progress = Arc::new(OnceLock::new());
+    // Authorized dispatch context is not proof that an effect committed.
+    let dispatched = Arc::new(OnceLock::new());
     tokio::time::timeout(
         Duration::from_millis(app.request_timeout_ms),
-        mcp_request(app, request, progress.clone()),
+        mcp_request(app, request, progress.clone(), dispatched.clone()),
     )
     .await
     .unwrap_or_else(|_| match progress.get() {
         Some(pending) => pending_response(pending),
-        None => unavailable(),
+        None => match dispatched.get() {
+            Some(id) => tool_unavailable(id, false),
+            None => unavailable(),
+        },
     })
 }
 
@@ -1052,6 +1083,7 @@ async fn mcp_request(
     app: Arc<App>,
     request: Request,
     progress: Arc<OnceLock<PendingReply>>,
+    dispatched: Arc<OnceLock<Value>>,
 ) -> Response {
     let broker_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     if !permitted_request(&app, &request) {
@@ -1236,6 +1268,7 @@ async fn mcp_request(
                 Ok(call) => call,
                 Err(_) => return rpc_error(&id, -32602, "Invalid params"),
             };
+            let _ = dispatched.set(id.clone());
             if crate::broker::NAMES.contains(&call.name.as_str()) {
                 if !broker_permitted(&app, &policy, &grant) {
                     return StatusCode::FORBIDDEN.into_response();
@@ -1256,7 +1289,7 @@ async fn mcp_request(
                     return StatusCode::FORBIDDEN.into_response();
                 }
                 let Some(messaging) = &app.messaging else {
-                    return unavailable();
+                    return tool_unavailable(&id, false);
                 };
                 let (bus, mailbox) = messaging.session.custody_scope();
                 let (bus, mailbox) = (bus.to_owned(), mailbox.to_owned());
@@ -1339,10 +1372,10 @@ async fn mcp_request(
                     Ok(Err(recovery::Error::Authority(GrantError::Denied))) => {
                         StatusCode::FORBIDDEN.into_response()
                     }
-                    Ok(Err(recovery::Error::Broker(outbound::Error::Authentication(error)))) => {
-                        auth_response(error, &app.challenge)
-                    }
-                    _ => unavailable(),
+                    Ok(Err(recovery::Error::Broker(outbound::Error::Authentication(
+                        auth::Error::InvalidToken,
+                    )))) => auth_response(auth::Error::InvalidToken, &app.challenge),
+                    _ => tool_unavailable(&id, false),
                 };
             }
             if matches!(call.name.as_str(), "xmsg_inbox" | "xmsg_read_message")
@@ -1359,7 +1392,7 @@ async fn mcp_request(
                     Err(_) => return rpc_error(&id, -32602, "Invalid params"),
                 };
                 let Some(messaging) = &app.messaging else {
-                    return unavailable();
+                    return tool_unavailable(&id, false);
                 };
                 let (bus, mailbox) = messaging.session.custody_scope();
                 let (bus, mailbox) = (bus.to_owned(), mailbox.to_owned());
@@ -1375,7 +1408,7 @@ async fn mcp_request(
                     Ok(Err(reads::Error::Authority(GrantError::Denied))) => {
                         StatusCode::FORBIDDEN.into_response()
                     }
-                    _ => unavailable(),
+                    _ => tool_unavailable(&id, false),
                 };
             }
             if matches!(call.name.as_str(), "xmsg_send" | "xmsg_reply") && app.messaging.is_some() {
@@ -1411,13 +1444,14 @@ async fn mcp_request(
                         Err(events::Error::Authority(GrantError::Denied)) => {
                             return StatusCode::FORBIDDEN.into_response()
                         }
-                        Err(_) => return unavailable(),
+                        Err(_) => return tool_unavailable(&id, false),
                     }
                 }
             }
             json!({"content":[{"type":"text","text":data.to_string()}],"structuredContent":data,"isError":false})
         }
         "events/list" | "events/subscribe" | "events/unsubscribe" => {
+            let _ = dispatched.set(id.clone());
             let Some(events) = &app.events else {
                 return rpc_error(&id, -32004, "Events not yet available");
             };
@@ -1425,7 +1459,7 @@ async fn mcp_request(
                 return StatusCode::FORBIDDEN.into_response();
             }
             let Some(messaging) = &app.messaging else {
-                return unavailable();
+                return tool_unavailable(&id, false);
             };
             let (bus, mailbox) = messaging.session.custody_scope();
             let result = match rpc.method.as_str() {
@@ -1485,7 +1519,7 @@ fn event_error(id: &Value, error: events::Error) -> Response {
         events::Error::Callback(crate::webhook::Error::Secret) => {
             rpc_error(id, -32602, "Invalid signing secret")
         }
-        events::Error::Callback(crate::webhook::Error::Random) => unavailable(),
+        events::Error::Callback(crate::webhook::Error::Random) => tool_unavailable(id, false),
         events::Error::Callback(error) => {
             let reason = match error {
                 crate::webhook::Error::Timeout => "timeout",
@@ -1500,7 +1534,7 @@ fn event_error(id: &Value, error: events::Error) -> Response {
         events::Error::Credentials(auth::Error::InvalidToken) => {
             StatusCode::UNAUTHORIZED.into_response()
         }
-        _ => unavailable(),
+        _ => tool_unavailable(id, false),
     }
 }
 
