@@ -185,7 +185,7 @@ CASES = [
     (
         "owned-correlation",
         "src/outbound.rs",
-        " AND c.owner=?4 AND g.service=?5 AND g.issuer=?6 AND g.resource=?7 AND c.grant_id=?8 AND c.grant_revision=?9",
+        " AND c.owner=?4 AND g.service=?5 AND g.issuer=?6 AND g.resource=?7 AND c.grant_id=?8 AND {authority_predicate}",
         "",
         "custody_outbound",
         REPLY_TEST,

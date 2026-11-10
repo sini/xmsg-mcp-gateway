@@ -61,7 +61,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           python3 scripts/events_mutants.py | tee events-mutants.log
-          grep -Fx 'g5-events-mutants-complete:21/21' events-mutants.log
+          grep -Fx 'g5-events-mutants-complete:22/22' events-mutants.log
       - name: Grant source mutants
         if: runner.os == 'Linux'
         run: python3 scripts/grant_mutants.py

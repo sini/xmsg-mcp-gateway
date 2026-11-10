@@ -353,6 +353,19 @@ CASES.extend(
                 ),
             ),
         ),
+        Case(
+            "reply-dispatch-revision",
+            "lib",
+            "outbound::events_reply_tests::first_release_reply_requires_owned_current_dispatch_authority",
+            "src/outbound.rs",
+            (
+                Edit(
+                    "src/outbound.rs",
+                    "AND ea.dispatch_revision=?9",
+                    "AND ?9 IS NOT NULL",
+                ),
+            ),
+        ),
     ]
 )
 

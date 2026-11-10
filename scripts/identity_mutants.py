@@ -125,15 +125,15 @@ CASES += [
     ),
     (
         "provider-redirect",
-        "src/auth.rs",
+        "src/webhook.rs",
         "reqwest::redirect::Policy::none()",
         "reqwest::redirect::Policy::limited(3)",
         "redirects_never_reach_an_active_token_provider",
     ),
     (
         "provider-timeout",
-        "src/auth.rs",
-        ".timeout(Duration::from_millis(config.timeout_ms))",
+        "src/webhook.rs",
+        ".timeout(timeout)",
         "",
         "stalled_provider_is_refused_before_its_response",
     ),
@@ -147,8 +147,8 @@ CASES += [
     (
         "provider-unpinned-proxy",
         "src/auth.rs",
-        "let mut builder = Client::builder()\n            .https_only(true)",
-        "let mut builder = Client::builder()\n            .https_only(true)\n            .no_proxy()",
+        "crate::webhook::https_client_builder(Duration::from_millis(config.timeout_ms))",
+        "crate::webhook::https_client_builder(Duration::from_millis(config.timeout_ms)).no_proxy()",
         "configuration_rejects_insecure_urls_and_unknown_fields",
     ),
 ]
