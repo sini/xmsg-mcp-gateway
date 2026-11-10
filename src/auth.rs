@@ -115,10 +115,8 @@ impl Verifier {
         {
             return Err(Error::Configuration);
         }
-        let mut builder = Client::builder()
-            .https_only(true)
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_millis(config.timeout_ms));
+        let mut builder =
+            crate::webhook::https_client_builder(Duration::from_millis(config.timeout_ms));
         if !config.provider_addresses.is_empty() {
             let host = endpoint.host_str().ok_or(Error::Configuration)?;
             if let Ok(ip) = host.trim_matches(['[', ']']).parse::<IpAddr>() {

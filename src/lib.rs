@@ -21,3 +21,5 @@ extern crate self as xmsg_mcp_gateway;
 #[allow(dead_code)]
 #[path = "../tests/common/provider.rs"]
 mod provider_fixture;
+
+pub mod webhook;
