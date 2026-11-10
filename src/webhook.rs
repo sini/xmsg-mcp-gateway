@@ -71,7 +71,6 @@ pub trait Transport: Send + Sync {
 pub fn https_client_builder(timeout: Duration) -> ClientBuilder {
     Client::builder()
         .https_only(true)
-        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(timeout)
 }
@@ -81,7 +80,9 @@ pub fn pinned_https_client_builder(
     addresses: &[SocketAddr],
     timeout: Duration,
 ) -> ClientBuilder {
-    https_client_builder(timeout).resolve_to_addrs(host, addresses)
+    https_client_builder(timeout)
+        .no_proxy()
+        .resolve_to_addrs(host, addresses)
 }
 
 pub fn callback_url(raw: &str) -> Result<Url, Error> {
