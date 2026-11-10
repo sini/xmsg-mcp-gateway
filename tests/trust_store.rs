@@ -100,7 +100,7 @@ fn native_roots_honor_file_and_directory_in_separate_processes() {
             }
             _ => {}
         }
-        let mut process = child.spawn().unwrap();
+        let mut process = child.stdout(std::process::Stdio::null()).spawn().unwrap();
         let deadline = Instant::now() + Duration::from_secs(12);
         let status = loop {
             if let Some(status) = process.try_wait().unwrap() {

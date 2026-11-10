@@ -22,7 +22,7 @@ use crate::auth::{self, VerifiedIdentity, Verifier, VerifierConfig};
 use crate::grants::{Authorization, Binding, Error as GrantError, Store};
 use crate::outbound::{self, Outcome, Policy};
 use crate::xmsg_config::{DeploymentManifest, ManifestError, XmsgConfig};
-use crate::{reads, session};
+use crate::{event_dispatch, events, reads, recovery, session};
 
 const MAX_OWNER_FILE: usize = 65_536;
 
@@ -68,6 +68,16 @@ impl From<session::Error> for StartupError {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct EventsConfiguration {
+    key_file: PathBuf,
+    grant_id: String,
+    #[serde(default)]
+    custody_limits: crate::custody::Limits,
+    dispatch_timeout_ms: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MessagingConfiguration {
     xmsg: XmsgConfig,
     manifest: DeploymentManifest,
@@ -102,6 +112,7 @@ struct Configuration {
     allowed_hosts: Vec<String>,
     allowed_origins: Vec<String>,
     verifier: VerifierConfig,
+    events: Option<EventsConfiguration>,
     #[serde(default, deserialize_with = "present_messaging")]
     messaging: Option<MessagingConfiguration>,
 }
@@ -138,7 +149,9 @@ impl IntoResponse for TransportRefusal {
 
 struct App {
     dispatch_tasks: tokio::sync::Mutex<tokio::task::JoinSet<()>>,
-    verifier: Verifier,
+    verifier: Arc<Verifier>,
+    events: Option<Arc<events::Events>>,
+    event_worker: Option<event_dispatch::Worker>,
     grant_store: PathBuf,
     request_timeout_ms: u64,
     max_request_body_bytes: usize,
@@ -175,43 +188,15 @@ fn resolve_profile_path(directory: &Path, file: &mut PathBuf) {
 
 impl Serving {
     pub async fn from_owner_file(config_file: &Path) -> Result<Self, StartupError> {
-        let mut file = File::open(config_file).map_err(|_| ConfigurationError)?;
-        let metadata = file.metadata().map_err(|_| ConfigurationError)?;
-        if !metadata.is_file() || metadata.len() > MAX_OWNER_FILE as u64 {
-            return Err(ConfigurationError.into());
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if metadata.permissions().mode() & 0o022 != 0 {
-                return Err(ConfigurationError.into());
-            }
-        }
-        let mut raw = Vec::new();
-        file.by_ref()
-            .take(MAX_OWNER_FILE as u64 + 1)
-            .read_to_end(&mut raw)
-            .map_err(|_| ConfigurationError)?;
-        if raw.len() > MAX_OWNER_FILE {
-            return Err(ConfigurationError.into());
-        }
-        let mut config: Configuration =
-            serde_json::from_slice(&raw).map_err(|_| ConfigurationError)?;
-        let absolute = std::path::absolute(config_file).map_err(|_| ConfigurationError)?;
-        let directory = absolute.parent().ok_or(ConfigurationError)?;
-        resolve_profile_path(directory, &mut config.grant_store);
-        resolve_profile_path(directory, &mut config.verifier.client_secret_file);
-        if let Some(file) = &mut config.verifier.root_certificate_file {
-            resolve_profile_path(directory, file);
-        }
-        if let Some(messaging) = &mut config.messaging {
-            resolve_profile_path(directory, &mut messaging.xmsg.register_socket);
-            resolve_profile_path(directory, &mut messaging.xmsg.agent_socket);
-            messaging
-                .xmsg
-                .validate()
-                .map_err(|_| StartupError::ConnectionConfiguration)?;
-        }
+        Self::from_owner_file_with_transport(config_file, Arc::new(crate::webhook::PublicHttps))
+            .await
+    }
+
+    async fn from_owner_file_with_transport(
+        config_file: &Path,
+        transport: Arc<dyn crate::webhook::Transport>,
+    ) -> Result<Self, StartupError> {
+        let config = load_configuration(config_file)?;
         if !config.bind.ip().is_loopback()
             || config.allowed_hosts.is_empty()
             || config.header_read_timeout_ms == 0
@@ -269,11 +254,50 @@ impl Serving {
             hosted_client: config.verifier.hosted_client.clone(),
         };
         let verification_timeout_ms = config.verifier.timeout_ms;
-        let verifier = Verifier::from_config(config.verifier).map_err(|_| ConfigurationError)?;
+        let verifier =
+            Arc::new(Verifier::from_config(config.verifier).map_err(|_| ConfigurationError)?);
         let store = Store::open(&config.grant_store).map_err(|_| ConfigurationError)?;
         store
             .validate_profile(&profile)
             .map_err(|_| ConfigurationError)?;
+        let events = if let Some(configuration) = &config.events {
+            if config.messaging.is_none()
+                || !verifier.requires_scope("events:subscribe")
+                || configuration.grant_id.is_empty()
+                || configuration.dispatch_timeout_ms > 60_000
+                || configuration.dispatch_timeout_ms
+                    < verification_timeout_ms.saturating_add(11_000)
+                || config.request_timeout_ms
+                    < verification_timeout_ms
+                        .saturating_mul(2)
+                        .saturating_add(41_000)
+            {
+                return Err(ConfigurationError.into());
+            }
+            configuration
+                .custody_limits
+                .validate()
+                .map_err(|_| ConfigurationError)?;
+            let matches:bool=store.connection.query_row("SELECT EXISTS(SELECT 1 FROM grants WHERE id=?1 AND service=?2 AND issuer=?3 AND resource=?4 AND subject=?5 AND hosted_client=?6)",rusqlite::params![configuration.grant_id,profile.service,profile.issuer,profile.resource,profile.subject,profile.hosted_client],|row|row.get(0)).map_err(|_|ConfigurationError)?;
+            if !matches {
+                return Err(ConfigurationError.into());
+            }
+            let key = crate::event_store::EventKey::load(&configuration.key_file)
+                .map_err(|_| ConfigurationError)?;
+            store
+                .require_events_ready(&key)
+                .map_err(|_| ConfigurationError)?;
+            Some(Arc::new(events::Events::with_transport(
+                config.grant_store.clone(),
+                key,
+                verifier.clone(),
+                configuration.grant_id.clone(),
+                transport,
+            )))
+        } else {
+            None
+        };
+        let mut event_worker = None;
         let messaging = if let Some(messaging) = config.messaging {
             store
                 .require_outbound_ready()
@@ -299,12 +323,28 @@ impl Serving {
                 return Err(StartupError::RequestBudget);
             }
             let registered = session::register(&messaging.xmsg, &messaging.manifest).await?;
+            if let (Some(events), Some(configuration)) = (&events, &config.events) {
+                event_worker = Some(event_dispatch::Worker::start(
+                    events.clone(),
+                    registered.node().ok_or(ConfigurationError)?.to_owned(),
+                    registered.address().ok_or(ConfigurationError)?.to_owned(),
+                    Duration::from_millis(configuration.dispatch_timeout_ms),
+                ));
+            }
+            let ingress = config
+                .events
+                .as_ref()
+                .map(|configuration| session::Ingress {
+                    grant_id: configuration.grant_id.clone(),
+                    limits: configuration.custody_limits.clone(),
+                });
             let session = session::Session::start(
                 messaging.xmsg,
                 messaging.manifest,
                 registered,
                 config.grant_store.clone(),
                 store,
+                ingress,
             )
             .await?;
             Some(Messaging { session, limits })
@@ -314,6 +354,8 @@ impl Serving {
         let state = Arc::new(App {
             dispatch_tasks: tokio::sync::Mutex::new(tokio::task::JoinSet::new()),
             verifier,
+            events,
+            event_worker,
             grant_store: config.grant_store,
             allowed_hosts: config.allowed_hosts,
             allowed_origins: config.allowed_origins,
@@ -430,6 +472,9 @@ impl Serving {
         {
             let mut tasks = self.state.dispatch_tasks.lock().await;
             while tasks.join_next().await.is_some() {}
+        }
+        if let Some(worker) = &self.state.event_worker {
+            worker.shutdown().await;
         }
         if let Some(messaging) = &self.state.messaging {
             messaging
@@ -719,6 +764,14 @@ fn tools(app: &App, policy: &Policy) -> Value {
                 "securitySchemes":[{"type":"oauth2","scopes":app.scopes}]}));
         }
     }
+    if app.events.is_some() {
+        for (name,argument,description,read_only) in [
+            ("xmsg_ack","message_id","Record durable acceptance of responsibility for an owned message. This is not completion; use a durable drainer or deduplication with idempotent effects.",false),
+            ("xmsg_message_status","request_id","Read owned send/reply outcomes without retrying or submitting.",true),
+        ] {
+            tools.push(json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":{argument:{"type":"string","minLength":1,"maxLength":4096}},"required":[argument],"additionalProperties":false},"annotations":{"readOnlyHint":read_only,"destructiveHint":false,"openWorldHint":false,"idempotentHint":true},"securitySchemes":[{"type":"oauth2","scopes":app.scopes}]}));
+        }
+    }
     json!({"tools":tools})
 }
 
@@ -979,7 +1032,7 @@ async fn mcp_request(
         "initialize" => match serde_json::from_value::<Initialize>(rpc.params) {
             Ok(init) => {
                 json!({"protocolVersion": if VERSIONS.contains(&init.protocol_version.as_str()) { init.protocol_version.as_str() } else { VERSIONS[2] },
-                "capabilities":{"tools":{}},"serverInfo":{"name":"xmsg-mcp-gateway","version":env!("CARGO_PKG_VERSION")}})
+                "capabilities": if app.events.is_some() { json!({"tools":{},"events":{}}) } else { json!({"tools":{}}) },"serverInfo":{"name":"xmsg-mcp-gateway","version":env!("CARGO_PKG_VERSION")}})
             }
             Err(_) => return rpc_error(&id, -32602, "Invalid params"),
         },
@@ -998,6 +1051,52 @@ async fn mcp_request(
                 Ok(call) => call,
                 Err(_) => return rpc_error(&id, -32602, "Invalid params"),
             };
+            if matches!(call.name.as_str(), "xmsg_ack" | "xmsg_message_status") {
+                let Some(events) = &app.events else {
+                    return rpc_error(&id, -32004, "Tool not yet available");
+                };
+                if grant.grant_id != events.selected_grant {
+                    return StatusCode::FORBIDDEN.into_response();
+                }
+                let Some(messaging) = &app.messaging else {
+                    return unavailable();
+                };
+                let (bus, mailbox) = messaging.session.custody_scope();
+                let (bus, mailbox) = (bus.to_owned(), mailbox.to_owned());
+                let request = if call.name == "xmsg_ack" {
+                    serde_json::from_value::<recovery::AckArguments>(call.arguments)
+                        .map(recovery::Request::Ack)
+                } else {
+                    serde_json::from_value::<recovery::StatusArguments>(call.arguments)
+                        .map(recovery::Request::Status)
+                };
+                let request = match request {
+                    Ok(request) => request,
+                    Err(_) => return rpc_error(&id, -32602, "Invalid params"),
+                };
+                let key = events.key.clone();
+                let selected_grant = events.selected_grant.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    recovery::dispatch(
+                        store,
+                        &identity,
+                        &bus,
+                        &mailbox,
+                        &selected_grant,
+                        &key,
+                        request,
+                    )
+                })
+                .await;
+                return match result {
+                    Ok(Ok(data)) => rpc_result(&id, tool_result(data)),
+                    Ok(Err(recovery::Error::Arguments)) => rpc_error(&id, -32602, "Invalid params"),
+                    Ok(Err(recovery::Error::Authority(GrantError::Denied))) => {
+                        StatusCode::FORBIDDEN.into_response()
+                    }
+                    _ => unavailable(),
+                };
+            }
             if matches!(call.name.as_str(), "xmsg_inbox" | "xmsg_read_message")
                 && app.messaging.is_some()
             {
@@ -1011,22 +1110,13 @@ async fn mcp_request(
                     Ok(request) => request,
                     Err(_) => return rpc_error(&id, -32602, "Invalid params"),
                 };
-                let snapshot = match app
-                    .messaging
-                    .as_ref()
-                    .and_then(|messaging| messaging.session.snapshot().ok())
-                {
-                    Some(snapshot) => snapshot,
-                    None => return unavailable(),
+                let Some(messaging) = &app.messaging else {
+                    return unavailable();
                 };
+                let (bus, mailbox) = messaging.session.custody_scope();
+                let (bus, mailbox) = (bus.to_owned(), mailbox.to_owned());
                 let result = tokio::task::spawn_blocking(move || {
-                    reads::dispatch(
-                        store,
-                        &identity,
-                        &snapshot.bus,
-                        snapshot.endpoint.sender(),
-                        request,
-                    )
+                    reads::dispatch(store, &identity, &bus, &mailbox, request)
                 })
                 .await;
                 return match result {
@@ -1066,13 +1156,186 @@ async fn mcp_request(
                 "resource":identity.resource(),"hosted_client":identity.hosted_client(),"grant_revision":grant.revision});
             if let Some(messaging) = &app.messaging {
                 data["messaging_status"] = messaging.session.status();
+                if let Some(events) = &app.events {
+                    let (bus, mailbox) = messaging.session.custody_scope();
+                    match events.health(&identity, bus, mailbox) {
+                        Ok(summary) => data["events_status"] = summary,
+                        Err(events::Error::Authority(GrantError::Denied)) => {
+                            return StatusCode::FORBIDDEN.into_response()
+                        }
+                        Err(_) => return unavailable(),
+                    }
+                }
             }
             json!({"content":[{"type":"text","text":data.to_string()}],"structuredContent":data,"isError":false})
         }
         "events/list" | "events/subscribe" | "events/unsubscribe" => {
-            return rpc_error(&id, -32004, "Events not yet available")
+            let Some(events) = &app.events else {
+                return rpc_error(&id, -32004, "Events not yet available");
+            };
+            if grant.grant_id != events.selected_grant {
+                return StatusCode::FORBIDDEN.into_response();
+            }
+            let Some(messaging) = &app.messaging else {
+                return unavailable();
+            };
+            let (bus, mailbox) = messaging.session.custody_scope();
+            let result = match rpc.method.as_str() {
+                "events/list" => {
+                    match serde_json::from_value::<EventList>(rpc.params) {
+                        Ok(parameters) if parameters.cursor.is_none() => {}
+                        _ => return rpc_error(&id, -32602, "Invalid params"),
+                    }
+                    Ok(events::catalog())
+                }
+                "events/subscribe" => {
+                    let request = match serde_json::from_value::<events::Subscribe>(rpc.params) {
+                        Ok(request) => request,
+                        Err(_) => return rpc_error(&id, -32602, "Invalid params"),
+                    };
+                    events
+                        .subscribe(&identity, &token, bus, mailbox, request)
+                        .await
+                }
+                _ => {
+                    let request = match serde_json::from_value::<events::Unsubscribe>(rpc.params) {
+                        Ok(request) => request,
+                        Err(_) => return rpc_error(&id, -32602, "Invalid params"),
+                    };
+                    events
+                        .unsubscribe(&identity, &token, bus, mailbox, request)
+                        .await
+                }
+            };
+            return match result {
+                Ok(value) => rpc_result(&id, value),
+                Err(error) => event_error(&id, error),
+            };
         }
         _ => return rpc_error(&id, -32601, "Method not found"),
     };
     rpc_result(&id, result)
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EventList {
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default, rename = "_meta")]
+    _metadata: Map<String, Value>,
+}
+
+fn event_error(id: &Value, error: events::Error) -> Response {
+    match error {
+        events::Error::Arguments => rpc_error(id, -32602, "Invalid params or unavailable cursor"),
+        events::Error::Conflict => rpc_error(
+            id,
+            -32009,
+            "Subscription binding conflict; explicit owner rebind required",
+        ),
+        events::Error::Callback(crate::webhook::Error::Secret) => {
+            rpc_error(id, -32602, "Invalid signing secret")
+        }
+        events::Error::Callback(crate::webhook::Error::Random) => unavailable(),
+        events::Error::Callback(error) => {
+            let reason = match error {
+                crate::webhook::Error::Timeout => "timeout",
+                crate::webhook::Error::Challenge => "challenge_failed",
+                crate::webhook::Error::Destination => "invalid_url",
+                crate::webhook::Error::Transport => "unreachable",
+                _ => "invalid_response",
+            };
+            Json(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32015,"message":"CallbackEndpointError","data":{"reason":reason}}})).into_response()
+        }
+        events::Error::Authority(GrantError::Denied) => StatusCode::FORBIDDEN.into_response(),
+        events::Error::Credentials(auth::Error::InvalidToken) => {
+            StatusCode::UNAUTHORIZED.into_response()
+        }
+        _ => unavailable(),
+    }
+}
+
+fn load_configuration(config_file: &Path) -> Result<Configuration, StartupError> {
+    let mut file = File::open(config_file).map_err(|_| ConfigurationError)?;
+    let metadata = file.metadata().map_err(|_| ConfigurationError)?;
+    if !metadata.is_file() || metadata.len() > MAX_OWNER_FILE as u64 {
+        return Err(ConfigurationError.into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o022 != 0 {
+            return Err(ConfigurationError.into());
+        }
+    }
+    let mut raw = Vec::new();
+    file.by_ref()
+        .take(MAX_OWNER_FILE as u64 + 1)
+        .read_to_end(&mut raw)
+        .map_err(|_| ConfigurationError)?;
+    if raw.len() > MAX_OWNER_FILE {
+        return Err(ConfigurationError.into());
+    }
+    let mut config: Configuration = serde_json::from_slice(&raw).map_err(|_| ConfigurationError)?;
+    let absolute = std::path::absolute(config_file).map_err(|_| ConfigurationError)?;
+    let directory = absolute.parent().ok_or(ConfigurationError)?;
+    resolve_profile_path(directory, &mut config.grant_store);
+    resolve_profile_path(directory, &mut config.verifier.client_secret_file);
+    if let Some(file) = &mut config.verifier.root_certificate_file {
+        resolve_profile_path(directory, file);
+    }
+    if let Some(events) = &mut config.events {
+        resolve_profile_path(directory, &mut events.key_file);
+    }
+    if let Some(messaging) = &mut config.messaging {
+        resolve_profile_path(directory, &mut messaging.xmsg.register_socket);
+        resolve_profile_path(directory, &mut messaging.xmsg.agent_socket);
+        messaging
+            .xmsg
+            .validate()
+            .map_err(|_| StartupError::ConnectionConfiguration)?;
+    }
+    Ok(config)
+}
+
+/// Local owner commands load authority and keys without starting a listener or service session.
+pub fn owner_events(config_file: &Path) -> Result<events::Events, StartupError> {
+    let config = load_configuration(config_file)?;
+    let events = config.events.ok_or(ConfigurationError)?;
+    let store = Store::open(&config.grant_store).map_err(|_| ConfigurationError)?;
+    let binding = Binding {
+        service: config.verifier.service.clone(),
+        issuer: config.verifier.issuer.clone(),
+        resource: config.verifier.resource.clone(),
+        subject: config.verifier.subject.clone(),
+        hosted_client: config.verifier.hosted_client.clone(),
+    };
+    store
+        .validate_profile(&binding)
+        .map_err(|_| ConfigurationError)?;
+    let matches:bool=store.connection.query_row("SELECT EXISTS(SELECT 1 FROM grants WHERE id=?1 AND service=?2 AND issuer=?3 AND resource=?4 AND subject=?5 AND hosted_client=?6)",rusqlite::params![events.grant_id,binding.service,binding.issuer,binding.resource,binding.subject,binding.hosted_client],|row|row.get(0)).map_err(|_|ConfigurationError)?;
+    if !matches {
+        return Err(ConfigurationError.into());
+    }
+    let key =
+        crate::event_store::EventKey::load(&events.key_file).map_err(|_| ConfigurationError)?;
+    store
+        .require_events_ready(&key)
+        .map_err(|_| ConfigurationError)?;
+    let verifier =
+        Arc::new(Verifier::from_config(config.verifier).map_err(|_| ConfigurationError)?);
+    if !verifier.requires_scope("events:subscribe") {
+        return Err(ConfigurationError.into());
+    }
+    Ok(events::Events::new(
+        config.grant_store,
+        key,
+        verifier,
+        events.grant_id,
+    ))
+}
+
+#[cfg(test)]
+#[path = "serving_events_tests.rs"]
+mod events_tests;

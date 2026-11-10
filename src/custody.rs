@@ -46,6 +46,9 @@ impl Default for Limits {
 }
 
 impl Limits {
+    pub(crate) fn validate(&self) -> Result<(), Error> {
+        self.windows(SystemTime::now()).map(|_| ())
+    }
     fn windows(&self, at: SystemTime) -> Result<Windows, Error> {
         if [
             self.max_items,
@@ -165,6 +168,10 @@ fn ensure_link(tx: &rusqlite::Transaction<'_>, bus: &str, limits: &Limits) -> Re
 }
 
 fn expire(tx: &rusqlite::Transaction<'_>, limits: &Limits, now: i64) -> Result<(), Error> {
+    let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version >= crate::grants::EVENTS_SCHEMA_VERSION {
+        crate::event_store::record_expiry(tx, now)?;
+    }
     tx.execute("DELETE FROM custody_gaps WHERE expires_at<=?1", [now])?;
     tx.execute("UPDATE custody_links SET expired_first_seen = (SELECT MIN(first_seen) FROM (SELECT expired_first_seen AS first_seen UNION ALL SELECT first_seen FROM custody_pending WHERE bus = custody_links.bus AND expires_at<=?1)) WHERE EXISTS(SELECT 1 FROM custody_pending WHERE bus=custody_links.bus AND expires_at<=?1)", [now])?;
     let pending = tx.execute("DELETE FROM custody_pending WHERE expires_at<=?1", [now])?;
@@ -177,13 +184,20 @@ fn expire(tx: &rusqlite::Transaction<'_>, limits: &Limits, now: i64) -> Result<(
         "UPDATE custody_counters SET value=value+?1 WHERE name='expired_metadata'",
         [expired as i64],
     )?;
-    tx.execute("UPDATE custody_outbox SET state='expired' WHERE event_id IN (SELECT event_id FROM custody_items WHERE text IS NOT NULL AND expires_at<=?1)", [now])?;
+    if version >= crate::grants::EVENTS_SCHEMA_VERSION {
+        tx.execute("UPDATE custody_outbox SET state='expired',body=NULL WHERE event_id IN (SELECT event_id FROM custody_items WHERE expires_at<=?1)", [now])?;
+    } else {
+        tx.execute("UPDATE custody_outbox SET state='expired' WHERE event_id IN (SELECT event_id FROM custody_items WHERE text IS NOT NULL AND expires_at<=?1)", [now])?;
+    }
     let redacted = tx.execute("UPDATE custody_items SET text=NULL, envelope=NULL WHERE text IS NOT NULL AND expires_at<=?1", [now])?;
     tx.execute(
         "UPDATE custody_counters SET value=value+?1 WHERE name='expired_content'",
         [redacted as i64],
     )?;
     let cutoff = now.saturating_sub(limits.metadata_retention_secs);
+    if version >= crate::grants::EVENTS_SCHEMA_VERSION {
+        crate::event_store::prune_expired(tx, cutoff)?;
+    }
     tx.execute("DELETE FROM custody_outbox WHERE event_id IN (SELECT event_id FROM custody_items WHERE text IS NULL AND expires_at<=?1)", [cutoff])?;
     let removed = tx.execute(
         "DELETE FROM custody_items WHERE text IS NULL AND expires_at<=?1",

@@ -73,6 +73,12 @@ impl Drop for Owner {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct Ingress {
+    pub(crate) grant_id: String,
+    pub(crate) limits: custody::Limits,
+}
+
 pub(crate) struct Session {
     state: watch::Receiver<State>,
     wake: Arc<Notify>,
@@ -80,6 +86,8 @@ pub(crate) struct Session {
     stop: Arc<Notify>,
     file: PathBuf,
     bus: String,
+    limits: custody::Limits,
+    mailbox: String,
 }
 
 fn observation_interval(reply_ttl_secs: u64) -> Duration {
@@ -88,9 +96,15 @@ fn observation_interval(reply_ttl_secs: u64) -> Duration {
         .min(Duration::from_secs(60))
 }
 
-fn record(store: &mut Store, bus: &str, connected: bool, at: SystemTime) -> Result<(), Error> {
+fn record(
+    store: &mut Store,
+    bus: &str,
+    connected: bool,
+    at: SystemTime,
+    limits: &custody::Limits,
+) -> Result<(), Error> {
     store
-        .record_bus_link(bus, connected, &custody::Limits::default(), at)
+        .record_bus_link(bus, connected, limits, at)
         .map_err(|_| Error::Ledger)
 }
 
@@ -98,12 +112,19 @@ async fn record_link(
     file: PathBuf,
     bus: String,
     connected: bool,
+    limits: custody::Limits,
 ) -> Result<tokio::time::Instant, Error> {
     let record_bus = bus.clone();
     let observed_at = tokio::time::Instant::now();
     tokio::task::spawn_blocking(move || {
         let mut store = Store::open(&file).map_err(|_| Error::Ledger)?;
-        record(&mut store, &record_bus, connected, SystemTime::now())
+        record(
+            &mut store,
+            &record_bus,
+            connected,
+            SystemTime::now(),
+            &limits,
+        )
     })
     .await
     .map_err(|_| Error::Ledger)??;
@@ -118,15 +139,24 @@ impl Session {
         registered: RegisteredService,
         file: PathBuf,
         mut store: Store,
+        ingress: Option<Ingress>,
     ) -> Result<Self, Error> {
         let snapshot = Arc::new(Snapshot::from_registered(&registered)?);
         let bus = snapshot.bus.clone();
         let initial_observation = tokio::time::Instant::now();
-        tokio::task::spawn_blocking(move || record(&mut store, &bus, true, SystemTime::now()))
-            .await
-            .map_err(|_| Error::Ledger)??;
+        let custody_limits = ingress
+            .as_ref()
+            .map(|ingress| ingress.limits.clone())
+            .unwrap_or_default();
+        let initial_limits = custody_limits.clone();
+        tokio::task::spawn_blocking(move || {
+            record(&mut store, &bus, true, SystemTime::now(), &initial_limits)
+        })
+        .await
+        .map_err(|_| Error::Ledger)??;
         registered.health().map_err(Error::Registration)?;
         let shutdown_bus = snapshot.bus.clone();
+        let mailbox = snapshot.endpoint.sender().to_owned();
         let shutdown_file = file.clone();
         let observation_interval = observation_interval(manifest.reply_ttl_secs);
         let (publish, state) = watch::channel(State::Ready(snapshot));
@@ -134,6 +164,7 @@ impl Session {
         let owner_stop = stop.clone();
         let wake = Arc::new(Notify::new());
         let owner_wake = wake.clone();
+        let shutdown_limits = custody_limits.clone();
         let subscriber = tracing::dispatcher::get_default(Clone::clone);
         let owner = tokio::spawn(
             async move {
@@ -152,9 +183,44 @@ impl Session {
                             )));
                             break;
                         }
+                        if let Some(ingress) = &ingress {
+                            let scope = custody::Scope {
+                                bus_instance: bus.clone(),
+                                grant_id: ingress.grant_id.clone(),
+                            };
+                            match Store::open_for_dispatch(&file) {
+                                Ok(mut custody_store) => {
+                                    let received = tokio::select! {
+                                        result = custody::receive_one(
+                                            &mut custody_store,
+                                            &mut current,
+                                            &scope,
+                                            &ingress.limits,
+                                            SystemTime::now(),
+                                        ) => result,
+                                        _ = owner_stop.notified() => return,
+                                    };
+                                    match received {
+                                        Ok(Some(custody::Acceptance::Deferred)) => {},
+                                        Ok(Some(_)) => continue,
+                                        Ok(None) => {},
+                                        Err(custody::Error::Transport(error)) => {
+                                            publish.send_replace(State::Unavailable(Arc::new(
+                                                Error::Registration(error),
+                                            )));
+                                            break;
+                                        }
+                                        Err(_) => {
+                                            tracing::warn!(target: "gateway_custody", "custody unavailable; no acceptance acknowledgement claimed");
+                                        }
+                                    }
+                                }
+                                Err(_) => tracing::warn!(target: "gateway_custody", "custody store unavailable"),
+                            }
+                        }
                         tracing::trace!(target: "gateway_bus_health", "registration alive");
                         if observed_at.elapsed() >= observation_interval {
-                            match record_link(file.clone(), bus.clone(), true).await {
+                            match record_link(file.clone(), bus.clone(), true,custody_limits.clone()).await {
                                 Ok(observation) => observed_at = observation,
                                 Err(error) => {
                                     publish.send_replace(State::Unavailable(Arc::new(error)));
@@ -170,7 +236,7 @@ impl Session {
                     }
                     drop(current);
                     loop {
-                        if let Err(error) = record_link(file.clone(), bus.clone(), false).await {
+                        if let Err(error) = record_link(file.clone(), bus.clone(), false,custody_limits.clone()).await {
                             publish.send_replace(State::Unavailable(Arc::new(error)));
                             tokio::select! {
                                 _ = tokio::time::sleep(delay) => {},
@@ -189,7 +255,7 @@ impl Session {
                         let replacement = async {
                             let registered = register(&config, &manifest).await?;
                             let snapshot = Arc::new(Snapshot::from_registered(&registered)?);
-                            let observation = record_link(file.clone(), snapshot.bus.clone(), true).await?;
+                            let observation = record_link(file.clone(), snapshot.bus.clone(), true, custody_limits.clone()).await?;
                             registered.health().map_err(Error::Registration)?;
                             Ok::<_, Error>((registered, snapshot, observation))
                         }
@@ -220,6 +286,8 @@ impl Session {
             stop,
             file: shutdown_file,
             bus: shutdown_bus,
+            limits: shutdown_limits,
+            mailbox,
         })
     }
 
@@ -236,11 +304,27 @@ impl Session {
             task.await.map_err(|_| Error::Ledger)?;
         }
         if healthy {
-            record_link(self.file.clone(), self.bus.clone(), true).await?;
+            record_link(
+                self.file.clone(),
+                self.bus.clone(),
+                true,
+                self.limits.clone(),
+            )
+            .await?;
         }
-        record_link(self.file.clone(), self.bus.clone(), false)
-            .await
-            .map(|_| ())
+        record_link(
+            self.file.clone(),
+            self.bus.clone(),
+            false,
+            self.limits.clone(),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Read scope remains the actual registered address during a temporary bus outage.
+    pub(crate) fn custody_scope(&self) -> (&str, &str) {
+        (&self.bus, &self.mailbox)
     }
 
     pub(crate) fn snapshot(&self) -> Result<Arc<Snapshot>, Arc<Error>> {
@@ -299,10 +383,11 @@ mod tests {
                 "node",
                 true,
                 UNIX_EPOCH + Duration::from_secs(100),
+                &custody::Limits::default(),
             )
             .unwrap();
             let at = UNIX_EPOCH + Duration::new(101, nanos);
-            record(&mut store, "node", false, at).unwrap();
+            record(&mut store, "node", false, at, &custody::Limits::default()).unwrap();
             let expiry: i64 = store
                 .connection
                 .query_row("SELECT expires_at FROM custody_gaps", [], |row| row.get(0))

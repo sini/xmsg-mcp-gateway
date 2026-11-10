@@ -24,5 +24,23 @@ mod provider_fixture;
 
 pub mod webhook;
 
-pub mod events;
 mod event_cursor;
+mod event_dispatch;
+pub mod events;
+#[cfg(test)]
+mod events_test_support;
+mod recovery;
+
+mod event_replay;
+
+mod event_status;
+
+#[cfg(test)]
+use provider_fixture as provider;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../tests/common/event_callback.rs"]
+mod event_callback_fixture;
+#[cfg(test)]
+#[path = "../tests/common/outbound_observer.rs"]
+mod event_observer_fixture;

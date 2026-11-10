@@ -14,3 +14,4 @@ mod handler {
     }
 }
 fn main() {}
+pub use xmsg_mcp_gateway::webhook;

@@ -331,10 +331,14 @@ impl Events {
                 return Err(Error::Conflict);
             }
             let previous_secret = text(&self.key, &owner, "secret", old.generation, &old.secret)?;
+            // A failed provisional refresh must not erase the existing dual-sign window.
+            if previous_secret != request.delivery.secret
+                && old.old_secret.is_some()
+                && old.rotation_until > stamp
+            {
+                return Err(Error::Conflict);
+            }
             if old.status == "active" && previous_secret != request.delivery.secret {
-                if old.old_secret.is_some() && old.rotation_until > stamp {
-                    return Err(Error::Conflict);
-                }
                 old_secret = Some(previous_secret.clone());
                 rotation_until = stamp + ROTATION_SECONDS;
             } else if old.old_secret.is_some()
@@ -519,7 +523,7 @@ impl Events {
         let url = webhook::callback_url(url)?.to_string();
         let store = Store::open_for_dispatch(&self.file)?;
         store.require_events_ready(&self.key)?;
-        let (owner,service,grant,revision,bus,mailbox,subject):(String,String,String,i64,String,String,String)=store.connection.query_row("SELECT owner_key,service,grant_id,grant_revision,bus,mailbox,subject FROM event_subscriptions WHERE id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional()?.ok_or(Error::Conflict)?;
+        let (owner,service,grant,revision,bus,mailbox,subject):(String,String,String,i64,String,String,String)=store.connection.query_row("SELECT owner_key,service,grant_id,grant_revision,bus,mailbox,subject FROM event_subscriptions WHERE id=?1 AND grant_id=?2",params![id,self.selected_grant],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional()?.ok_or(Error::Conflict)?;
         let _lease = store.try_operation_lease(&service)?.ok_or(Error::Busy)?;
         let old = previous(&store.connection, &owner)?.ok_or(Error::Conflict)?;
         if old.id != id
@@ -575,7 +579,7 @@ impl Events {
         }
         let store = Store::open_for_dispatch(&self.file)?;
         store.require_events_ready(&self.key)?;
-        let (owner,service,grant,revision,bus,mailbox,subject):(String,String,String,i64,String,String,String)=store.connection.query_row("SELECT owner_key,service,grant_id,grant_revision,bus,mailbox,subject FROM event_subscriptions WHERE id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional()?.ok_or(Error::Conflict)?;
+        let (owner,service,grant,revision,bus,mailbox,subject):(String,String,String,i64,String,String,String)=store.connection.query_row("SELECT owner_key,service,grant_id,grant_revision,bus,mailbox,subject FROM event_subscriptions WHERE id=?1 AND grant_id=?2",params![id,self.selected_grant],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional()?.ok_or(Error::Conflict)?;
         let _lease = store.try_operation_lease(&service)?.ok_or(Error::Busy)?;
         let old = previous(&store.connection, &owner)?.ok_or(Error::Conflict)?;
         if old.id != id || old.generation != expected_generation || old.status != "active" {

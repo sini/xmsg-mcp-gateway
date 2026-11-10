@@ -657,3 +657,129 @@ async fn verification_cache_deadline_does_not_slide_on_renewal() {
             > actual_verification
     );
 }
+
+#[tokio::test]
+async fn configured_grant_cannot_rebind_or_replay_another_grants_subscription() {
+    let setup = Setup::new();
+    let identity = setup.verifier.verify("good-token").await.unwrap();
+    let subscription = setup
+        .runtime()
+        .subscribe(&identity, "good-token", "bus", "dot@bus", request(4))
+        .await
+        .unwrap();
+    let connection = rusqlite::Connection::open(&setup.provider.store_file).unwrap();
+    connection.execute("INSERT INTO custody_items(bus,upstream_id,event_id,grant_id,grant_revision,mailbox,owner,origin,text,envelope,fingerprint,received_at,expires_at,held) VALUES ('bus','recover','recover','grant',2,'dot@bus','owner','{}','body','envelope','hash',1,9999999999,1)",[]).unwrap();
+    connection.execute("INSERT INTO event_authorizations(event_id,acceptance_class,dispatch_revision) VALUES ('recover','current',2)",[]).unwrap();
+    connection
+        .execute(
+            "INSERT INTO event_occurrences(event_id) VALUES ('recover')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO custody_outbox(event_id,state) VALUES ('recover','accepted')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute("UPDATE event_subscriptions SET callback_cursor=1", [])
+        .unwrap();
+    let wrong = Events::with_transport(
+        setup.provider.store_file.clone(),
+        setup.key.clone(),
+        setup.verifier.clone(),
+        "another-grant".into(),
+        setup.callback.clone(),
+    );
+    let id = subscription["id"].as_str().unwrap();
+    assert!(wrong
+        .rebind(
+            id,
+            1,
+            "https://replacement.example/wake",
+            None,
+            "fixture",
+            "wrong scope"
+        )
+        .is_err());
+    assert!(wrong
+        .replay(
+            id,
+            1,
+            subscription["cursor"].as_str(),
+            "fixture",
+            "wrong scope"
+        )
+        .is_err());
+    let db = rusqlite::Connection::open(&setup.provider.store_file).unwrap();
+    assert_eq!(
+        db.query_row("SELECT generation FROM event_subscriptions", [], |row| row
+            .get::<_, i64>(
+            0
+        ))
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM event_binding_audit", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert!(
+        setup
+            .runtime()
+            .replay(
+                id,
+                1,
+                subscription["cursor"].as_str(),
+                "fixture",
+                "owned control"
+            )
+            .is_ok(),
+        "owned replay control must actually change an eligible row"
+    );
+}
+
+#[tokio::test]
+async fn failed_rotation_refresh_cannot_discard_a_still_valid_previous_key() {
+    let setup = Setup::new();
+    let identity = setup.verifier.verify("good-token").await.unwrap();
+    setup
+        .runtime()
+        .subscribe(&identity, "good-token", "bus", "dot@bus", request(4))
+        .await
+        .unwrap();
+    let tokens = setup.provider.tokens.clone();
+    *setup.callback.action.lock().unwrap() = Some(Box::new(move || {
+        tokens.lock().unwrap().get_mut("good-token").unwrap()["active"] = json!(false)
+    }));
+    assert!(setup
+        .runtime()
+        .subscribe(&identity, "good-token", "bus", "dot@bus", request(5))
+        .await
+        .is_err());
+    setup
+        .provider
+        .tokens
+        .lock()
+        .unwrap()
+        .get_mut("good-token")
+        .unwrap()["active"] = json!(true);
+    assert!(
+        matches!(
+            setup
+                .runtime()
+                .subscribe(&identity, "good-token", "bus", "dot@bus", request(6))
+                .await,
+            Err(xmsg_mcp_gateway::events::Error::Conflict)
+        ),
+        "failed refresh discarded a still-valid rotation key"
+    );
+    setup
+        .runtime()
+        .subscribe(&identity, "good-token", "bus", "dot@bus", request(5))
+        .await
+        .unwrap();
+}

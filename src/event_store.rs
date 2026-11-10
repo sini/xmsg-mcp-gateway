@@ -88,6 +88,7 @@ pub(crate) fn validate_schema(db: &Connection) -> Result<(), GrantError> {
     db.prepare("SELECT event_id,attempts,next_attempt,body,last_error,subscription_generation FROM custody_outbox LIMIT 0")?;
     db.prepare("SELECT id,owner_key,service,issuer,resource,subject,hosted_client,bus,mailbox,grant_id,grant_revision,generation,expires,url,secret,old_secret,bearer,rotation_until,status,verified_at,callback_cursor,observation_checkpoint FROM event_subscriptions LIMIT 0")?;
     db.prepare("SELECT event_id,observed_at FROM event_observations LIMIT 0")?;
+    db.prepare("SELECT owner_key,observation_checkpoint FROM event_checkpoints LIMIT 0")?;
     db.prepare("SELECT owner_key,unavailable_through FROM event_availability LIMIT 0")?;
     db.prepare("SELECT event_id,grant_id,old_revision,new_revision,operator,reason FROM event_release_audit LIMIT 0")?;
     db.prepare("SELECT subscription_id,old_generation,new_generation,operator,reason,replay_after FROM event_binding_audit LIMIT 0")?;
@@ -166,6 +167,7 @@ impl Store {
               verified_at INTEGER, callback_cursor INTEGER NOT NULL DEFAULT 0,
               observation_checkpoint INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE event_observations(event_id TEXT PRIMARY KEY NOT NULL,observed_at INTEGER NOT NULL);
+            CREATE TABLE event_checkpoints(owner_key TEXT PRIMARY KEY NOT NULL,observation_checkpoint INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE event_availability(owner_key TEXT PRIMARY KEY NOT NULL,unavailable_through INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE event_release_audit (
               seq INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT NOT NULL,grant_id TEXT NOT NULL,
@@ -244,6 +246,36 @@ pub(crate) fn enabled_transition(
 pub(crate) fn revision_changed(tx: &Transaction<'_>, id: &str) -> Result<(), rusqlite::Error> {
     tx.execute("UPDATE custody_outbox SET state='held' WHERE state IN ('pending','dispatching') AND event_id IN (SELECT event_id FROM custody_items WHERE grant_id=?1)", [id])?;
     tx.execute("UPDATE event_subscriptions SET status='disabled',generation=generation+1 WHERE grant_id=?1", [id])?;
+    Ok(())
+}
+
+pub(crate) fn record_expiry(tx: &Transaction<'_>, now: i64) -> Result<(), rusqlite::Error> {
+    let mut statement=tx.prepare("SELECT g.service,g.issuer,g.resource,c.owner,g.hosted_client,c.bus,c.mailbox,c.grant_id,MAX(o.seq) FROM custody_items c JOIN grants g ON g.id=c.grant_id JOIN event_occurrences o ON o.event_id=c.event_id WHERE c.text IS NOT NULL AND c.expires_at<=?1 GROUP BY g.service,g.issuer,g.resource,c.owner,g.hosted_client,c.bus,c.mailbox,c.grant_id")?;
+    let rows = statement
+        .query_map([now], |row| {
+            let fields = (0..8)
+                .map(|index| row.get::<_, String>(index))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((fields, row.get::<_, i64>(8)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    for (fields, sequence) in rows {
+        let owner =
+            crate::custody::fingerprint(&fields.iter().map(String::as_str).collect::<Vec<_>>());
+        tx.execute("INSERT INTO event_availability(owner_key,unavailable_through) VALUES (?1,?2) ON CONFLICT(owner_key) DO UPDATE SET unavailable_through=MAX(unavailable_through,excluded.unavailable_through)",params![owner,sequence])?;
+    }
+    Ok(())
+}
+
+pub(crate) fn prune_expired(tx: &Transaction<'_>, cutoff: i64) -> Result<(), rusqlite::Error> {
+    for table in [
+        "event_authorizations",
+        "event_observations",
+        "event_occurrences",
+    ] {
+        tx.execute(&format!("DELETE FROM {table} WHERE event_id IN (SELECT event_id FROM custody_items WHERE text IS NULL AND expires_at<=?1)"),[cutoff])?;
+    }
     Ok(())
 }
 

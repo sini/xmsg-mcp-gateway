@@ -54,10 +54,18 @@ pub fn retry_after_seconds(value: &str, now: SystemTime) -> Option<u64> {
     }
     let value = value.trim();
     if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return value.parse().ok();
+        return Some(value.parse().unwrap_or(u64::MAX));
     }
     let date = httpdate::parse_http_date(value).ok()?;
-    Some(date.duration_since(now).unwrap_or(Duration::ZERO).as_secs())
+    Some(
+        date.duration_since(now)
+            .map(|delay| {
+                delay
+                    .as_secs()
+                    .saturating_add(u64::from(delay.subsec_nanos() > 0))
+            })
+            .unwrap_or(0),
+    )
 }
 
 pub type PostFuture<'a> = Pin<Box<dyn Future<Output = Result<Response, Error>> + Send + 'a>>;
