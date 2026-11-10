@@ -1,5 +1,6 @@
 """Require fractional gap windows and immutable repeated-gap expiry."""
 
+import argparse
 import subprocess
 import tempfile
 import uuid
@@ -21,8 +22,8 @@ CASES = [
     (
         "extend-gap",
         "src/custody.rs",
-        "stored_expiry.map_or(proposed_expiry, |stored| stored.min(proposed_expiry))",
-        "stored_expiry.map_or(proposed_expiry, |_stored| proposed_expiry)",
+        "previous.map_or(expiry, |stored| stored.min(expiry))",
+        "previous.map_or(expiry, |_stored| expiry)",
         "custody::retention_tests::repeated_gap_observations_never_extend_the_stored_expiry",
         "repeat extended the same gap's retention",
     ),
@@ -40,8 +41,8 @@ CASES += [
     (
         "late-gap",
         "src/custody.rs",
-        "DELETE FROM custody_gaps WHERE expires_at<=?1",
-        "DELETE FROM custody_gaps WHERE expires_at<?1",
+        "DELETE FROM custody_gap_summary WHERE expires_at<=?1",
+        "DELETE FROM custody_gap_summary WHERE expires_at<?1",
         "custody::expiry_boundary_tests::gaps_expire_at_the_observed_boundary",
         "gap remained visible at expiry",
     ),
@@ -64,8 +65,8 @@ CASES += [
     (
         "late-metadata",
         "src/custody.rs",
-        "DELETE FROM custody_metadata WHERE expires_at <= ?1",
-        "DELETE FROM custody_metadata WHERE expires_at < ?1",
+        "DELETE FROM custody_refusal_summaries WHERE expires_at<=?1",
+        "DELETE FROM custody_refusal_summaries WHERE expires_at<?1",
         "custody::expiry_boundary_tests::refusal_metadata_expires_at_the_observed_boundary",
         "metadata remained visible at expiry",
     ),
@@ -104,9 +105,38 @@ CASES += [
 ]
 
 
+CASES += [
+    (
+        "gap-count",
+        "src/custody.rs",
+        "params![bus,start,end,width,expiry]",
+        'params![format!("{bus}:{end}"),start,end,width,expiry]',
+        "custody::retention_tests::thousand_shrinking_gaps_keep_observation_ready",
+        "gap summary row bound missing",
+    ),
+    (
+        "forget-widest",
+        "src/custody.rs",
+        "widest=MAX(widest,excluded.widest)",
+        "widest=excluded.widest",
+        "custody::retention_tests::rolling_gap_keeps_widest_uncertainty_without_blocking_live_observation",
+        "summary forgot the widest interval",
+    ),
+]
+
+
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--case", choices=[case[0] for case in CASES])
+    options = parser.parse_args()
+    assert len(CASES) == 13, "custody retention inventory drift"
+    completed = 0
+    evidence = ROOT / ".artifacts/custody-retention-mutants"
+    evidence.mkdir(parents=True, exist_ok=True)
     nonce = uuid.uuid4().hex
     for label, filename, needle, replacement, test, diagnostic in CASES:
+        if options.case and options.case != label:
+            continue
         original = (ROOT / filename).read_text()
         assert original.count(needle) == 1, ("retention site drift", label)
         for arm, source in [
@@ -130,6 +160,7 @@ def main():
                     args, cwd=root, capture_output=True, text=True, timeout=15
                 )
                 output = result.stdout + result.stderr
+                (evidence / f"{label}-{arm}.log").write_text(output)
                 assert output.count(marker) == 1, "named retention arm did not execute"
                 if arm == "control":
                     assert (
@@ -139,8 +170,12 @@ def main():
                 else:
                     assert result.returncode == 101 and diagnostic in output, output
                     assert "0 passed; 1 failed; 0 ignored" in output, output
+                    failure = next(line.strip() for line in output.splitlines() if diagnostic in line)
+                    print(f"{label}: RED {failure}", flush=True)
             print(f"{label}/{arm}: intended result; nonce={nonce}", flush=True)
-    print("custody-retention-mutants-complete:11", flush=True)
+        completed += 1
+    assert completed == (1 if options.case else 13)
+    print(f"custody-retention-mutants-complete:{completed}", flush=True)
 
 
 if __name__ == "__main__":

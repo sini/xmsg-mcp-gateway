@@ -138,14 +138,14 @@ jobs:
           revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')
           export XMSG_GATEWAY_BIN="$PWD/.artifacts/transport/$revision/xmsg"
           python3 scripts/custody_checks.py | tee custody-checks.log
-          grep -Fx 'custody-checks-complete:22' custody-checks.log
+          grep -Fx 'custody-checks-complete:23' custody-checks.log
           grep -Fx 'copied-control-cached-artifact:refused:custody_inbound' custody-checks.log
       - name: Custody source mutants
         run: |
           revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')
           export XMSG_GATEWAY_BIN="$PWD/.artifacts/transport/$revision/xmsg"
           python3 scripts/custody_mutants.py | tee custody-mutants.log
-          grep -Fx 'custody-mutants-complete:33' custody-mutants.log
+          grep -Fx 'custody-mutants-complete:32' custody-mutants.log
       - name: Private-node outbound custody and completion controls
         run: |
           revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')

@@ -8,11 +8,10 @@ from pathlib import Path
 from grant_mutants import ROOT, run
 
 SOURCE = (ROOT / "src/custody.rs").read_text()
-metadata_write = next(
-    line
-    for line in SOURCE.splitlines()
-    if 'tx.execute("INSERT OR IGNORE INTO custody_metadata' in line
-)
+metadata_start = SOURCE.index('            tx.execute("INSERT INTO custody_refusal_summaries')
+metadata_write = SOURCE[metadata_start:SOURCE.index("            tx.commit()?;", metadata_start)]
+gap_start = SOURCE.index('    tx.execute("INSERT INTO custody_gap_summary')
+gap_write = SOURCE[gap_start:SOURCE.index("    Ok(())", gap_start)]
 CASES = [
     (
         "permanent-refusal-ack",
@@ -82,25 +81,21 @@ CASES += [
     ),
     (
         "metadata-count",
-        "if !known && records >= limits.max_metadata {",
-        "if false {",
-        "refusal_metadata_is_bounded_and_failed_audit_never_acks",
-        "refusal metadata count bound missing",
+        metadata_write,
+        metadata_write.replace("params![scope.bus_instance,reason,", "params![delivery.message_id(),reason,", 1),
+        "thousand_refusals_do_not_block_a_valid_ack",
+        "refusal summary row bound missing",
     ),
     (
         "metadata-expiry",
-        "DELETE FROM custody_metadata WHERE expires_at <= ?1",
-        "DELETE FROM custody_metadata WHERE 0 AND expires_at <= ?1",
+        "DELETE FROM custody_refusal_summaries WHERE expires_at<=?1",
+        "DELETE FROM custody_refusal_summaries WHERE 0 AND expires_at<=?1",
         "metadata_retention_and_status_survive_restart_without_fake_loss_ids",
         "refusal retention did not expire",
     ),
     (
         "gap-write",
-        next(
-            line
-            for line in SOURCE.splitlines()
-            if 'tx.execute("INSERT INTO custody_gaps' in line
-        ),
+        gap_write,
         "",
         "refusal_and_offline_uncertainty_outlive_real_upstream_expiry",
         "durable offline gap missing",
@@ -191,7 +186,7 @@ CASES += [
         "    store.require_custody_ready()?;",
         "",
         "failed_transaction_never_acknowledges_or_retains_partial_custody",
-        "legacy custody did not refuse before polling",
+        "legacy custody polled before explicit migration",
     ),
 ]
 CASES += [
@@ -211,8 +206,8 @@ CASES += [
     ),
     (
         "gap-ttl",
-        "(gap_end-gap_start)>=?3",
-        "(gap_end-gap_start)>=0",
+        "widest>=?3",
+        "widest>=0",
         "refusal_and_offline_uncertainty_outlive_real_upstream_expiry",
         "sub-TTL restart reported an offline gap",
     ),
@@ -220,17 +215,10 @@ CASES += [
 CASES += [
     (
         "gap-retention",
-        "DELETE FROM custody_gaps WHERE expires_at<=?1",
-        "DELETE FROM custody_gaps WHERE 0 AND expires_at<=?1",
+        "DELETE FROM custody_gap_summary WHERE expires_at<=?1",
+        "DELETE FROM custody_gap_summary WHERE 0 AND expires_at<=?1",
         "idle_poll_enforces_retention_and_observes_connection_changes",
         "expired gaps latched uncertainty",
-    ),
-    (
-        "gap-count",
-        "if count >= limits.max_gap_intervals {",
-        "if false {",
-        "idle_poll_enforces_retention_and_observes_connection_changes",
-        "gap interval budget was not bounded",
     ),
 ]
 
@@ -244,10 +232,10 @@ CASES += [
     ),
     (
         "floor-refusal",
-        '            tx.execute("INSERT OR IGNORE INTO custody_metadata (bus, upstream_id, fingerprint, origin, size, reason, first_seen, expires_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)", params![scope.bus_instance, delivery.message_id(), hash, origin, bounded_size, reason, now, deadlines.metadata_expires])?;',
-        '            tx.execute("INSERT OR IGNORE INTO custody_metadata (bus, upstream_id, fingerprint, origin, size, reason, first_seen, expires_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)", params![scope.bus_instance, delivery.message_id(), hash, origin, bounded_size, reason, now, now + limits.metadata_retention_secs])?;',
+        metadata_write,
+        metadata_write.replace("deadlines.metadata_expires", "now + limits.metadata_retention_secs", 1),
         "refusal_metadata_retains_its_complete_fractional_lifetime",
-        "custody_metadata: retention window was floored",
+        "custody_refusal_summaries: retention window was floored",
     ),
     (
         "floor-content",
@@ -270,7 +258,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", choices=[case[0] for case in CASES])
     args = parser.parse_args()
-    assert len(CASES) == 33, "custody mutant inventory drift"
+    assert len(CASES) == 32, "custody mutant inventory drift"
     evidence = ROOT / ".artifacts/custody-mutants"
     evidence.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="gateway-custody-mutants-") as directory:
@@ -318,7 +306,7 @@ def main():
                 print(f"{name}: GREEN baseline / RED intended", flush=True)
             finally:
                 file.write_text(SOURCE)
-        assert completed == (1 if args.case else 33)
+        assert completed == (1 if args.case else 32)
     print(f"custody-mutants-complete:{completed}", flush=True)
 
 

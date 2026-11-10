@@ -82,7 +82,7 @@ CASES = [
     (
         "foreign-store",
         "src/grants.rs",
-        "if !matches!(\n            application,\n            LEGACY_APPLICATION_ID | RETIREMENT_APPLICATION_ID\n        ) || !(SCHEMA_VERSION..=MAX_SUPPORTED_SCHEMA_VERSION).contains(&version)\n        {",
+        "if !matches!(\n            application,\n            LEGACY_APPLICATION_ID | RETIREMENT_APPLICATION_ID | SUMMARY_APPLICATION_ID\n        ) || !(SCHEMA_VERSION..=MAX_SUPPORTED_SCHEMA_VERSION).contains(&version)\n        {",
         "if false {",
         "grant_core",
         "foreign_store_metadata_is_refused_without_reinitialization",
