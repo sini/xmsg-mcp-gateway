@@ -19,6 +19,8 @@ pub struct VerifierConfig {
     pub service: String,
     pub issuer: String,
     pub resource: String,
+    #[serde(default)]
+    pub audience: Option<String>,
     pub subject: String,
     pub hosted_client: String,
     pub introspection_url: String,
@@ -104,6 +106,9 @@ impl Verifier {
         ]
         .iter()
         .any(|s| s.trim().is_empty())
+            || config.audience.as_ref().is_some_and(|audience| {
+                audience.is_empty() || audience.chars().any(char::is_whitespace)
+            })
             || config.introspection_client.contains(':')
             || config.required_scopes.is_empty()
             || config
@@ -204,9 +209,14 @@ impl Verifier {
             None => 0,
         };
         let scope = claims["scope"].as_str().ok_or(Error::InvalidToken)?;
+        let audience = self
+            .config
+            .audience
+            .as_deref()
+            .unwrap_or(&self.config.resource);
         if claims["active"] != true
             || claims["iss"].as_str() != Some(&self.config.issuer)
-            || !exact_audience(&claims["aud"], &self.config.resource)
+            || !exact_audience(&claims["aud"], audience)
             || claims["sub"].as_str() != Some(&self.config.subject)
             || claims["client_id"].as_str() != Some(&self.config.hosted_client)
             || exp <= now

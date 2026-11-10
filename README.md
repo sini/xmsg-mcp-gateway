@@ -62,6 +62,12 @@ specific diagnostic, distinct from an unavailable store. Missing or unrecognized
 closed; initialization is explicit and never overwrites an existing store.
 
 The Rust token-verification boundary is described in [verified-token foundation](docs/verified-identity.md). The identity listener consumes this boundary.
+Optional `verifier.audience` selects the exact token audience, defaulting to the
+canonical resource URL. An override does not change resource metadata or the
+service grant, and `client_id` must still match the approved `hosted_client`.
+[Provider setup](docs/provider-setup.md#direct-kanidm-1112) describes direct Kanidm
+1.11.2 with a dedicated one-to-one client audience; do not reuse that registration
+for another resource or application.
 
 ## Python reference setup
 
@@ -116,11 +122,13 @@ The provider must supply authorization-server metadata, authorization code with
 PKCE S256, and an appropriate client-registration method. This server never
 rewrites a token audience to make an incompatible provider appear compatible.
 
-The repository includes no live provider configuration or credentials. Kanidm
-reuse is desirable but direct compatibility is unproved: the checked upstream
-source returns a client-ID audience. Read the [provider setup guide](docs/provider-setup.md) before registering a client.
-A dedicated client, compatible resource audience and accessible OAuth endpoints
-must be verified first. Do not reuse another application's client registration.
+The repository includes no live provider configuration or credentials. Direct
+Kanidm 1.11.2 returns a client-name audience, which does not satisfy this Python
+reference's strict-resource predicate. The Rust verifier separately supports a
+dedicated-client audience override. Read the [provider setup guide](docs/provider-setup.md)
+before registering a client. A dedicated client, compatible reference-server
+resource audience and accessible OAuth endpoints must be verified first.
+Do not reuse another application's client registration.
 
 OAuth tokens retained for delivery-time introspection are Fernet encrypted;
 connection fixture tokens are stored only as verifiers. Signing secrets are also

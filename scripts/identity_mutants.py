@@ -94,7 +94,7 @@ CASES += [
 RUNTIME = [
     ("active", 'claims["active"] != true'),
     ("issuer", 'claims["iss"].as_str() != Some(&self.config.issuer)'),
-    ("audience", '!exact_audience(&claims["aud"], &self.config.resource)'),
+    ("audience", '!exact_audience(&claims["aud"], audience)'),
     ("subject", 'claims["sub"].as_str() != Some(&self.config.subject)'),
     (
         "hosted-client",
@@ -152,8 +152,18 @@ CASES += [
         "configuration_rejects_insecure_urls_and_unknown_fields",
     ),
 ]
+CASES.append(
+    (
+        "configured-audience-hosted-client",
+        "src/auth.rs",
+        'claims["client_id"].as_str() != Some(&self.config.hosted_client)',
+        "false",
+        "configured_audience_requires_the_hosted_client",
+    )
+)
 TYPE_TESTS = {case[4] for case in CASES[:5]}
 EXPECTED_RED = {
+    "configured-audience-hosted-client": "accepted configured audience from another hosted client",
     "response-bound": "oversized provider body accepted",
     "provider-https": "accepted config introspection_url",
     "provider-allowlist": "accepted out-of-list IP literal",

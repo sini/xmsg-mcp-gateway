@@ -16,9 +16,16 @@ environment settings apply. An optional PEM root certificate supports private PK
 The asynchronous client disables redirects, verifies TLS, and bounds response bodies
 at 64 KiB. Neither credentials nor provider response bodies appear in errors.
 
-The provider must report an active token, exact issuer and resource audience
+The provider must report an active token, exact issuer and configured audience
 (string or singleton array), expected subject and hosted client, unexpired `exp`,
-satisfied `nbf`, and all configured scopes. The introspection caller is never
+satisfied `nbf`, and all configured scopes. Optional `audience` defaults to the
+canonical resource URL; an override must be nonempty and contain no whitespace.
+Additional audiences are refused. `client_id` must still equal `hosted_client`,
+and resource metadata, verified identity and grants retain the canonical resource
+URL. A different audience requires a dedicated one-to-one OAuth client whose
+origin is the resource origin, never a registration shared with another resource
+or application; see [provider setup](provider-setup.md).
+The introspection caller is never
 substituted for the hosted client. Invalid claims return `InvalidToken`; transport,
 non-200 and malformed provider responses return `Unavailable`. HTTP status mapping
 belongs to the [identity listener](serving.md).

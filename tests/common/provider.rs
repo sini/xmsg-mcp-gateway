@@ -86,6 +86,40 @@ pub fn network_case(
     usize,
     Duration,
 ) {
+    network_case_audience(binding, body, status, redirect, stall, timeout_ms, None)
+}
+
+#[allow(dead_code)]
+pub fn verify_response_with_audience(
+    binding: &Binding,
+    body: serde_json::Value,
+    audience: &str,
+) -> Result<VerifiedIdentity, xmsg_mcp_gateway::auth::Error> {
+    network_case_audience(
+        binding,
+        body,
+        200,
+        false,
+        Duration::ZERO,
+        2000,
+        Some(audience),
+    )
+    .0
+}
+
+fn network_case_audience(
+    binding: &Binding,
+    body: serde_json::Value,
+    status: u16,
+    redirect: bool,
+    stall: Duration,
+    timeout_ms: u64,
+    audience: Option<&str>,
+) -> (
+    Result<VerifiedIdentity, xmsg_mcp_gateway::auth::Error>,
+    usize,
+    Duration,
+) {
     let fixture = TlsFixture::new();
     let roots = fixture.roots.clone();
     let secret = fixture.secret.clone();
@@ -145,21 +179,21 @@ pub fn network_case(
         let location = redirect.then(|| format!("https://provider.test:{target_port}/introspect"));
         serve(socket, tls, &body, status, location.as_deref(), stall, true);
     });
-    let config = VerifierConfig {
-        service: binding.service.clone(),
-        issuer: binding.issuer.clone(),
-        resource: binding.resource.clone(),
-        subject: binding.subject.clone(),
-        hosted_client: binding.hosted_client.clone(),
-        introspection_url: format!("https://provider.test:{port}/introspect"),
-        introspection_client: "lookup-client".into(),
-        client_secret_file: secret,
-        provider_addresses: vec![Ipv4Addr::LOCALHOST.into()],
-        required_scopes: vec!["identity:read".into()],
-        timeout_ms,
-        root_certificate_file: Some(roots),
-    };
-    let verifier = Verifier::from_config(config).unwrap();
+    let mut raw = serde_json::json!({
+        "service":binding.service,"issuer":binding.issuer,"resource":binding.resource,
+        "subject":binding.subject,"hosted_client":binding.hosted_client,
+        "introspection_url":format!("https://provider.test:{port}/introspect"),
+        "introspection_client":"lookup-client","client_secret_file":secret,
+        "provider_addresses":["127.0.0.1"],"required_scopes":["identity:read"],
+        "timeout_ms":timeout_ms,"root_certificate_file":roots
+    });
+    if let Some(audience) = audience {
+        raw["audience"] = audience.into();
+    }
+    let verifier = Verifier::from_config(
+        serde_json::from_value(raw).expect("audience configuration must deserialize"),
+    )
+    .unwrap();
     let started = Instant::now();
     let result = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -195,6 +229,7 @@ pub fn verify_pin_and_proxy_policy(binding: &Binding) {
         service: binding.service.clone(),
         issuer: binding.issuer.clone(),
         resource: binding.resource.clone(),
+        audience: None,
         subject: binding.subject.clone(),
         hosted_client: binding.hosted_client.clone(),
         introspection_url: format!("https://127.0.0.1:{port}/introspect"),
@@ -255,6 +290,7 @@ pub fn verify_pin_and_proxy_policy(binding: &Binding) {
         service: binding.service.clone(),
         issuer: binding.issuer.clone(),
         resource: binding.resource.clone(),
+        audience: None,
         subject: binding.subject.clone(),
         hosted_client: binding.hosted_client.clone(),
         introspection_url: format!("https://localhost:{mismatch_port}/introspect"),
@@ -348,6 +384,7 @@ pub fn verify_pin_and_proxy_policy(binding: &Binding) {
         service: binding.service.clone(),
         issuer: binding.issuer.clone(),
         resource: binding.resource.clone(),
+        audience: None,
         subject: binding.subject.clone(),
         hosted_client: binding.hosted_client.clone(),
         introspection_url: "https://provider.test/introspect".into(),
@@ -362,6 +399,7 @@ pub fn verify_pin_and_proxy_policy(binding: &Binding) {
         service: binding.service.clone(),
         issuer: binding.issuer.clone(),
         resource: binding.resource.clone(),
+        audience: None,
         subject: binding.subject.clone(),
         hosted_client: binding.hosted_client.clone(),
         introspection_url: format!("https://provider.test:{direct_port}/introspect"),

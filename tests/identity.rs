@@ -184,3 +184,98 @@ fn stalled_provider_is_refused_before_its_response() {
         "provider timeout bound exceeded: {elapsed:?}"
     );
 }
+
+#[test]
+fn configured_audience_preserves_resource_and_singleton_rules() {
+    let binding = binding();
+    let audience = "dedicated-client";
+    for aud in [serde_json::json!(audience), serde_json::json!([audience])] {
+        let mut claims = provider::claims(&binding);
+        claims["aud"] = aud;
+        let identity = provider::verify_response_with_audience(&binding, claims, audience)
+            .expect("configured client audience must be accepted");
+        assert_eq!(
+            identity.resource(),
+            binding.resource,
+            "audience replaced the resource binding"
+        );
+        assert_eq!(identity.hosted_client(), binding.hosted_client);
+    }
+    for aud in [
+        serde_json::json!([audience, "extra"]),
+        serde_json::json!([audience, audience]),
+        serde_json::json!(binding.resource),
+    ] {
+        let mut claims = provider::claims(&binding);
+        claims["aud"] = aud;
+        assert!(
+            matches!(
+                provider::verify_response_with_audience(&binding, claims, audience),
+                Err(Error::InvalidToken)
+            ),
+            "accepted a non-exact configured audience"
+        );
+    }
+}
+
+#[test]
+fn configured_audience_requires_the_hosted_client() {
+    let binding = binding();
+    let audience = "dedicated-client";
+    let mut claims = provider::claims(&binding);
+    claims["aud"] = audience.into();
+    assert!(provider::verify_response_with_audience(&binding, claims.clone(), audience).is_ok());
+    for client in [serde_json::json!("another-client"), serde_json::Value::Null] {
+        let mut foreign = claims.clone();
+        foreign["client_id"] = client;
+        assert!(
+            matches!(
+                provider::verify_response_with_audience(&binding, foreign, audience),
+                Err(Error::InvalidToken)
+            ),
+            "accepted configured audience from another hosted client"
+        );
+    }
+}
+
+#[test]
+fn configured_audience_rejects_empty_and_whitespace_at_startup() {
+    let fixture = provider::TlsFixture::new();
+    let raw = serde_json::json!({"service":"gateway","issuer":"https://issuer.example/","resource":"https://gateway.example/mcp","subject":"owner","hosted_client":"hosted-client","introspection_url":"https://provider.test/token","introspection_client":"lookup-client","client_secret_file":fixture.secret,"required_scopes":["identity:read"],"timeout_ms":1000});
+    for audience in [
+        "",
+        " ",
+        "client name",
+        "\tclient",
+        "client\n",
+        "\u{00a0}client",
+        "client\u{2003}",
+    ] {
+        let mut config = raw.clone();
+        config["audience"] = audience.into();
+        assert!(
+            matches!(
+                Verifier::from_config(serde_json::from_value(config).unwrap()),
+                Err(Error::Configuration)
+            ),
+            "accepted invalid configured audience"
+        );
+    }
+    for audience in [
+        serde_json::Value::Null,
+        serde_json::json!("dedicated-client"),
+    ] {
+        let mut config = raw.clone();
+        config["audience"] = audience;
+        assert!(Verifier::from_config(serde_json::from_value(config).unwrap()).is_ok());
+    }
+    for audience in [
+        serde_json::json!(false),
+        serde_json::json!(42),
+        serde_json::json!(["client"]),
+    ] {
+        let mut config = raw.clone();
+        config["audience"] = audience;
+        assert!(serde_json::from_value::<VerifierConfig>(config).is_err());
+    }
+}

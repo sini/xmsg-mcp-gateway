@@ -160,6 +160,17 @@ the values from the actual provider setup:
 }
 ```
 
+Optional `verifier.audience` selects the expected introspection `aud` value;
+when omitted, it defaults to `verifier.resource`. An override must be nonempty
+and contain no whitespace. Only an exact string or singleton array is accepted,
+and the returned `client_id` must still equal `verifier.hosted_client`. This
+changes only the audience comparison: resource metadata, verified identity and
+grant enrollment continue to use the canonical resource URL. If the audience is
+a different identifier, require a dedicated one-to-one OAuth client for that
+resource, with its origin set to the resource origin and no reuse for other
+applications. See [provider setup](provider-setup.md) for direct Kanidm 1.11.2 and
+the separate, unchanged strict-resource Python reference.
+
 An optional `verifier.root_certificate_file` supplies a PEM root for private PKI.
 Optional `verifier.provider_addresses` supply explicit connection pins, independent of
 callback policy; when omitted or empty, standard DNS resolution and `HTTPS_PROXY`/`NO_PROXY`
