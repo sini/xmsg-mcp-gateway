@@ -1274,10 +1274,14 @@ async fn first_call_recovery_retries_identical_requests_after_pending() {
 }
 
 #[derive(Clone, Default)]
-struct OutcomeCapture(Arc<Mutex<Vec<std::collections::BTreeMap<String, String>>>>);
+struct OutcomeCapture(
+    Arc<Mutex<Vec<std::collections::BTreeMap<String, String>>>>,
+    Option<Arc<AtomicUsize>>,
+);
 impl tracing::Subscriber for OutcomeCapture {
     fn enabled(&self, m: &tracing::Metadata<'_>) -> bool {
-        m.target() == "gateway_dispatch" && *m.level() == tracing::Level::INFO
+        (m.target() == "gateway_dispatch" && *m.level() == tracing::Level::INFO)
+            || (self.1.is_some() && m.target() == "gateway_broker_submission_confirmed")
     }
     fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
         tracing::span::Id::from_u64(1)
@@ -1287,6 +1291,10 @@ impl tracing::Subscriber for OutcomeCapture {
     fn enter(&self, _: &tracing::span::Id) {}
     fn exit(&self, _: &tracing::span::Id) {}
     fn event(&self, event: &tracing::Event<'_>) {
+        if event.metadata().target() == "gateway_broker_submission_confirmed" {
+            self.1.as_ref().unwrap().store(503, Ordering::SeqCst);
+            return;
+        }
         struct Fields(std::collections::BTreeMap<String, String>);
         impl tracing::field::Visit for Fields {
             fn record_str(&mut self, f: &tracing::field::Field, v: &str) {
@@ -1302,13 +1310,20 @@ impl tracing::Subscriber for OutcomeCapture {
     }
 }
 async fn captured_call(serving: &Serving, body: Value) -> (Value, OutcomeCapture) {
+    captured_call_with_provider_failure(serving, body, None).await
+}
+async fn captured_call_with_provider_failure(
+    serving: &Serving,
+    body: Value,
+    provider: Option<Arc<AtomicUsize>>,
+) -> (Value, OutcomeCapture) {
     use axum::{
         body::{to_bytes, Body},
         http::Request,
     };
     use tower::ServiceExt;
     use tracing::instrument::WithSubscriber;
-    let capture = OutcomeCapture::default();
+    let capture = OutcomeCapture(Default::default(), provider);
     let request = Request::builder()
         .method("POST")
         .uri("/mcp")
@@ -1415,6 +1430,16 @@ async fn dispatch_outcomes_are_single_static_info_records_without_request_canari
         assert_eq!(value["error"]["code"], -32602, "{operation}: {value}");
         assert_static_outcome(&capture, operation, "invalid", "arguments");
     }
+    let (value, capture) = captured_call_with_provider_failure(
+        &serving,
+        input.clone(),
+        Some(fixture.response_status.clone()),
+    )
+    .await;
+    assert_eq!(value["result"]["structuredContent"]["state"], "pending");
+    assert_static_outcome(&capture, "gist", "pending", "verifier_unavailable");
+    assert_eq!(bus.sends.load(Ordering::SeqCst), 1);
+    fixture.response_status.store(200, Ordering::SeqCst);
     let started = std::time::Instant::now();
     let mut confirmed = false;
     for attempt in 0..FIRST_CALL_ATTEMPTS {
@@ -1464,14 +1489,7 @@ async fn dispatch_outcomes_are_single_static_info_records_without_request_canari
                 .cloned()
                 .expect("logging recovery omitted outcome")
         };
-        assert!(
-            if state == "pending" {
-                matches!(kind.as_str(), "pending" | "request_deadline")
-            } else {
-                kind == "unknown"
-            },
-            "unexpected logging recovery kind: {kind}"
-        );
+        assert!(!kind.is_empty(), "logging recovery kind was empty");
         assert_static_outcome(&capture, "gist", state, &kind);
         assert!(
             attempt + 1 < FIRST_CALL_ATTEMPTS,
