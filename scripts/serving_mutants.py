@@ -109,7 +109,7 @@ CASES += [
     (
         "body-deadline",
         deadline,
-        "async fn mcp(State(app): State<Arc<App>>, request: Request) -> Response { mcp_request(app, request, Arc::new(OnceLock::new())).await }\n",
+        "async fn mcp(State(app): State<Arc<App>>, request: Request) -> Response { mcp_request(app, request, Arc::new(OnceLock::new()), Arc::new(OnceLock::new())).await }\n",
         "body_read_is_bounded_before_any_credential_or_policy_io",
         "request body deadline was not enforced",
     ),

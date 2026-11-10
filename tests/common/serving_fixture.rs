@@ -28,6 +28,7 @@ pub struct Fixture {
     pub config: Value,
     pub tokens: Arc<Mutex<HashMap<String, Value>>>,
     pub requests: Arc<AtomicUsize>,
+    pub response_status: Arc<AtomicUsize>,
     pub provider_timing: Arc<Mutex<Vec<(String, u128)>>>,
     stopped: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
@@ -76,6 +77,8 @@ impl Fixture {
             }),
         ])));
         let requests = Arc::new(AtomicUsize::new(0));
+        let response_status = Arc::new(AtomicUsize::new(200));
+        let worker_status = response_status.clone();
         let stopped = Arc::new(AtomicBool::new(false));
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -125,7 +128,7 @@ impl Fixture {
                             .cloned()
                             .unwrap_or(json!({"active":false}))
                             .to_string();
-                        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{claims}", claims.len()).unwrap();
+                        write!(stream, "HTTP/1.1 {} fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{claims}", worker_status.load(Ordering::SeqCst), claims.len()).unwrap();
                         stream.flush().unwrap();
                         timing
                             .lock()
@@ -160,6 +163,7 @@ impl Fixture {
             config,
             tokens,
             requests,
+            response_status,
             provider_timing,
             stopped,
             worker: Some(worker),

@@ -51,7 +51,7 @@ jobs:
           assert summaries, "no Rust test summaries"
           counts = [tuple(map(int, row)) for row in summaries]
           assert all(not row[1] and not any(row[3:]) for row in counts), "failed or filtered Rust tests"
-          expected_passed, expected_ignored = (213, 86) if sys.platform == "linux" else (209, 2)
+          expected_passed, expected_ignored = (217, 86) if sys.platform == "linux" else (213, 2)
           assert sum(row[0] for row in counts) == expected_passed, "executed Rust test count mismatch"
           assert sum(row[2] for row in counts) == expected_ignored, "private-node deferral count mismatch"
           print(f"Rust test completion guard: {expected_passed} passed; {expected_ignored} private-node cases run in mandatory transport/custody job")
@@ -77,7 +77,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           python3 scripts/broker_mutants.py | tee broker-mutants.log
-          grep -Fx 'broker-mutants-complete:7/7' broker-mutants.log
+          grep -Fx 'broker-mutants-complete:10/10' broker-mutants.log
       - name: Serving misuse source mutants
         if: runner.os == 'Linux'
         run: python3 scripts/serving_mutants.py

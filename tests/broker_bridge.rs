@@ -148,7 +148,9 @@ async fn setup_with_list_delay(
             let frame: Value = serde_json::from_str(&line).unwrap();
             let response = match frame["action"].as_str().unwrap() {
                 "list" => {
-                    tokio::time::sleep(list_delay).await;
+                    if !list_delay.is_zero() {
+                        tokio::time::sleep(list_delay).await;
+                    }
                     json!({"status":"ok","nodes":[{"node":"node","status":"ok"}],"recipients":[{"address":"genie@node","node":"node","kind":"service","harness":"svc","status":"live","user":"fixture"}]})
                 }
                 "send" => {
@@ -738,4 +740,351 @@ async fn expired_broker_uncertainty_requires_reconciliation_without_retry_advice
         1,
         "expired broker request was resubmitted"
     );
+}
+
+struct ControlledClock(tokio::task::JoinHandle<()>);
+impl ControlledClock {
+    fn pause() -> Self {
+        tokio::time::pause();
+        Self(tokio::spawn(async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        }))
+    }
+}
+impl Drop for ControlledClock {
+    fn drop(&mut self) {
+        self.0.abort();
+        tokio::time::resume();
+    }
+}
+async fn wall_bounded<T>(stage: &str, future: impl std::future::Future<Output = T>) -> T {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    tokio::pin!(future);
+    loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "controlled deadline fixture exceeded wall budget: {stage}"
+        );
+        match std::future::poll_fn(|cx| std::task::Poll::Ready(future.as_mut().poll(cx))).await {
+            std::task::Poll::Ready(value) => return value,
+            std::task::Poll::Pending => tokio::task::yield_now().await,
+        }
+    }
+}
+
+#[tokio::test]
+async fn pre_send_deadline_has_json_rpc_safe_retry_without_submission() {
+    for tool in ["gist_read", "xmsg_send"] {
+        let (mut fixture, bus) = setup().await;
+        fixture.config["messaging"]["submission_timeout_ms"] = json!(1000);
+        fixture::private_file(
+            &fixture.config_file,
+            &serde_json::to_vec(&fixture.config).unwrap(),
+        );
+        let config = serde_json::from_value(fixture.config["messaging"]["xmsg"].clone()).unwrap();
+        let mut stall = agent_stall::AgentStall::install(&config, "list");
+        let serving = Arc::new(
+            Serving::from_owner_file(&fixture.config_file)
+                .await
+                .unwrap(),
+        );
+        let arguments = if tool == "gist_read" {
+            json!({"request_id":"pre-send-timeout","id":"abc"})
+        } else {
+            json!({"request_id":"pre-send-timeout","to":"genie@node","text":"ordinary message"})
+        };
+        let clock = ControlledClock::pause();
+        let task_serving = serving.clone();
+        let handler = tokio::spawn(async move {
+            fixture::request(
+                &task_serving,
+                "good-token",
+                rpc("tools/call", json!({"name":tool,"arguments":arguments})),
+            )
+            .await
+        });
+        wall_bounded("barrier", stall.reached()).await;
+        tokio::time::advance(std::time::Duration::from_millis(1001)).await;
+        let (status, value, _) = wall_bounded("response", handler).await.unwrap();
+        wall_bounded("finish", stall.finish(true)).await;
+        drop(clock);
+        assert_eq!(
+            status,
+            axum::http::StatusCode::OK,
+            "pre-send dispatch failure omitted JSON-RPC: {tool} {value}"
+        );
+        assert_eq!(value["id"], "broker-rpc");
+        assert_eq!(value["error"]["code"], -32004);
+        assert_eq!(
+            value["error"]["data"],
+            json!({"submitted":false,"retry":"same request_id"}),
+            "pre-send failure lacks safe retry: {tool} {value}"
+        );
+        assert_eq!(bus.sends.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn post_send_deadline_is_unknown_and_status_never_resubmits() {
+    let (mut fixture, bus) = setup().await;
+    fixture.config["messaging"]["submission_timeout_ms"] = json!(1000);
+    fixture::private_file(
+        &fixture.config_file,
+        &serde_json::to_vec(&fixture.config).unwrap(),
+    );
+    let config = serde_json::from_value(fixture.config["messaging"]["xmsg"].clone()).unwrap();
+    let mut stall = agent_stall::AgentStall::install(&config, "send");
+    let serving = Arc::new(
+        Serving::from_owner_file(&fixture.config_file)
+            .await
+            .unwrap(),
+    );
+    let clock = ControlledClock::pause();
+    let task_serving = serving.clone();
+    let handler = tokio::spawn(async move {
+        fixture::request(&task_serving,"good-token",rpc("tools/call",json!({"name":"gist_read","arguments":{"request_id":"post-send-timeout","id":"abc"}}))).await
+    });
+    wall_bounded("barrier", stall.reached()).await;
+    tokio::time::advance(std::time::Duration::from_millis(1001)).await;
+    let (status, value, _) = wall_bounded("response", handler).await.unwrap();
+    wall_bounded("finish", stall.finish(false)).await;
+    drop(clock);
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(
+        value["result"]["structuredContent"]["state"], "unknown",
+        "post-send deadline falsely claimed no submission: {value}"
+    );
+    assert!(
+        value.get("error").is_none(),
+        "post-send deadline returned a pre-effect error: {value}"
+    );
+    assert_eq!(value["result"]["structuredContent"]["receipt"], Value::Null);
+    assert_eq!(bus.sends.load(Ordering::SeqCst), 1);
+    let (_, status, _) = fixture::request(
+        &serving,
+        "good-token",
+        rpc(
+            "tools/call",
+            json!({"name":"xmsg_message_status","arguments":{"request_id":"post-send-timeout"}}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status["result"]["structuredContent"]["results"][0]["state"], "unknown",
+        "{status}"
+    );
+    assert_eq!(
+        bus.sends.load(Ordering::SeqCst),
+        1,
+        "status duplicated a submitted operation"
+    );
+}
+
+#[tokio::test]
+async fn confirmed_broker_recovery_failures_never_claim_no_submission() {
+    use axum::{
+        body::{to_bytes, Body},
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+    use tracing::instrument::WithSubscriber;
+    for failure in ["provider", "lookup", "revocation"] {
+        let (fixture, bus) = setup().await;
+        let serving = Serving::from_owner_file(&fixture.config_file)
+            .await
+            .unwrap();
+        let status = fixture.response_status.clone();
+        let file = fixture.store_file.clone();
+        let reached = Arc::new(AtomicUsize::new(0));
+        let count = reached.clone();
+        let barrier = outbound_observer::AtEvent {
+            target: "gateway_broker_submission_confirmed",
+            action: move || {
+                assert_eq!(count.fetch_add(1, Ordering::SeqCst), 0);
+                match failure {
+                    "provider" => status.store(503, Ordering::SeqCst),
+                    "lookup" => rusqlite::Connection::open(&file)
+                        .unwrap()
+                        .execute_batch(
+                            "ALTER TABLE custody_items RENAME TO unavailable_custody_items",
+                        )
+                        .unwrap(),
+                    _ => {
+                        Store::open(&file)
+                            .unwrap()
+                            .set_outbound_policy("grant", 3, &Policy::default())
+                            .unwrap();
+                    }
+                }
+            },
+        };
+        let request=Request::builder().method("POST").uri("/mcp").header("host","gateway.example").header("content-type","application/json").header("authorization","Bearer good-token").body(Body::from(rpc("tools/call",json!({"name":"gist_read","arguments":{"request_id":"confirmed-recovery","id":"abc"}})).to_string())).unwrap();
+        let response = serving
+            .router()
+            .oneshot(request)
+            .with_subscriber(barrier)
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 100_000).await.unwrap();
+        let value: Value = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        assert_eq!(
+            reached.load(Ordering::SeqCst),
+            1,
+            "confirmed receipt barrier not reached"
+        );
+        assert_eq!(bus.sends.load(Ordering::SeqCst), 1);
+        if failure == "revocation" {
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "revoked authority leaked broker result: {value}"
+            );
+        } else {
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "confirmed recovery hid pending outcome: {failure} {value}"
+            );
+            assert_eq!(
+                value["result"]["structuredContent"]["state"], "pending",
+                "confirmed recovery mislabeled submission: {failure} {value}"
+            );
+            assert!(
+                value.get("error").is_none(),
+                "confirmed recovery claimed pre-effect failure: {value}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn authorized_ack_deadline_has_body_without_claiming_rollback() {
+    use axum::{
+        body::{to_bytes, Body},
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+    use tracing::instrument::WithSubscriber;
+    let (fixture, _bus) = setup().await;
+    let serving = Arc::new(
+        Serving::from_owner_file(&fixture.config_file)
+            .await
+            .unwrap(),
+    );
+    let (_, initial, _) = fixture::request(
+        &serving,
+        "good-token",
+        rpc(
+            "tools/call",
+            json!({"name":"gist_read","arguments":{"request_id":"ack-deadline-setup","id":"abc"}}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        initial["result"]["structuredContent"]["broker"]["state"],
+        "confirmed"
+    );
+    let entered = Arc::new(AtomicUsize::new(0));
+    let reached = entered.clone();
+    let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let waiter = release.clone();
+    let barrier = outbound_observer::AtEvent {
+        target: "gateway_ack_before_commit",
+        action: move || {
+            reached.store(1, Ordering::SeqCst);
+            let (lock, condition) = &*waiter;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                assert!(!remaining.is_zero(), "owned ACK barrier was not released");
+                released = condition.wait_timeout(released, remaining).unwrap().0;
+            }
+        },
+    };
+    let request = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("host", "gateway.example")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer good-token")
+        .body(Body::from(
+            rpc(
+                "tools/call",
+                json!({"name":"xmsg_ack","arguments":{"message_id":"result-wire"}}),
+            )
+            .to_string(),
+        ))
+        .unwrap();
+    tokio::time::pause();
+    let clock_guard = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
+    let handler = tokio::spawn(async move {
+        serving
+            .router()
+            .oneshot(request)
+            .with_subscriber(barrier)
+            .await
+            .unwrap()
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while entered.load(Ordering::SeqCst) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "authorized ACK did not reach commit barrier"
+        );
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(std::time::Duration::from_millis(60001)).await;
+    let response = handler.await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 100_000).await.unwrap();
+    {
+        let (lock, condition) = &*release;
+        *lock.lock().unwrap() = true;
+        condition.notify_all();
+    }
+    clock_guard.abort();
+    tokio::time::resume();
+    let value: Value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap()
+    };
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "authorized ACK deadline omitted JSON-RPC: {value}"
+    );
+    assert_eq!(value["id"], "broker-rpc");
+    assert_eq!(value["error"]["code"], -32004);
+    assert!(
+        value["error"].get("data").is_none(),
+        "ACK timeout claimed rollback: {value}"
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let count: i64 = rusqlite::Connection::open(&fixture.store_file)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM event_observations", [], |r| r.get(0))
+            .unwrap();
+        if count == 1 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "owned ACK did not commit after response deadline"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
 }

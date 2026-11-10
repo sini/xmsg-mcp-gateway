@@ -23,18 +23,22 @@ CASES = [
     Case("framed-byte-bound", "broker_bridge", "broker_complete_encoded_request_bound_and_authentication_refuse_before_publication", MCP, (Edit("src/outbound.rs", "if !limits.text_fits(&framed_text) {", "if false {"), Edit("src/outbound.rs", "if !limits.text_fits(&reservation.framed_text) {", "if false {"))),
     Case("detached-broker-dispatch", "broker_bridge", "cancelling_broker_handler_keeps_the_accepted_submission_owned_by_the_worker", MCP, (Edit("src/serving.rs", "tasks.spawn(broker_work);", "broker_work.await;"),)),
     Case("final-result-authority", "broker_bridge", "broker_status_rechecks_send_ceiling_at_the_final_result_read", MCP, (Edit("src/serving.rs", current, stale),)),
+    Case("post-send-deadline-label", "broker_bridge", "post_send_deadline_is_unknown_and_status_never_resubmits", MCP, (Edit("src/outbound.rs", "            Ok(Outcome::Unknown)\n        }\n    }?;", "            Err(Error::Deadline)\n        }\n    }?;"),)),
+    Case("confirmed-recovery-phase", "broker_bridge", "confirmed_broker_recovery_failures_never_claim_no_submission", MCP, (Edit("src/serving.rs", "confirmed_submission = true;", "confirmed_submission = false;"),)),
+    Case("authorized-deadline-response", "broker_bridge", "authorized_ack_deadline_has_body_without_claiming_rollback", MCP, (Edit("src/serving.rs", "Some(id) => tool_unavailable(id, false),", "Some(_id) => unavailable(),"),)),
+
 ]
 
 
 def main():
-    assert len(CASES) == 7, "broker mutant inventory drift"
+    assert len(CASES) == 10, "broker mutant inventory drift"
     harness.ROOT = ROOT
     harness.EVIDENCE = ROOT / ".artifacts/broker-mutants"
     harness.CASES = CASES
     harness.BASELINE_TARGETS = ["lib", "broker_bridge"]
     harness.NONCE_TEST = "broker_build_nonce_receipt"
     harness.main()
-    print("broker-mutants-complete:7/7", flush=True)
+    print("broker-mutants-complete:10/10", flush=True)
 
 
 if __name__ == "__main__":
