@@ -1013,6 +1013,15 @@ async fn node_scoped_targets_send_to_sessions_and_subagents_and_enforce_reply_or
                 "label": "dup-label"
             },
             {
+                "address": "sess-inactive@sini.bitstream",
+                "node": "sini.bitstream",
+                "kind": "instance",
+                "harness": "claude",
+                "status": "inactive",
+                "user": "sini",
+                "label": "stale-work"
+            },
+            {
                 "address": "genie@sini.other",
                 "node": "sini.other",
                 "kind": "service",
@@ -1147,12 +1156,15 @@ async fn node_scoped_targets_send_to_sessions_and_subagents_and_enforce_reply_or
             .ends_with(body));
     }
 
-    // Ambiguous label on admitted node (`dup-label@sini.bitstream`) and Oracle (2): same session on
+    // Ambiguous label on admitted node (`dup-label@sini.bitstream`), inactive recipient on
+    // admitted node (`sess-inactive@sini.bitstream`), and Oracle (2): same session on
     // non-admitted node (`sess-1@sini.unpermitted`) or on node with only exact service policy
     // (`sess-1@sini.other`) are refused with no bus send.
     let sent_before_refusals = bus.sent_frames.lock().unwrap().len();
     for (req_id, refused_to) in [
         ("send-ambiguous-label", "dup-label@sini.bitstream"),
+        ("send-inactive-session", "sess-inactive@sini.bitstream"),
+        ("send-inactive-label", "stale-work@sini.bitstream"),
         ("send-unpermitted-node", "sess-1@sini.unpermitted"),
         ("send-unpermitted-label", "work@sini.unpermitted"),
         ("send-unpermitted-subagent", "sess-1/sub-a@sini.unpermitted"),
