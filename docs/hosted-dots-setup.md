@@ -204,6 +204,7 @@ All hostnames, tunnel IDs, node names and UUIDs below (`https://auth.example`,
    xmsg-mcp-gateway --state .state/grants.db init
    xmsg-mcp-gateway --state .state/grants.db migrate-custody
    xmsg-mcp-gateway --state .state/grants.db migrate-outbound
+   xmsg-mcp-gateway --state .state/grants.db migrate-retirement
    xmsg-mcp-gateway --state .state/grants.db migrate-events --key-file .state/events.key
    xmsg-mcp-gateway --state .state/grants.db enroll grant-1 .state/binding.json
    xmsg-mcp-gateway --state .state/grants.db enable grant-1 1

@@ -42,6 +42,7 @@ is explicit. After building the Rust binary with `cargo build --locked --release
 target/release/xmsg-mcp-gateway --state .state/grants.db init
 target/release/xmsg-mcp-gateway --state .state/grants.db migrate-custody
 target/release/xmsg-mcp-gateway --state .state/grants.db migrate-outbound
+target/release/xmsg-mcp-gateway --state .state/grants.db migrate-retirement
 target/release/xmsg-mcp-gateway --state .state/grants.db migrate-events --key-file .state/events.key
 target/release/xmsg-mcp-gateway --state .state/grants.db enroll grant-id binding.json
 ```

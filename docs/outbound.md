@@ -23,7 +23,13 @@ implement Rust Events. The [deployment boundaries](serving.md#deployment-boundar
 remain in force.
 
 The owner runs `migrate-custody` (schema 1 to 2), then `migrate-outbound`
-(2 to 3), each with `--state FILE`. Opening state never migrates it. Outbound
+(2 to 3), then `migrate-retirement`, each with `--state FILE`. The retirement
+migration is explicit and works before or after the separate Events migration.
+Opening state never migrates it. Take a database backup before migrating.
+The retirement migration changes the database application marker atomically.
+Older gateway binaries refuse to open the migrated database. Rolling back to an
+older gateway binary requires restoring a pre-migration database backup; the
+migrated database cannot be used by that older binary. Outbound
 operations refuse a pre-migration store; inbound custody remains valid at 2 or 3.
 `set-outbound-policy GRANT REVISION FILE` is an owner CLI verb, with a matching
 Store API. Policy is empty until explicitly written; writing policy increments
@@ -49,9 +55,10 @@ inbound correlation in this store, rather than caller-selected reply addresses.
 digits and `.`, `_`, `:`, `-`. Missing, null, numeric and unknown arguments refuse.
 There is no default or conversion from a JSON-RPC value. The dispatcher has no
 JSON-RPC ID input. Reservations are unique on the verified owner profile,
-operation and request ID, with a canonical payload fingerprint. Changed payloads
+and raw request ID across operations, with a canonical payload fingerprint. Changed payloads
 conflict. A confirmed duplicate returns the stored original xmsg receipt even
-after a policy revision or expiry of its inbound reply correlation, provided
+through its result recovery deadline, including after a policy revision or expiry
+of its inbound reply correlation, provided
 current authority still permits that operation and target. Expired unresolved
 work becomes unknown before stale acceptance revisions are considered.
 
@@ -122,3 +129,47 @@ fail their named assertions; compile failures, cached artifacts and harness
 timeouts do not count as kills. A source control advances the supported schema
 ceiling while requiring outbound schema 3 to remain usable. The later serving unit owns the end-to-end MCP
 JSON-RPC-ID, missing-request-ID and default-empty-policy acceptance cells.
+
+## Reservation retirement
+
+New effect retries are covered by the registered xmsg idempotency TTL. The
+manifest's `dedup_lifetime_secs` remains accepted for configuration compatibility;
+it cannot extend that TTL. Existing stored effect deadlines are never extended.
+`messaging.result_recovery_secs` defaults to 86400 seconds (24 hours) and must be
+at least the registered idempotency TTL. A node with a longer TTL requires an
+explicitly longer result recovery setting; otherwise startup refuses.
+
+Effect retry and result recovery are separate lifetimes anchored at acceptance.
+Configuration shrink can shorten persisted deadlines; later increases, duplicate
+requests and status reads cannot reopen them. Clock rollback conservatively closes
+effect retries. Expiry never cancels an original operation already accepted upstream.
+
+Retirement runs on demand during messaging and recovery, without a new daemon.
+It shares the operation lease with publishers, so an in-flight publisher cannot
+lose its reservation before recording its receipt or uncertainty. One SQLite
+transaction records the refusal witness and removes retired large request/receipt
+content. Crashes leave either the original record or the witness. An unavailable
+archive is an error, never permission to treat an old ID as new.
+
+The permanent witness is keyed by authenticated owner and raw `request_id`, across
+send, reply and gist operations. Reusing an ID for a different operation is not a
+new request. Migration preserves both already-recorded outcomes when a legacy
+send and reply shared an ID, while fencing further effects under that ID.
+
+After result recovery expires, retry and status return `state: "expired"` with
+`not_reexecuted: true` and an explicit reconciliation requirement. This describes
+the retry: it does not mean the original operation failed or was cancelled. No
+new upstream call occurs. The gateway never silently substitutes a new ID.
+
+The broker keeps the accepted proposal and its send receipt/correlation linkage
+through the result recovery window, independently of the shorter retry window.
+Result reads still require current authority and an attested, owned correlated
+reply. A bus receipt does not prove GitHub processing. Once content is retired,
+an old ID stays refusable even though its original result is unavailable.
+
+`max_reservations` and `max_retained_bytes` bound the active working set, not the
+lifetime number of accepted IDs. Retired large content no longer consumes those
+quotas. The exact permanent ID archive grows with historical requests: total
+metadata storage is unbounded over an unlimited lifetime. SQLite pages, indexes
+and WAL overhead also remain outside the framed-content byte limit. Archive
+capacity failures fail closed; deleting its witnesses is not a safe cleanup.

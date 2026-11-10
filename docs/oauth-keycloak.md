@@ -298,7 +298,7 @@ and `events`):
 ```
 
 When enabling [messaging](serving.md#optional-messaging-profile) and
-[Events](events.md), run `migrate-custody`, `migrate-outbound`, and
+[Events](events.md), run `migrate-custody`, `migrate-outbound`, `migrate-retirement`, and
 `migrate-events --key-file .state/events.key` before `enroll`, add the
 `messaging` section ([serving.md](serving.md#optional-messaging-profile)), and
 merge this `events` section into `.state/serving.json` (with

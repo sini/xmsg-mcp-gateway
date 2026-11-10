@@ -35,7 +35,7 @@ is invalid. No request can supply messaging configuration or choose a mailbox.
 
 `messaging` denies unknown fields. Every manifest value that must agree with the
 node is required: reply TTL, idempotency TTL, service queue capacity, gateway dedup
-lifetime and complete framed bound. The other fields in the table are also required.
+lifetime and complete framed bound. The other fields in the table are also required, except `result_recovery_secs`.
 Gateway-local connection tunables retain their existing documented defaults:
 `xmsg.max_frame_bytes` is 1,048,576 bytes and `xmsg.operation_timeout_ms` is 10,000 ms.
 These are transport limits, distinct from the required node-bound manifest values.
@@ -46,15 +46,16 @@ These are transport limits, distinct from the required node-bound manifest value
 | `manifest.reply_ttl_secs` | Declared effective reply TTL |
 | `manifest.idempotency_ttl_secs` | Declared effective upstream deduplication TTL |
 | `manifest.svc_queue_cap` | Declared effective service queue capacity |
-| `manifest.dedup_lifetime_secs` | Positive gateway retry lifetime, at most the effective upstream deduplication TTL |
+| `manifest.dedup_lifetime_secs` | Compatibility value; positive and at most the upstream TTL. New retries use the registered idempotency TTL |
 | `manifest.max_framed_bytes` | Complete framed message including the gateway preamble, in bytes |
 | `submission_timeout_ms` | Positive dispatcher deadline, at most 25 seconds |
-| `max_reservations` | Positive retained outbound-operation limit |
+| `result_recovery_secs` | Result recovery lifetime, default 86400 seconds; at least the registered idempotency TTL |
+| `max_reservations` | Positive active outbound-operation limit |
 | `max_retained_bytes` | Positive outbound-ledger byte limit |
 
 The service name uses xmsg's shared validator. The retained registration supplies
 the actual mailbox, node and effective TTL/capacity values; config supplies no bus
-address. Explicit custody and outbound migrations are required before messaging.
+address. Explicit custody, outbound and retirement migrations are required before messaging.
 Only the owner CLI/store changes per-grant policy. Empty send/reply policy
 advertises no send/reply tools and refuses those calls. An enabled grant with
 a registered mailbox still exposes its scoped recovery reads.

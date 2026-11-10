@@ -45,6 +45,7 @@ install -d -m 700 .state
 cargo run --locked -- --state .state/grants.db init
 cargo run --locked -- --state .state/grants.db migrate-custody
 cargo run --locked -- --state .state/grants.db migrate-outbound
+cargo run --locked -- --state .state/grants.db migrate-retirement
 cargo run --locked -- --state .state/grants.db enroll grant-id binding.json
 cargo run --locked -- --state .state/grants.db enable grant-id 1
 cargo run --locked -- --state .state/grants.db disable grant-id 2
