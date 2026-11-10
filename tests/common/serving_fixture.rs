@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::Write;
-use std::net::{Ipv4Addr, TcpListener};
+use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -32,7 +32,9 @@ pub struct Fixture {
     pub requests: Arc<AtomicUsize>,
     pub response_status: Arc<AtomicUsize>,
     pub provider_timing: Arc<Mutex<Vec<(String, u128)>>>,
+    pub provider_phase: Arc<Mutex<&'static str>>,
     stopped: Arc<AtomicBool>,
+    active: Arc<Mutex<Option<TcpStream>>>,
     worker: Option<thread::JoinHandle<()>>,
 }
 
@@ -89,9 +91,21 @@ impl Fixture {
         let worker_tokens = tokens.clone();
         let worker_requests = requests.clone();
         let worker_stopped = stopped.clone();
+        let active = Arc::new(Mutex::new(None::<TcpStream>));
+        let worker_active = active.clone();
         let provider_timing = Arc::new(Mutex::new(Vec::new()));
         let timing = provider_timing.clone();
+        let provider_phase = Arc::new(Mutex::new("starting"));
+        let phase = provider_phase.clone();
         let worker = thread::spawn(move || {
+            struct Exit(Arc<Mutex<&'static str>>);
+            impl Drop for Exit {
+                fn drop(&mut self) {
+                    *self.0.lock().unwrap_or_else(|error| error.into_inner()) = "exited";
+                }
+            }
+            let _exit = Exit(phase.clone());
+            *phase.lock().unwrap() = "accept";
             timing
                 .lock()
                 .unwrap()
@@ -99,17 +113,29 @@ impl Fixture {
             while !worker_stopped.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((socket, _)) => {
+                        {
+                            let mut active = worker_active.lock().unwrap();
+                            if worker_stopped.load(Ordering::SeqCst) {
+                                let _ = socket.shutdown(Shutdown::Both);
+                                break;
+                            }
+                            *active = Some(socket.try_clone().unwrap());
+                        }
                         timing
                             .lock()
                             .unwrap()
                             .push(("accepted".into(), started.elapsed().as_micros()));
                         let Some((mut stream, request)) =
-                            provider::read_request(socket, tls.clone(), true)
+                            provider::read_request_with_phase(socket, tls.clone(), true, |stage| {
+                                *phase.lock().unwrap() = stage;
+                            })
                         else {
                             timing
                                 .lock()
                                 .unwrap()
                                 .push(("idle-closed".into(), started.elapsed().as_micros()));
+                            worker_active.lock().unwrap().take();
+                            *phase.lock().unwrap() = "accept";
                             continue;
                         };
                         timing
@@ -130,12 +156,21 @@ impl Fixture {
                             .cloned()
                             .unwrap_or(json!({"active":false}))
                             .to_string();
-                        write!(stream, "HTTP/1.1 {} fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{claims}", worker_status.load(Ordering::SeqCst), claims.len()).unwrap();
-                        stream.flush().unwrap();
-                        timing
-                            .lock()
-                            .unwrap()
-                            .push(("response-written".into(), started.elapsed().as_micros()));
+                        *phase.lock().unwrap() = "response-write-or-flush";
+                        let response=format!("HTTP/1.1 {} fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{claims}", worker_status.load(Ordering::SeqCst), claims.len());
+                        let written =
+                            provider::write_complete_response(&mut stream, response.as_bytes());
+                        worker_active.lock().unwrap().take();
+                        *phase.lock().unwrap() = "accept";
+                        timing.lock().unwrap().push((
+                            if written {
+                                "response-written"
+                            } else {
+                                "response-cancelled"
+                            }
+                            .into(),
+                            started.elapsed().as_micros(),
+                        ));
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(2))
@@ -167,14 +202,22 @@ impl Fixture {
             requests,
             response_status,
             provider_timing,
+            provider_phase,
             stopped,
+            active,
             worker: Some(worker),
         }
     }
-    pub fn stop_provider(&mut self) {
+    fn request_stop(&self) {
         self.stopped.store(true, Ordering::SeqCst);
+        if let Some(socket) = self.active.lock().unwrap().take() {
+            let _ = socket.shutdown(Shutdown::Both);
+        }
+    }
+    pub fn stop_provider(&mut self) {
+        self.request_stop();
         if let Some(worker) = self.worker.take() {
-            join_provider(worker);
+            join_provider(worker, &self.provider_phase);
         }
     }
     pub async fn serving(&self) -> Serving {
@@ -187,19 +230,20 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        self.stopped.store(true, Ordering::SeqCst);
+        self.request_stop();
         if let Some(worker) = self.worker.take() {
-            join_provider(worker);
+            join_provider(worker, &self.provider_phase);
         }
     }
 }
 
-fn join_provider(worker: thread::JoinHandle<()>) {
+fn join_provider(worker: thread::JoinHandle<()>, phase: &Mutex<&'static str>) {
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     while !worker.is_finished() {
+        let current_phase = *phase.lock().unwrap();
         assert!(
             std::time::Instant::now() < deadline,
-            "serving provider fixture worker did not exit within 3 seconds"
+            "serving provider fixture worker did not exit within 3 seconds; phase={current_phase}"
         );
         thread::sleep(Duration::from_millis(10));
     }

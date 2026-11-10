@@ -461,9 +461,11 @@ fn serve(
     let location = location
         .map(|value| format!("Location: {value}\r\n"))
         .unwrap_or_default();
-    let written = write!(tls, "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\n{location}Connection: close\r\nContent-Type: application/json\r\n\r\n{body}", body.len()).and_then(|_| tls.flush());
+    let response=format!("HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\n{location}Connection: close\r\nContent-Type: application/json\r\n\r\n{body}",body.len());
     if stall.is_zero() {
-        written.unwrap();
+        write_complete_response(&mut tls, response.as_bytes());
+    } else {
+        let _ = tls.write_all(response.as_bytes()).and_then(|_| tls.flush());
     }
 }
 
@@ -474,6 +476,15 @@ pub fn read_request(
     tls: Arc<rustls::ServerConfig>,
     strict_request: bool,
 ) -> Option<(TlsStream, String)> {
+    read_request_with_phase(socket, tls, strict_request, |_| {})
+}
+
+pub fn read_request_with_phase(
+    socket: TcpStream,
+    tls: Arc<rustls::ServerConfig>,
+    strict_request: bool,
+    phase: impl Fn(&'static str),
+) -> Option<(TlsStream, String)> {
     // Accepted sockets inherit the listener's nonblocking flag on macOS.
     socket.set_nonblocking(false).unwrap();
     socket
@@ -482,6 +493,7 @@ pub fn read_request(
     socket
         .set_write_timeout(Some(Duration::from_secs(2)))
         .unwrap();
+    phase("initial-peek");
     let mut first_byte = [0];
     match socket.peek(&mut first_byte) {
         Ok(0) => return None,
@@ -499,6 +511,7 @@ pub fn read_request(
     let mut tls = rustls::StreamOwned::new(rustls::ServerConnection::new(tls).unwrap(), socket);
     let mut reader = BufReader::new(&mut tls);
     let mut line = String::new();
+    phase("request-line");
     match reader.read_line(&mut line) {
         Ok(0) => return None,
         Err(error)
@@ -521,6 +534,7 @@ pub fn read_request(
     }
     let mut length = 0;
     let mut lookup_auth = false;
+    phase("headers");
     loop {
         line.clear();
         assert_ne!(
@@ -544,10 +558,28 @@ pub fn read_request(
         }
     }
     let mut request = vec![0; length];
+    phase("body");
     reader.read_exact(&mut request).unwrap();
     if strict_request {
         assert!(lookup_auth);
     }
     drop(reader);
+    phase("complete");
     Some((tls, String::from_utf8(request).unwrap()))
+}
+
+// Call only after read_request has validated a complete request.
+pub fn write_complete_response(stream: &mut impl Write, response: &[u8]) -> bool {
+    match stream.write_all(response).and_then(|_| stream.flush()) {
+        Ok(()) => true,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+            ) =>
+        {
+            false
+        }
+        Err(error) => panic!("provider fixture response failed: {error}"),
+    }
 }
