@@ -29,8 +29,8 @@ CASES = [
     (
         "floor-session-observation",
         "src/session.rs",
-        ".record_bus_link(bus, connected, &custody::Limits::default(), at)",
-        ".record_bus_link(bus, connected, &custody::Limits::default(), std::time::UNIX_EPOCH + Duration::from_secs(at.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()))",
+        ".record_bus_link(bus, connected, limits, at)",
+        ".record_bus_link(bus, connected, limits, std::time::UNIX_EPOCH + Duration::from_secs(at.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()))",
         "session::tests::production_bus_observations_preserve_fractional_retention",
         "remaining >= Duration::from_secs(lifetime)",
     ),
