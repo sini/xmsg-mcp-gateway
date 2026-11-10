@@ -22,6 +22,7 @@ use xmsg_mcp_gateway::{
 struct ListBus {
     tasks: Vec<tokio::task::JoinHandle<()>>,
     list_calls: Arc<AtomicUsize>,
+    list_delay: Arc<Mutex<std::time::Duration>>,
     last_list_frame: Arc<Mutex<Option<Value>>>,
     list_response: Arc<Mutex<Value>>,
 }
@@ -148,6 +149,8 @@ async fn setup_list_bus(policy: Policy) -> (fixture::Fixture, ListBus) {
         ]
     })));
     let response_source = list_response.clone();
+    let list_delay = Arc::new(Mutex::new(std::time::Duration::ZERO));
+    let delay_source = list_delay.clone();
 
     let agent_task = tokio::spawn(async move {
         loop {
@@ -159,6 +162,10 @@ async fn setup_list_bus(policy: Policy) -> (fixture::Fixture, ListBus) {
             let response = match frame["action"].as_str().unwrap() {
                 "list" => {
                     list_calls_counter.fetch_add(1, Ordering::SeqCst);
+                    let delay = *delay_source.lock().unwrap();
+                    if !delay.is_zero() {
+                        tokio::time::sleep(delay).await;
+                    }
                     *last_frame_sink.lock().unwrap() = Some(frame);
                     response_source.lock().unwrap().clone()
                 }
@@ -180,7 +187,7 @@ async fn setup_list_bus(policy: Policy) -> (fixture::Fixture, ListBus) {
             "daemon_uid": std::fs::metadata(directory).unwrap().uid(),
             "register_socket": register,
             "agent_socket": agent,
-            "operation_timeout_ms": 1000
+            "operation_timeout_ms": fixture::HAPPY_DISPATCH_TIMEOUT_MS
         },
         "manifest": {
             "reply_ttl_secs": 604800,
@@ -190,7 +197,7 @@ async fn setup_list_bus(policy: Policy) -> (fixture::Fixture, ListBus) {
             "max_framed_bytes": 65536
         },
         "result_recovery_secs": 604800,
-        "submission_timeout_ms": 1000,
+        "submission_timeout_ms": fixture::HAPPY_DISPATCH_TIMEOUT_MS,
         "max_reservations": 100,
         "max_retained_bytes": 1048576
     });
@@ -203,6 +210,7 @@ async fn setup_list_bus(policy: Policy) -> (fixture::Fixture, ListBus) {
         ListBus {
             tasks: vec![service_task, agent_task],
             list_calls,
+            list_delay,
             last_list_frame,
             list_response,
         },
@@ -241,6 +249,7 @@ async fn xmsg_list_returns_only_permitted_send_targets_with_live_status_and_neve
         json!({"type": "integer", "minimum": 1, "maximum": 604800})
     );
 
+    *bus.list_delay.lock().unwrap() = std::time::Duration::from_millis(1500);
     let (status, value, _) = fixture::request(
         &serving,
         "good-token",
@@ -248,6 +257,11 @@ async fn xmsg_list_returns_only_permitted_send_targets_with_live_status_and_neve
     )
     .await;
     assert_eq!(status, axum::http::StatusCode::OK, "{value}");
+    *bus.list_delay.lock().unwrap() = std::time::Duration::ZERO;
+    assert!(
+        value.get("error").is_none(),
+        "delayed read-only list lookup failed: {value}"
+    );
     assert_eq!(bus.list_calls.load(Ordering::SeqCst), 1);
     let structured = &value["result"]["structuredContent"];
     assert!(

@@ -19,6 +19,8 @@ use xmsg_mcp_gateway::serving::Serving;
 
 use super::provider;
 
+pub const HAPPY_DISPATCH_TIMEOUT_MS: u64 = 5000;
+
 pub struct Fixture {
     pub started: Instant,
     pub keys: provider::TlsFixture,

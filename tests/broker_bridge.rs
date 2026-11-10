@@ -188,7 +188,11 @@ async fn setup_with_list_delay(
     fixture.config["events"] =
         json!({"grant_id":"grant","key_file":keyfile,"dispatch_timeout_ms":13000});
     fixture.config["broker"] = json!({"destination":"genie@node"});
-    let dispatch_timeout_ms = if auto_reply { 5000 } else { 1000 };
+    let dispatch_timeout_ms = if auto_reply {
+        fixture::HAPPY_DISPATCH_TIMEOUT_MS
+    } else {
+        1000
+    };
     fixture.config["messaging"] = json!({"xmsg":{"service":"gateway","expected_node":"bus","daemon_uid":std::fs::metadata(directory).unwrap().uid(),"register_socket":register,"agent_socket":agent,"operation_timeout_ms":dispatch_timeout_ms},"manifest":{"reply_ttl_secs":604800,"idempotency_ttl_secs":604800,"svc_queue_cap":1000,"dedup_lifetime_secs":604800,"max_framed_bytes":65536},"result_recovery_secs":604800,"submission_timeout_ms":dispatch_timeout_ms,"max_reservations":100,"max_retained_bytes":1048576});
     fixture::private_file(
         &fixture.config_file,
@@ -203,6 +207,84 @@ async fn setup_with_list_delay(
         },
     )
 }
+type RpcResponse = (axum::http::StatusCode, Value, fixture::Probe);
+const FIRST_CALL_ATTEMPTS: usize = 3;
+const FIRST_CALL_WALL_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
+async fn confirmed_first_call(serving: &Serving, bus: &Bus, request: Value) -> RpcResponse {
+    let started = std::time::Instant::now();
+    let first = tokio::time::timeout(
+        FIRST_CALL_WALL_BUDGET,
+        fixture::request(serving, "good-token", request.clone()),
+    )
+    .await
+    .expect("broker first-call confirmation wall budget exhausted");
+    confirm_same_request(serving, bus, request, first, started).await
+}
+
+async fn confirm_same_request(
+    serving: &Serving,
+    bus: &Bus,
+    request: Value,
+    mut response: RpcResponse,
+    started: std::time::Instant,
+) -> RpcResponse {
+    let original_id = request["params"]["arguments"]["request_id"].clone();
+    for attempt in 0..FIRST_CALL_ATTEMPTS {
+        assert!(
+            started.elapsed() < FIRST_CALL_WALL_BUDGET,
+            "broker first-call confirmation wall budget exhausted"
+        );
+        let (status, value, _) = &response;
+        assert_eq!(
+            *status,
+            axum::http::StatusCode::OK,
+            "broker first-call transport refusal: {value}"
+        );
+        assert_eq!(
+            value["id"], request["id"],
+            "broker first-call response id changed"
+        );
+        assert!(
+            value.get("error").is_none(),
+            "broker first-call RPC failure: {value}"
+        );
+        let result = &value["result"]["structuredContent"];
+        if result["broker"]["state"] == "confirmed" {
+            assert_eq!(
+                bus.sends.load(Ordering::SeqCst),
+                1,
+                "first-call recovery must publish exactly one bus send"
+            );
+            assert_eq!(
+                result["request_id"], original_id,
+                "broker first-call request_id changed"
+            );
+            return response;
+        }
+        assert_eq!(
+            result["request_id"], original_id,
+            "broker first-call request_id changed"
+        );
+        assert!(
+            matches!(result["state"].as_str(), Some("pending" | "unknown")),
+            "broker first-call unexpected state: {value}"
+        );
+        assert!(
+            attempt + 1 < FIRST_CALL_ATTEMPTS,
+            "broker first-call confirmation attempts exhausted: {value}"
+        );
+        let remaining = FIRST_CALL_WALL_BUDGET
+            .checked_sub(started.elapsed())
+            .expect("broker first-call confirmation wall budget exhausted");
+        let retry = request.clone();
+        response = tokio::time::timeout(remaining, fixture::request(serving, "good-token", retry))
+            .await
+            .expect("broker first-call confirmation wall budget exhausted");
+    }
+    unreachable!("fixed attempt loop returns or fails")
+}
+
 fn rpc(method: &str, params: Value) -> Value {
     json!({"jsonrpc":"2.0","id":"broker-rpc","method":method,"params":params})
 }
@@ -216,7 +298,7 @@ async fn authenticated_mcp_gist_uses_existing_send_and_full_correlated_status() 
         "tools/call",
         json!({"name":"gist_read","arguments":{"request_id":"read-1","id":"abc"}}),
     );
-    let (status, value, _) = fixture::request(&serving, "good-token", request.clone()).await;
+    let (status, value, _) = confirmed_first_call(&serving, &bus, request.clone()).await;
     assert_eq!(status, axum::http::StatusCode::OK, "{value}");
     assert_eq!(value["id"], "broker-rpc");
     assert_eq!(
@@ -460,9 +542,9 @@ async fn broker_status_rechecks_send_ceiling_at_the_final_result_read() {
     let serving = Serving::from_owner_file(&fixture.config_file)
         .await
         .unwrap();
-    let (_, initial, _) = fixture::request(
+    let (_, initial, _) = confirmed_first_call(
         &serving,
-        "good-token",
+        &bus,
         rpc(
             "tools/call",
             json!({"name":"gist_read","arguments":{"request_id":"status-race","id":"abc"}}),
@@ -546,7 +628,7 @@ async fn broker_result_survives_effect_expiry_until_result_retirement() {
         "tools/call",
         json!({"name":"gist_read","arguments":{"request_id":"separate-windows","id":"abc"}}),
     );
-    let (_, value, _) = fixture::request(&serving, "good-token", request.clone()).await;
+    let (_, value, _) = confirmed_first_call(&serving, &bus, request.clone()).await;
     assert_eq!(
         value["result"]["structuredContent"]["broker"]["state"], "confirmed",
         "{value}"
@@ -616,7 +698,7 @@ async fn broker_fixture_covers_pre_send_shared_runner_delay() {
         .await
         .unwrap();
     let started = std::time::Instant::now();
-    let (status, value, probe) = fixture::request(&serving, "good-token", rpc("tools/call",json!({"name":"gist","arguments":{"request_id":"delayed-list","title":"fixture","body":"","files":{"example":"body"}}}))).await;
+    let (status, value, probe) = confirmed_first_call(&serving, &bus, rpc("tools/call",json!({"name":"gist","arguments":{"request_id":"delayed-list","title":"fixture","body":"","files":{"example":"body"}}}))).await;
     eprintln!(
         "delayed-list-control: elapsed_us={} response={:?}",
         started.elapsed().as_micros(),
@@ -673,7 +755,7 @@ async fn retired_gist_write_request_id_never_reexecutes() {
         }}),
     );
     let request_started_us = started.elapsed().as_micros();
-    let (status, value, probe) = fixture::request(&serving, "good-token", request.clone()).await;
+    let (status, value, probe) = confirmed_first_call(&serving, &bus, request.clone()).await;
     let (_, raw_body, request_elapsed_us) = probe.response.lock().unwrap().clone().unwrap();
     eprintln!(
         "retirement-request-diagnostics {}",
@@ -716,7 +798,7 @@ async fn expired_broker_uncertainty_requires_reconciliation_without_retry_advice
             "request_id":"expired-broker-unknown","id":"abc"
         }}),
     );
-    let (_, value, _) = fixture::request(&serving, "good-token", request.clone()).await;
+    let (_, value, _) = confirmed_first_call(&serving, &bus, request.clone()).await;
     assert_eq!(
         value["result"]["structuredContent"]["broker"]["state"], "confirmed",
         "{value}"
@@ -1086,5 +1168,98 @@ async fn authorized_ack_deadline_has_body_without_claiming_rollback() {
             "owned ACK did not commit after response deadline"
         );
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
+#[tokio::test]
+async fn first_call_recovery_retries_identical_requests_after_pending() {
+    use axum::body::{to_bytes, Body};
+    use axum::http::Request;
+    use tower::ServiceExt;
+    use tracing::instrument::WithSubscriber;
+    for mode in ["provider", "late"] {
+        let (fixture, bus) = setup_mode(mode == "provider").await;
+        let serving = Serving::from_owner_file(&fixture.config_file)
+            .await
+            .unwrap();
+        let request = rpc(
+            "tools/call",
+            json!({"name":"gist_read","arguments":{"request_id":format!("helper-{mode}"),"id":"abc"}}),
+        );
+        let started = std::time::Instant::now();
+        let first = if mode == "provider" {
+            let status = fixture.response_status.clone();
+            let reached = Arc::new(AtomicUsize::new(0));
+            let count = reached.clone();
+            let barrier = outbound_observer::AtEvent {
+                target: "gateway_broker_submission_confirmed",
+                action: move || {
+                    assert_eq!(count.fetch_add(1, Ordering::SeqCst), 0);
+                    status.store(503, Ordering::SeqCst);
+                },
+            };
+            let wire = Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header("host", "gateway.example")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer good-token")
+                .body(Body::from(request.to_string()))
+                .unwrap();
+            let response = serving
+                .router()
+                .oneshot(wire)
+                .with_subscriber(barrier)
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 100_000).await.unwrap();
+            assert_eq!(
+                reached.load(Ordering::SeqCst),
+                1,
+                "post-confirmation provider fault was not reached"
+            );
+            (
+                status,
+                serde_json::from_slice(&bytes).unwrap(),
+                fixture::Probe::default(),
+            )
+        } else {
+            fixture::request(&serving, "good-token", request.clone()).await
+        };
+        assert_eq!(first.0, axum::http::StatusCode::OK);
+        assert_eq!(
+            first.1["result"]["structuredContent"]["state"], "pending",
+            "{mode}: {}",
+            first.1
+        );
+        assert_eq!(bus.sends.load(Ordering::SeqCst), 1);
+        fixture.response_status.store(200, Ordering::SeqCst);
+        if mode == "late" {
+            let stored: i64 = rusqlite::Connection::open(&fixture.store_file)
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM custody_items WHERE in_reply_to='request-wire'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(stored, 0, "late control already had a durable result");
+            let body =
+                json!({"thread":"bridge","acted":false,"reason":"late control","redactions":[]})
+                    .to_string();
+            bus.pending.lock().unwrap().push_back(json!({"action":"deliver","messageId":"helper-late-result","fromName":"untrusted label","text":body,"envelope":"peer data","origin":{"id":null,"service":"genie","node":"node"},"inReplyTo":"request-wire"}));
+        }
+        let (_, confirmed, _) = confirm_same_request(&serving, &bus, request, first, started).await;
+        assert_eq!(
+            confirmed["result"]["structuredContent"]["broker"]["state"],
+            "confirmed"
+        );
+        assert_eq!(
+            bus.sends.load(Ordering::SeqCst),
+            1,
+            "pending retry published again"
+        );
+        eprintln!("broker-first-call-recovery-control:{mode}:confirmed:one-send");
     }
 }
