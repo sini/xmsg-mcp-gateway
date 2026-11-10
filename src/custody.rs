@@ -14,7 +14,8 @@ pub struct Scope {
     pub grant_id: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Limits {
     pub max_items: i64,
     pub max_bytes: i64,
@@ -513,6 +514,9 @@ impl Store {
             "INSERT INTO custody_outbox (event_id,state) VALUES (?1,'held')",
             [&event_id],
         )?;
+        if version >= crate::grants::EVENTS_SCHEMA_VERSION {
+            crate::event_store::record_acceptance(&tx, &event_id, &scope.grant_id, revision)?;
+        }
         tracing::debug!(target: "gateway_custody_before_commit", "accept");
         tx.commit()?;
         tracing::debug!(target: "gateway_custody_after_commit", "accept");

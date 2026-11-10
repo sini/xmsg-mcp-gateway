@@ -620,3 +620,101 @@ async fn reads_are_advertised_only_with_a_registered_mailbox() {
         "read responses changed their JSON-RPC request IDs"
     );
 }
+
+#[tokio::test]
+async fn events_first_enable_release_is_readable_without_read_side_effects() {
+    let mailbox = Mailbox::new().await;
+    let db = mailbox.db();
+    db.execute("DELETE FROM grants WHERE id='grant'", [])
+        .unwrap();
+    let key_file = mailbox.provider.keys._directory.path().join("events-key");
+    private_file(&key_file, &[9u8; 32]);
+    let key = xmsg_mcp_gateway::event_store::EventKey::load(&key_file).unwrap();
+    let mut store = Store::open(&mailbox.provider.store_file).unwrap();
+    store.migrate_events(&key).unwrap();
+    store.enroll("grant", &mailbox.provider.binding).unwrap();
+    mailbox
+        .accept(
+            "gateway",
+            "never-enabled",
+            "retained before first enable",
+            SystemTime::now(),
+        )
+        .await;
+    assert_eq!(store.set_enabled("grant", 1, true).unwrap(), 2);
+    let serving = mailbox.serving().await;
+    let before: i64 = db
+        .query_row("SELECT COUNT(*) FROM event_release_audit", [], |r| r.get(0))
+        .unwrap();
+    for _ in 0..2 {
+        let result = tool(
+            &serving,
+            "xmsg_read_message",
+            json!({"message_id":"never-enabled"}),
+        )
+        .await;
+        assert_eq!(result["state"], "found");
+        assert_eq!(result["text"], "retained before first enable");
+    }
+    assert_eq!(
+        db.query_row("SELECT grant_revision FROM custody_items", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM event_release_audit", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        before
+    );
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM event_observations", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(store.set_enabled("grant", 2, false).unwrap(), 3);
+    assert_eq!(store.set_enabled("grant", 3, true).unwrap(), 4);
+    not_found(&serving, "never-enabled").await;
+}
+
+#[tokio::test]
+async fn events_migration_does_not_infer_legacy_authority_from_matching_revision() {
+    let mailbox = Mailbox::new().await;
+    mailbox
+        .accept(
+            "gateway",
+            "legacy-current",
+            "legacy body",
+            SystemTime::now(),
+        )
+        .await;
+    let key_file = mailbox.provider.keys._directory.path().join("events-key");
+    private_file(&key_file, &[10u8; 32]);
+    let key = xmsg_mcp_gateway::event_store::EventKey::load(&key_file).unwrap();
+    let mut store = Store::open(&mailbox.provider.store_file).unwrap();
+    store.migrate_events(&key).unwrap();
+    mailbox
+        .accept(
+            "gateway",
+            "new-current",
+            "current authority",
+            SystemTime::now(),
+        )
+        .await;
+    let serving = mailbox.serving().await;
+    not_found(&serving, "legacy-current").await;
+    assert_eq!(
+        tool(
+            &serving,
+            "xmsg_read_message",
+            json!({"message_id":"new-current"})
+        )
+        .await["state"],
+        "found"
+    );
+    let inbox = tool(&serving, "xmsg_inbox", json!({})).await;
+    assert_eq!(inbox["items"].as_array().unwrap().len(), 1);
+    assert_eq!(inbox["items"][0]["message_id"], "new-current");
+}

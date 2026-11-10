@@ -12,7 +12,8 @@ const APPLICATION_ID: i64 = 0x584d4757;
 const SCHEMA_VERSION: i64 = 1;
 pub const CUSTODY_SCHEMA_VERSION: i64 = 2;
 pub const OUTBOUND_SCHEMA_VERSION: i64 = 3;
-pub const MAX_SUPPORTED_SCHEMA_VERSION: i64 = 3;
+pub const EVENTS_SCHEMA_VERSION: i64 = 4;
+pub const MAX_SUPPORTED_SCHEMA_VERSION: i64 = EVENTS_SCHEMA_VERSION;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -126,6 +127,9 @@ impl Store {
         if version >= OUTBOUND_SCHEMA_VERSION {
             crate::outbound::validate_schema(&connection)?;
         }
+        if version >= EVENTS_SCHEMA_VERSION {
+            crate::event_store::validate_schema(&connection)?;
+        }
         Ok(Self {
             connection,
             file: file.canonicalize()?,
@@ -153,11 +157,20 @@ impl Store {
         {
             return Err(Error::InvalidBinding);
         }
-        self.connection.execute(
+        let tx = self.connection.transaction()?;
+        tx.execute(
             "INSERT INTO grants (id, service, issuer, resource, subject, hosted_client, revision, enabled)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, 0)",
             params![id, binding.service, binding.issuer, binding.resource, binding.subject, binding.hosted_client],
         )?;
+        let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version >= EVENTS_SCHEMA_VERSION {
+            tx.execute(
+                "INSERT INTO grants_event_history(grant_id,ever_enabled) VALUES (?1,0)",
+                [id],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -188,6 +201,10 @@ impl Store {
         let next = tx.query_row("SELECT revision FROM grants WHERE id = ?1", [id], |r| {
             r.get(0)
         })?;
+        let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version >= EVENTS_SCHEMA_VERSION {
+            crate::event_store::enabled_transition(&tx, id, next, enabled)?;
+        }
         tx.commit()?;
         Ok(next)
     }

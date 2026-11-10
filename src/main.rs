@@ -23,6 +23,10 @@ enum Command {
     Init,
     MigrateCustody,
     MigrateOutbound,
+    MigrateEvents {
+        #[arg(long)]
+        key_file: PathBuf,
+    },
     SetOutboundPolicy {
         id: String,
         revision: i64,
@@ -54,6 +58,8 @@ enum CommandError {
     Serve(#[source] std::io::Error),
     #[error(transparent)]
     Grant(#[from] GrantError),
+    #[error(transparent)]
+    Events(#[from] xmsg_mcp_gateway::event_store::Error),
     #[error(transparent)]
     Custody(#[from] xmsg_mcp_gateway::custody::Error),
     #[error(transparent)]
@@ -87,6 +93,11 @@ async fn run(cli: Cli) -> Result<(), CommandError> {
         (Some(state), Command::MigrateCustody) => {
             Store::open(&state)?.migrate_custody()?;
             println!("custody schema migrated; worker startup remains unavailable");
+        }
+        (Some(state), Command::MigrateEvents { key_file }) => {
+            let key = xmsg_mcp_gateway::event_store::EventKey::load(&key_file)?;
+            Store::open(&state)?.migrate_events(&key)?;
+            println!("Events schema migrated");
         }
         (Some(state), Command::MigrateOutbound) => {
             Store::open(&state)?.migrate_outbound()?;

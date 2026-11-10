@@ -89,6 +89,14 @@ pub(crate) fn dispatch(
         identity,
         authority: store.authorize(identity)?,
     };
+    let version: i64 = store
+        .connection
+        .pragma_query_value(None, "user_version", |r| r.get(0))?;
+    let owned = if version >= crate::grants::EVENTS_SCHEMA_VERSION {
+        OWNED.replace("c.grant_revision=:revision", "EXISTS(SELECT 1 FROM event_authorizations ea WHERE ea.event_id=c.event_id AND ea.dispatch_revision=:revision)")
+    } else {
+        OWNED.to_owned()
+    };
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| Error::Arguments)?
@@ -111,7 +119,7 @@ pub(crate) fn dispatch(
                 return Err(Error::Arguments);
             }
             let sql = format!("SELECT c.upstream_id,c.mailbox,c.origin,c.in_reply_to,c.received_at,c.text
-                FROM custody_items c JOIN grants g ON g.id=c.grant_id WHERE {OWNED} AND c.upstream_id=:id");
+                FROM custody_items c JOIN grants g ON g.id=c.grant_id WHERE {owned} AND c.upstream_id=:id");
             let mut query = store.connection.prepare(&sql)?;
             query.raw_bind_parameter(query.parameter_index(":id")?.unwrap(), &args.message_id)?;
             for (name, value) in parameters {
@@ -149,7 +157,7 @@ pub(crate) fn dispatch(
                 }
                 let sql = format!(
                     "SELECT c.rowid FROM custody_items c JOIN grants g ON g.id=c.grant_id
-                    WHERE {OWNED} AND c.event_id=:anchor"
+                    WHERE {owned} AND c.event_id=:anchor"
                 );
                 let mut query = store.connection.prepare(&sql)?;
                 query.raw_bind_parameter(query.parameter_index(":anchor")?.unwrap(), event_id)?;
@@ -164,7 +172,7 @@ pub(crate) fn dispatch(
                     .ok_or(Error::Arguments)?;
             }
             let sql = format!("SELECT c.upstream_id,c.mailbox,c.origin,c.in_reply_to,c.received_at,c.text,c.event_id
-                FROM custody_items c JOIN grants g ON g.id=c.grant_id WHERE {OWNED} AND c.rowid>:after
+                FROM custody_items c JOIN grants g ON g.id=c.grant_id WHERE {owned} AND c.rowid>:after
                 ORDER BY c.rowid LIMIT :limit");
             let mut query = store.connection.prepare(&sql)?;
             query.raw_bind_parameter(query.parameter_index(":after")?.unwrap(), after)?;

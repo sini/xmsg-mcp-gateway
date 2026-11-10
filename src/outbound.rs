@@ -183,6 +183,10 @@ impl Store {
             return Err(GrantError::NoChange.into());
         }
         tx.execute("INSERT INTO outbound_policy VALUES (?1,?2) ON CONFLICT(grant_id) DO UPDATE SET document=excluded.document", params![id, document])?;
+        let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version >= crate::grants::EVENTS_SCHEMA_VERSION {
+            crate::event_store::revision_changed(&tx, id)?;
+        }
         tx.commit()?;
         Ok(revision + 1)
     }
@@ -387,7 +391,15 @@ impl Store {
         if let Some(reservation) = existing {
             return Ok(reservation.target.clone());
         }
-        let origin: Option<String> = self.connection.query_row("SELECT c.origin FROM custody_items c JOIN grants g ON g.id=c.grant_id WHERE c.bus=?1 AND c.upstream_id=?2 AND c.mailbox=?3 AND c.owner=?4 AND g.service=?5 AND g.issuer=?6 AND g.resource=?7 AND c.grant_id=?8 AND c.grant_revision=?9 AND c.text IS NOT NULL AND c.expires_at>?10", params![bus, message_id, sender, identity.subject(), identity.service(), identity.issuer(), identity.resource(), authority.grant_id, authority.revision, now()], |r|r.get(0)).optional()?;
+        let version: i64 = self
+            .connection
+            .pragma_query_value(None, "user_version", |r| r.get(0))?;
+        let authority_predicate = if version >= crate::grants::EVENTS_SCHEMA_VERSION {
+            "EXISTS(SELECT 1 FROM event_authorizations ea WHERE ea.event_id=c.event_id AND ea.dispatch_revision=?9)"
+        } else {
+            "c.grant_revision=?9"
+        };
+        let origin: Option<String> = self.connection.query_row(&format!("SELECT c.origin FROM custody_items c JOIN grants g ON g.id=c.grant_id WHERE c.bus=?1 AND c.upstream_id=?2 AND c.mailbox=?3 AND c.owner=?4 AND g.service=?5 AND g.issuer=?6 AND g.resource=?7 AND c.grant_id=?8 AND {authority_predicate} AND c.text IS NOT NULL AND c.expires_at>?10"), params![bus, message_id, sender, identity.subject(), identity.service(), identity.issuer(), identity.resource(), authority.grant_id, authority.revision, now()], |r|r.get(0)).optional()?;
         let origin: xmsg::client::Origin = serde_json::from_str(&origin.ok_or(Error::Denied)?)?;
         let name = origin.service.ok_or(Error::Denied)?;
         if origin.id.is_some() {
@@ -850,5 +862,90 @@ mod reservation_time_tests {
         reservation.created_at = i64::MAX - 1;
         reservation.retry_until = i64::MAX;
         assert_eq!(reservation.retry_deadline(&limits), i64::MAX);
+    }
+}
+
+#[cfg(test)]
+mod events_reply_tests {
+    use super::*;
+    use crate::event_store::EventKey;
+    use crate::grants::Binding;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn first_release_reply_requires_owned_current_dispatch_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("store");
+        let key_file = dir.path().join("key");
+        std::fs::write(&key_file, [11u8; 32]).unwrap();
+        std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let key = EventKey::load(&key_file).unwrap();
+        let mut store = Store::initialize(&file).unwrap();
+        store.migrate_custody().unwrap();
+        store.migrate_outbound().unwrap();
+        store.migrate_events(&key).unwrap();
+        let binding = Binding {
+            service: "gateway".into(),
+            issuer: "https://issuer.example/".into(),
+            resource: "https://gateway.example/mcp".into(),
+            subject: "owner".into(),
+            hosted_client: "hosted-client".into(),
+        };
+        store.enroll("grant", &binding).unwrap();
+        store.connection.execute(r#"INSERT INTO custody_items(bus,upstream_id,event_id,grant_id,grant_revision,mailbox,owner,origin,text,envelope,fingerprint,received_at,expires_at,held) VALUES ('bus','first','first','grant',1,'gateway@bus','owner','{"id":null,"service":"source","node":"source-node"}','body','envelope','first',1,9999999999,1)"#,[]).unwrap();
+        let tx = store.connection.transaction().unwrap();
+        tx.execute(
+            "INSERT INTO custody_outbox(event_id,state) VALUES ('first','held')",
+            [],
+        )
+        .unwrap();
+        crate::event_store::record_acceptance(&tx, "first", "grant", 1).unwrap();
+        tx.commit().unwrap();
+        store.set_enabled("grant", 1, true).unwrap();
+        let identity = crate::provider_fixture::verified(&binding);
+        let authority = store.authorize(&identity).unwrap();
+        assert_eq!(
+            store
+                .reply_target("bus", "first", "gateway@bus", &identity, &authority, None)
+                .unwrap(),
+            "source@source-node"
+        );
+        assert!(matches!(
+            store.reply_target("bus", "first", "foreign@bus", &identity, &authority, None),
+            Err(Error::Denied)
+        ));
+        let mut foreign = binding.clone();
+        foreign.subject = "foreign".into();
+        let foreign_identity = crate::provider_fixture::verified(&foreign);
+        assert!(matches!(
+            store.reply_target(
+                "bus",
+                "first",
+                "gateway@bus",
+                &foreign_identity,
+                &authority,
+                None
+            ),
+            Err(Error::Denied)
+        ));
+        store.set_enabled("grant", 2, false).unwrap();
+        store.set_enabled("grant", 3, true).unwrap();
+        let current = store.authorize(&identity).unwrap();
+        assert!(matches!(
+            store.reply_target("bus", "first", "gateway@bus", &identity, &current, None),
+            Err(Error::Denied)
+        ));
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT grant_revision FROM custody_items WHERE event_id='first'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1,
+            "reply eligibility rewrote acceptance snapshot"
+        );
     }
 }

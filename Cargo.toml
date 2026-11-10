@@ -9,13 +9,19 @@ license = "MIT"
 [dependencies]
 libc = "0.2"
 sha2 = "0.10"
+base64 = "0.22"
+standardwebhooks = "=1.0.1"
+chacha20poly1305 = "0.10"
+getrandom = "0.3"
+httpdate = "1"
+time = { version = "0.3", features = ["formatting"] }
 xmsg = { git = "https://github.com/sini/xmsg", rev = "7d9d1ed3f7c37c3433a95c65570892736fd914ab", default-features = false, features = ["client"] }
 clap = { version = "4.5", features = ["derive"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
 axum = "0.8"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "service"] }

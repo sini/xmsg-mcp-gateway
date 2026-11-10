@@ -12,3 +12,12 @@ pub mod custody;
 pub mod outbound;
 mod outbound_lease;
 pub use outbound_lease::OperationLease;
+
+pub mod event_store;
+
+#[cfg(test)]
+extern crate self as xmsg_mcp_gateway;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../tests/common/provider.rs"]
+mod provider_fixture;
