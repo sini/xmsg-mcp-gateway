@@ -431,6 +431,38 @@ CASES += [
 ]
 
 
+def schema_floor_control(root):
+    file = root / "src/grants.rs"
+    original = file.read_text()
+    site = "pub const MAX_SUPPORTED_SCHEMA_VERSION: i64 = EVENTS_SCHEMA_VERSION;"
+    assert original.count(site) == 1, "schema ceiling control needs updating"
+    try:
+        file.write_text(
+            original.replace(
+                site,
+                "pub const MAX_SUPPORTED_SCHEMA_VERSION: i64 = EVENTS_SCHEMA_VERSION + 1;",
+                1,
+            )
+        )
+        forward = run(
+            root,
+            "outbound_store",
+            "migration_is_explicit_and_policy_is_owner_revision_checked",
+            "src/grants.rs",
+        )
+        assert (
+            forward.returncode == 0
+            and "1 passed; 0 failed; 0 ignored" in forward.stdout
+        ), (
+            "outbound required schema followed the supported ceiling",
+            forward.stdout,
+            forward.stderr,
+        )
+    finally:
+        file.write_text(original)
+    print("outbound-schema-floor-control:passed", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", choices=[case[0] for case in CASES])
@@ -501,33 +533,7 @@ def main():
             "outbound mutant completion mismatch"
         )
         if not args.case:
-            file = root / "src/grants.rs"
-            original = file.read_text()
-            site = "pub const MAX_SUPPORTED_SCHEMA_VERSION: i64 = 3;"
-            assert original.count(site) == 1, "schema ceiling control needs updating"
-            try:
-                file.write_text(
-                    original.replace(
-                        site, "pub const MAX_SUPPORTED_SCHEMA_VERSION: i64 = 4;", 1
-                    )
-                )
-                forward = run(
-                    root,
-                    "outbound_store",
-                    "migration_is_explicit_and_policy_is_owner_revision_checked",
-                    "src/grants.rs",
-                )
-                assert (
-                    forward.returncode == 0
-                    and "1 passed; 0 failed; 0 ignored" in forward.stdout
-                ), (
-                    "outbound required schema followed the supported ceiling",
-                    forward.stdout,
-                    forward.stderr,
-                )
-            finally:
-                file.write_text(original)
-            print("outbound-schema-floor-control:passed", flush=True)
+            schema_floor_control(root)
     print(f"outbound-mutants-complete:{completed}", flush=True)
 
 
