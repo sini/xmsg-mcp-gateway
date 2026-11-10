@@ -8,8 +8,12 @@ from pathlib import Path
 from grant_mutants import ROOT, run
 
 SOURCE = (ROOT / "src/serving.rs").read_text()
-start = SOURCE.index("    let identity = match app.verifier.verify(&token).await {")
-end = SOURCE.index("\n    };", start) + len("\n    };")
+producer = "    let verification = async { app.verifier.verify(&token).await };"
+identity_match = "    let identity = match verified {"
+assert SOURCE.count(producer) == SOURCE.count(identity_match) == 1
+start = SOURCE.index(producer)
+identity_start = SOURCE.index(identity_match, start)
+end = SOURCE.index("\n    };", identity_start) + len("\n    };")
 verification = SOURCE[start:end]
 cached = (
     """    let identity = {
