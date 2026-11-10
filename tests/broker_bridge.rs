@@ -592,18 +592,47 @@ async fn broker_result_survives_effect_expiry_until_result_retirement() {
 }
 
 #[tokio::test]
-async fn retired_gist_write_request_id_never_reexecutes() {
+async fn retirement_http_diagnostics_preserve_non_json_failure() {
     let (fixture, bus) = setup().await;
     let serving = Serving::from_owner_file(&fixture.config_file)
         .await
         .unwrap();
+    let (status, value, probe) =
+        fixture::request(&serving, "foreign-token", rpc("tools/list", json!({}))).await;
+    assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+    assert_eq!(value, Value::Null);
+    let response = probe.response.lock().unwrap();
+    let (code, raw, elapsed) = response.as_ref().unwrap();
+    assert_eq!(*code, 401);
+    assert_eq!(raw, "");
+    assert!(*elapsed > 0);
+    let timing = fixture.provider_timing.lock().unwrap();
+    assert!(timing.iter().any(|(stage, _)| stage == "request-read"));
+    assert!(timing.iter().any(|(stage, _)| stage == "response-written"));
+    assert_eq!(bus.sends.load(Ordering::SeqCst), 0);
+    eprintln!("retirement-diagnostics-control: non-JSON HTTP {code}, raw={raw:?}, elapsed_us={elapsed}, provider_timing_us={timing:?}");
+}
+
+#[tokio::test]
+async fn retired_gist_write_request_id_never_reexecutes() {
+    let started = std::time::Instant::now();
+    let (fixture, bus) = setup().await;
+    let setup_us = started.elapsed().as_micros();
+    let serving = Serving::from_owner_file(&fixture.config_file)
+        .await
+        .unwrap();
+    let ready_us = started.elapsed().as_micros();
     let request = rpc(
         "tools/call",
         json!({"name":"gist","arguments":{
             "request_id":"retired-write","title":"fixture","body":"","files":{"example":"body"}
         }}),
     );
-    let (_, value, _) = fixture::request(&serving, "good-token", request.clone()).await;
+    let (status, value, probe) = fixture::request(&serving, "good-token", request.clone()).await;
+    eprintln!(
+        "retirement-request-diagnostics {}",
+        json!({"provider_origin_us":fixture.started.duration_since(started).as_micros(),"setup_us":setup_us,"broker_ready_us":ready_us,"request_finished_us":started.elapsed().as_micros(),"http_status":status.as_u16(),"raw_response":probe.response.lock().unwrap().clone(),"provider_timing_us":fixture.provider_timing.lock().unwrap().clone(),"provider_requests":fixture.requests.load(Ordering::SeqCst),"bus_sends":bus.sends.load(Ordering::SeqCst)})
+    );
     assert_eq!(
         value["result"]["structuredContent"]["broker"]["state"], "confirmed",
         "{value}"

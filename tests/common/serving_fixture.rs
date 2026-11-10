@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -20,6 +20,7 @@ use xmsg_mcp_gateway::serving::Serving;
 use super::provider;
 
 pub struct Fixture {
+    pub started: Instant,
     pub keys: provider::TlsFixture,
     pub binding: Binding,
     pub store_file: PathBuf,
@@ -27,6 +28,7 @@ pub struct Fixture {
     pub config: Value,
     pub tokens: Arc<Mutex<HashMap<String, Value>>>,
     pub requests: Arc<AtomicUsize>,
+    pub provider_timing: Arc<Mutex<Vec<(String, u128)>>>,
     stopped: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
 }
@@ -44,6 +46,7 @@ pub fn private_file(file: &Path, bytes: &[u8]) {
 
 impl Fixture {
     pub fn new() -> Self {
+        let started = Instant::now();
         // A registered default prevents Interest::never when a lone inactive probe hits a callsite.
         static TRACING: std::sync::Once = std::sync::Once::new();
         TRACING.call_once(|| {
@@ -81,15 +84,33 @@ impl Fixture {
         let worker_tokens = tokens.clone();
         let worker_requests = requests.clone();
         let worker_stopped = stopped.clone();
+        let provider_timing = Arc::new(Mutex::new(Vec::new()));
+        let timing = provider_timing.clone();
         let worker = thread::spawn(move || {
+            timing
+                .lock()
+                .unwrap()
+                .push(("ready".into(), started.elapsed().as_micros()));
             while !worker_stopped.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((socket, _)) => {
+                        timing
+                            .lock()
+                            .unwrap()
+                            .push(("accepted".into(), started.elapsed().as_micros()));
                         let Some((mut stream, request)) =
                             provider::read_request(socket, tls.clone(), true)
                         else {
+                            timing
+                                .lock()
+                                .unwrap()
+                                .push(("idle-closed".into(), started.elapsed().as_micros()));
                             continue;
                         };
+                        timing
+                            .lock()
+                            .unwrap()
+                            .push(("request-read".into(), started.elapsed().as_micros()));
                         worker_requests.fetch_add(1, Ordering::SeqCst);
                         let token = request
                             .strip_prefix("token=")
@@ -106,6 +127,10 @@ impl Fixture {
                             .to_string();
                         write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{claims}", claims.len()).unwrap();
                         stream.flush().unwrap();
+                        timing
+                            .lock()
+                            .unwrap()
+                            .push(("response-written".into(), started.elapsed().as_micros()));
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(2))
@@ -127,6 +152,7 @@ impl Fixture {
         });
         private_file(&config_file, &serde_json::to_vec(&config).unwrap());
         Self {
+            started,
             keys,
             binding,
             store_file,
@@ -134,6 +160,7 @@ impl Fixture {
             config,
             tokens,
             requests,
+            provider_timing,
             stopped,
             worker: Some(worker),
         }
@@ -177,6 +204,7 @@ fn join_provider(worker: thread::JoinHandle<()>) {
 
 #[derive(Clone, Default)]
 pub struct Probe {
+    pub response: Arc<Mutex<Option<(u16, String, u128)>>>,
     pub opens: Arc<AtomicUsize>,
     pub dispatches: Arc<AtomicUsize>,
     pub registrations: Arc<AtomicUsize>,
@@ -237,6 +265,7 @@ pub async fn request(serving: &Serving, token: &str, body: Value) -> (StatusCode
 
 pub async fn raw_request(serving: &Serving, request: Request<Body>) -> (StatusCode, Value, Probe) {
     let probe = Probe::default();
+    let started = Instant::now();
     let response = serving
         .router()
         .oneshot(request)
@@ -245,6 +274,11 @@ pub async fn raw_request(serving: &Serving, request: Request<Body>) -> (StatusCo
         .unwrap();
     let status = response.status();
     let bytes = to_bytes(response.into_body(), 100_000).await.unwrap();
+    *probe.response.lock().unwrap() = Some((
+        status.as_u16(),
+        String::from_utf8_lossy(&bytes).into_owned(),
+        started.elapsed().as_micros(),
+    ));
     let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     (status, body, probe)
 }
