@@ -20,6 +20,38 @@ enum Command {
         #[arg(long)]
         config: PathBuf,
     },
+    EventsRebind {
+        #[arg(long)]
+        config: PathBuf,
+        id: String,
+        generation: i64,
+        #[arg(long)]
+        callback_file: PathBuf,
+        #[arg(long, allow_hyphen_values = true)]
+        cursor: Option<String>,
+        #[arg(long)]
+        operator: String,
+        #[arg(long)]
+        reason: String,
+    },
+    EventsReplay {
+        #[arg(long)]
+        config: PathBuf,
+        id: String,
+        generation: i64,
+        #[arg(
+            long,
+            allow_hyphen_values = true,
+            conflicts_with = "release_items_file"
+        )]
+        cursor: Option<String>,
+        #[arg(long, conflicts_with = "cursor")]
+        release_items_file: Option<PathBuf>,
+        #[arg(long)]
+        operator: String,
+        #[arg(long)]
+        reason: String,
+    },
     Init,
     MigrateCustody,
     MigrateOutbound,
@@ -50,7 +82,7 @@ enum Command {
 enum CommandError {
     #[error("--state is required for owner grant commands")]
     MissingState,
-    #[error("serve obtains its state path only from the owner configuration file")]
+    #[error("configuration-based commands obtain state only from the owner configuration file")]
     UnexpectedState,
     #[error(transparent)]
     Configuration(#[from] xmsg_mcp_gateway::serving::StartupError),
@@ -60,6 +92,10 @@ enum CommandError {
     Grant(#[from] GrantError),
     #[error(transparent)]
     Events(#[from] xmsg_mcp_gateway::event_store::Error),
+    #[error(transparent)]
+    EventLifecycle(#[from] xmsg_mcp_gateway::events::Error),
+    #[error("invalid or unavailable private owner document")]
+    OwnerDocument,
     #[error(transparent)]
     Custody(#[from] xmsg_mcp_gateway::custody::Error),
     #[error(transparent)]
@@ -85,6 +121,59 @@ async fn run(cli: Cli) -> Result<(), CommandError> {
                 .serve()
                 .await
                 .map_err(CommandError::Serve)?;
+        }
+        (
+            state,
+            Command::EventsRebind {
+                config,
+                id,
+                generation,
+                callback_file,
+                cursor,
+                operator,
+                reason,
+            },
+        ) => {
+            if state.is_some() {
+                return Err(CommandError::UnexpectedState);
+            }
+            let url = String::from_utf8(private_document(&callback_file, 4096)?)
+                .map_err(|_| CommandError::OwnerDocument)?;
+            let result = xmsg_mcp_gateway::serving::owner_events(&config)?.rebind(
+                &id,
+                generation,
+                url.trim(),
+                cursor.as_deref(),
+                &operator,
+                &reason,
+            )?;
+            println!("{result}");
+        }
+        (
+            state,
+            Command::EventsReplay {
+                config,
+                id,
+                generation,
+                cursor,
+                release_items_file,
+                operator,
+                reason,
+            },
+        ) => {
+            if state.is_some() {
+                return Err(CommandError::UnexpectedState);
+            }
+            let events = xmsg_mcp_gateway::serving::owner_events(&config)?;
+            let result = if let Some(file) = release_items_file {
+                let items: Vec<String> =
+                    serde_json::from_slice(&private_document(&file, 512 * 1024)?)
+                        .map_err(|_| CommandError::OwnerDocument)?;
+                events.release_selected(&id, generation, &items, &operator, &reason)?
+            } else {
+                events.replay(&id, generation, cursor.as_deref(), &operator, &reason)?
+            };
+            println!("{result}");
         }
         (Some(state), Command::Init) => {
             Store::initialize(&state)?;
@@ -146,4 +235,30 @@ async fn main() {
         eprintln!("gateway command failed: {error}");
         std::process::exit(1);
     }
+}
+
+fn private_document(file: &std::path::Path, limit: u64) -> Result<Vec<u8>, CommandError> {
+    use std::io::Read;
+    let mut input = std::fs::File::open(file).map_err(|_| CommandError::OwnerDocument)?;
+    let metadata = input.metadata().map_err(|_| CommandError::OwnerDocument)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(CommandError::OwnerDocument);
+        }
+    }
+    if !metadata.is_file() || metadata.len() > limit {
+        return Err(CommandError::OwnerDocument);
+    }
+    let mut bytes = Vec::new();
+    input
+        .by_ref()
+        .take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| CommandError::OwnerDocument)?;
+    if bytes.len() as u64 > limit {
+        return Err(CommandError::OwnerDocument);
+    }
+    Ok(bytes)
 }

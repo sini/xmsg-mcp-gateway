@@ -1,9 +1,11 @@
 # xmsg-mcp-gateway
 
-The Rust gateway serves OAuth-protected MCP identity reads with durable local
-grants and optional `xmsg_send` / `xmsg_reply` tools. Messaging uses a dedicated
-xmsg node and service identity. The Python reference provides synthetic Events;
-Events and an inbound receiving worker remain unavailable in the Rust listener.
+The Rust gateway serves OAuth-protected MCP tools with durable local grants,
+mailbox custody and optional signed [Events](docs/events.md). A messaging profile
+supports authorized send/reply and repeatable inbox/body reads. An Events profile
+adds service polling, durable webhook delivery, consumer responsibility ACKs and
+read-only outbound status. The shipped product is Rust and has no Python runtime
+dependency.
 
 The Python reference’s authenticated Streamable HTTP endpoint is `/mcp`. It offers one tool,
 `xmsg_identity`, and `events/list`, `events/subscribe`, `events/unsubscribe` for
@@ -17,7 +19,7 @@ checks finish before readiness. Tool advertising and dispatch also require the
 configured scopes and owner-set grant policy. An invalid profile refuses startup
 instead of falling back to identity-only use.
 Local acceptance does not authorize a hosted deployment: the
-[pending owner decisions and exposure gates](docs/serving.md#deployment-boundaries)
+[deployment and exposure requirements](docs/serving.md#deployment-boundaries)
 still apply.
 
 ## Rust grant-store foundation
@@ -27,8 +29,8 @@ issuer / resource / subject / hosted-client bindings, and revision-checked enabl
 and disable operations. The [outbound custody foundation](docs/outbound.md) adds
 durable send/reply reservations and a per-service operation lease shared with
 owner policy and disable commands. The listener integrates these operations with
-request and retention bounds and 401/403/503 mapping. Inbound worker activation,
-release of held work, rebind and audit/replay retain their separate gates.
+request and retention bounds and 401/403/503 mapping. [Events setup](docs/events.md) describes explicit migration, first-enable release,
+subscription verification, and local audited rebind/replay.
 The Python reference uses its separate state store.
 
 Build with the toolchain in `rust-toolchain.toml` and the committed Cargo lockfile:
@@ -192,8 +194,9 @@ Responses are bounded to 64 KiB. Requests are capped at 64 KiB, event bodies at
 ## Owner steps: private tunnel
 
 These hosted feasibility steps apply to the Python reference server. They do not
-activate the Rust listener's pending deployment or Events features.
-No tunnel or endpoint has been created by this project.
+activate the Rust listener or establish production Rust hosted compatibility. For
+Rust operation, use [Events setup](docs/events.md); for the synthetic probe and the
+current connection form, use [hosted setup](docs/hosted-dots-setup.md).
 
 1. Resolve the authorization-provider compatibility checks in the [provider setup guide](docs/provider-setup.md). Configure
    a dedicated OAuth client using the exact redirect URI shown by ChatGPT for this

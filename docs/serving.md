@@ -6,7 +6,9 @@ from the owner's configuration. `initialize`, `ping`, `tools/list`,
 `notifications/initialized` and `xmsg_identity` are implemented. Standard `_meta`
 progress tokens are accepted but unused. An optional owner-file messaging section
 enables authorized `xmsg_send` and `xmsg_reply`, plus mailbox-scoped
-`xmsg_inbox` and `xmsg_read_message` recovery reads. Events remain unavailable.
+`xmsg_inbox` and `xmsg_read_message` recovery reads. An optional [Events profile](events.md)
+adds subscription methods, inbound polling, signed callback delivery,
+`xmsg_message_status` and `xmsg_ack`.
 
 The existing xmsg MCP entry point is a harness-associated stdio adapter behind its
 daemon feature. Service-node I/O belongs to the shared `xmsg::client` boundary.
@@ -27,7 +29,7 @@ reason and never include request content. Invalid values refuse startup with
 
 The owner-file constructor is asynchronous: registration, manifest validation and
 schema readiness finish before a router is returned. A broken messaging section
-refuses startup; it never degrades to identity-only serving. A present `null` section
+refuses startup; it never degrades to identity-only serving. A present `null` messaging section
 is invalid. No request can supply messaging configuration or choose a mailbox.
 
 `messaging` denies unknown fields. Every manifest value that must agree with the
@@ -74,9 +76,9 @@ cancel the outcome commit. Accepted packets cannot be recalled by disconnect.
 
 The complete framed bound must fit the node's reported `max_body_bytes` as well
 as the gateway's 65536-byte ceiling. A missing report or a smaller effective limit
-refuses startup; the gateway never guesses it from launch arguments. The final pin is xmsg main `7d9d1ed`, including registration health and socket
-activation. Live activation
-and exposure gates below still apply.
+refuses startup; the gateway never guesses it from launch arguments. The committed Cargo lockfile pins the shared xmsg client, including registration
+health and socket activation. Live activation and exposure requirements below
+still apply.
 
 When messaging is configured, one session owner retains the registration. It
 samples non-consuming registration health at most one second apart. Healthy bus
@@ -93,8 +95,10 @@ every 30 seconds. The status remains blocked throughout that register/drop cycle
 
 `xmsg_identity` includes `messaging_status` only in this profile: `ready` with the
 registered mailbox, `reconnecting`, or `blocked` with a reason. Sends and replies
-return 503 while unavailable. Recovery never polls or ACKs the mailbox, submits
-work, mints an idempotency key, or authorizes a replay. A caller retries uncertain
+return 503 while unavailable. Retained mailbox reads, Events status and explicit
+consumer ACKs use the last validated registered mailbox during a temporary outage.
+Recovery reads never poll or ACK xmsg, submit work, mint an idempotency key,
+or authorize replay. A caller retries uncertain
 work with its original request ID. Link records retain the custody ledger's
 existing seven-day / 1000-gap bounds and capacity costs; an exhausted ledger also
 blocks messaging until a durable update can succeed.
@@ -104,6 +108,21 @@ held across an await. A trybuild refusal and commit-before-await positive contro
 cover that boundary. The runtime ordering mutant instead submits before opening
 the reservation transaction; the crash cell detects the premature delivery.
 
+## Optional Events profile
+
+An `events` section requires messaging, an explicit Events schema migration and an
+owner-private 32-byte key. It selects `grant_id`, `key_file`,
+`dispatch_timeout_ms` and optional `custody_limits`. Required verifier scopes
+include `identity:read` and `events:subscribe`. The configured custody limits are
+shared by the session and incoming receiver.
+
+Startup requires `dispatch_timeout_ms >= verifier.timeout_ms + 11000` and
+`request_timeout_ms >= 2 * verifier.timeout_ms + 41000`; both are at most 60000 ms.
+The ordinary messaging submission/store-wait budget also applies. No Events
+worker starts when the section is absent. See [Events setup](events.md) for the
+exact migration order, key provisioning, subscription lifecycle, bounded retries,
+status, responsibility checkpoints and local owner commands.
+
 ## Owner configuration
 
 `serve --config FILE` is the only serving configuration entry. Request arguments,
@@ -111,7 +130,7 @@ metadata, sessions and connection headers cannot select or replace it. The nonse
 configuration file may be read-only world-readable (such as mode 0444 in the Nix
 store) or owner-private (mode 0600 or 0400), and must not be group- or world-writable
 on Unix; credential files remain owner-private (mode 0600 or 0400). Unknown fields are refused.
-Relative state, lookup-secret and root-certificate paths resolve against its
+Relative state, lookup-secret, root-certificate and Events-key paths resolve against its
 containing directory. The current listener binds only loopback; it accepts OAuth
 credentials and has no local bearer/no-authentication mode.
 
@@ -160,8 +179,8 @@ chmod 600 .state/serving.json .state/lookup-secret
 cargo run --locked -- serve --config .state/serving.json
 ```
 
-The `--state` grant-management override is refused with `serve`; its store path
-comes from the owner file. Editing provider settings requires restarting the
+The `--state` grant-management override is refused with `serve`, `events-rebind`
+and `events-replay`; their store paths come from the owner file. Editing provider settings requires restarting the
 listener. Origins must be explicitly listed when an Origin header is present.
 
 ## Request enforcement
@@ -201,60 +220,34 @@ and success/one open for a valid credential with available state.
 
 ## Deployment boundaries
 
-The private-node profiles establish local MCP send/reply behavior, not live
-hosted OAuth, tunnel or federated deployment compatibility. The owner still must
-select the OAuth authority/provider or broker, deployment identities and grants,
-and hosted workspace/tunnel setup and credential custody before that rollout.
-Handling traffic received before first enable and selecting a shared authentication contract
-or packaging remain owner decisions before those affected features are built.
-Historical material visibility and history changes are separate owner decisions;
-this runtime implementation selects neither.
+Local fixtures establish Rust custody, subscription, delivery and recovery behavior;
+they do not establish a deployed hosted OAuth, tunnel or federation configuration.
+Provision a compatible provider or broker, dedicated identities and grants, and
+hosted workspace/tunnel credentials before rollout. The [hosted probe guide](hosted-dots-setup.md)
+describes the synthetic reference separately; [Rust Events setup](events.md)
+describes the production implementation's configuration and migration.
 
-The listener starts no inbound receiving worker and exposes no Rust Events or
-callback dispatcher. Inbound content stays held until the reviewed release/replay
-policy is selected and implemented. Local send/reply acceptance does not bypass
-these decisions or the exposure preconditions below.
+Events ingestion starts only with an explicit Events profile. First enable audits
+release of proven never-enabled traffic. Earlier-revision and ambiguous legacy
+custody stays held until an explicit local owner-selected release. Subscription
+renewal, rebind and read tools cannot authorize that release.
 
+## Exposure and request protection
 
-## Activation preconditions and next serving unit
+The listener remains OAuth-only and loopback-bound, including when reached through
+a tunnel. Header deadlines and a connection cap bound admission and idle keepalive.
+A declared Content-Length above the request limit returns 413 before body reading,
+provider requests or dispatch. Streamed bodies retain the configured byte bound.
 
-P1 is met by the header deadline and connection cap below. P5 remains an
-activation precondition for exposure beyond local loopback use, including exposure
-through a tunnel even when the listener still binds loopback:
+Resource metadata uses the RFC 9728 path insertion form and must match the
+configured `/mcp` resource. Unsupported resource paths refuse configuration rather
+than assuming a path-rewriting tunnel. SQLite waits and the handler deadline
+bound request work; a store lock produces a retryable unavailable result.
 
-- **P1 — connection admission and lifetime (met):** `header_read_timeout_ms`
-  bounds partial headers and idle keep-alive through the next request's header
-  deadline; `max_connections` bounds admitted sockets. The real CLI cells
-  `header_deadline_is_absolute_and_excludes_body` and
-  `idle_keepalive_is_bounded_by_the_next_header_deadline` in
-  `tests/header_timeout.rs` pin both lifetimes. The connection-cap cells in
-  `tests/connection_cap.rs` cover refusal, continued service and slot release.
-  Source mutants removing the deadline or cap must fail their named cells.
-- **P5 — declared oversized bodies:** with headers declaring a Content-Length
-  above the configured request-body limit and no body bytes sent, return 413 promptly, before the handler
-  deadline, with zero provider requests, store opens or dispatches. A permitted
-  declared length and complete valid request must succeed. Removing the early
-  length check must fail the named oracle; waiting for the handler deadline is
-  not an acceptable 413.
-
-The next serving unit also carries these findings:
-
-- **P2:** advertise the RFC 9728 insertion form
-  `/.well-known/oauth-protected-resource{resource-path}` in WWW-Authenticate;
-  fetch the advertised URL and verify its resource matches the configured URI.
-- **P3:** enforce consistency between the configured resource path and the served
-  MCP endpoint. Test matching paths and refuse an unsupported mismatch at load
-  time; do not silently assume a path-rewriting tunnel.
-- **P4:** pin the intended serving mutation case count and completion. Removing a
-  case or returning before completion must fail CI.
-- **P6:** bound serving SQLite lock waits by the remaining handler budget, so a
-  503 cannot leave a 30-second blocking task behind. Hold a real store lock, let
-  the request deadline expire, and prove the worker exits within the budget;
-  unlocking the store must permit a subsequent valid request. A source mutant
-  restoring the longer wait must fail this oracle.
-
-The provider/broker, transport, custody and hosted feasibility gates above remain
-required independently of these connection and serving checks.
+The real CLI cells in [header timeout tests](../tests/header_timeout.rs),
+[connection cap tests](../tests/connection_cap.rs), and
+[serving tests](../tests/serving.rs) exercise these boundaries. The provider,
+transport, custody and actual hosted rollout checks remain distinct.
 
 Registration health errors do not prove that an operation was never submitted.
 The session owner withdraws an unhealthy handle and re-registers through the
@@ -318,17 +311,21 @@ scalar values, starting at zero. The default and maximum page is 4096 characters
 (at most 16 KiB of UTF-8 text); valid limits are 1 through 4096. Embedded NULs and
 other valid JSON string characters survive reads. An offset at or past the end
 returns an empty text and null next offset. A foreign, expired, redacted,
-pre-enable, earlier-revision or unknown message returns `state: "not_found"`
+unreleased pre-enable, earlier-revision or unknown message returns `state: "not_found"`
 without metadata. No upstream read-by-ID operation is performed.
 
 Every read reauthorizes the verified OAuth binding against the currently enabled
 grant in the same SQLite read transaction as the custody query. The mailbox and
-bus come from the live registered handle. Ownership also requires the stored
-owner, service, issuer, resource, hosted client, grant ID and grant revision to
-match. Reads may expose currently held custody accepted under the current enabled
-grant revision. They never release held events, authorize a subscription, or make
-pre-enable/earlier-revision custody visible. Disable/re-enable changes the revision
-and does not rebind prior custody. There is still no automatic inbound receiver.
+bus come from the validated registered handle, cached for reads during a temporary
+daemon outage. Startup still requires a live registration and manifest check. Ownership also requires the stored
+owner, service, issuer, resource, hosted client and grant ID to match. Eligibility
+requires the current grant revision, or a separate audited dispatch authorization
+created by first enable or explicit local selected release. The original acceptance
+snapshot is never rewritten. Reads may expose held custody accepted under the
+current enabled grant revision. They never release events, authorize a subscription,
+or record consumer responsibility. Disable/re-enable changes the revision and
+does not rebind prior custody. The [Events profile](events.md) starts ingestion
+and implements the explicit release/replay policy.
 
 Cursors bind their event anchor to that mailbox, bus, identity binding and grant
 revision. They resolve the anchor's current insertion position, so deleting earlier

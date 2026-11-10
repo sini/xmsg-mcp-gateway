@@ -1,0 +1,350 @@
+# Rust mailbox Events
+
+The Rust gateway can receive messages addressed to its registered xmsg service,
+commit custody before acknowledging xmsg, and deliver signed
+`xmsg.message.received.v1` wake hints to the authenticated owner's subscription.
+It retains the mailbox for repeatable reads and recovery. The shipped gateway
+has no Python dependency. The [synthetic hosted probe](hosted-dots-setup.md) and
+Python reference are separate examples; their results do not establish a deployed
+Rust integration.
+
+## Configure and migrate
+
+Start with the [OAuth listener configuration](serving.md#owner-configuration),
+a compatible [OAuth provider](provider-setup.md), and the
+[messaging profile](serving.md#optional-messaging-profile). Events require both
+`messaging` and an `events` section. The selected grant must match the verifier's
+service, issuer, resource, subject and approved hosted client. The registered
+service supplies the bus and mailbox; callers cannot choose either.
+
+Provision a separate, persistent Events key: exactly 32 random bytes in a regular
+mode-0600 file, owned by the state directory's account. Its directory must not be
+writable by other users. Generate it once, keep it outside the database, and back
+it up with the database. For a new local state directory:
+
+```sh
+install -d -m 700 .state
+(umask 077; set -C; dd if=/dev/urandom bs=32 count=1 2>/dev/null > .state/events.key)
+chmod 600 .state/events.key
+```
+
+The noclobber redirection refuses an existing key file. Replacing a key does not
+rotate the encrypted data: the wrong or missing key prevents Events activation.
+URLs, delivery secrets and retained access tokens are encrypted with authenticated
+owner/field binding. This keeps a copied database from exposing those values;
+the gateway account still needs access to its key. Do not reuse a node, tunnel or
+introspection credential as the encryption key.
+
+For a **new Events grant**, migrate before enrollment so its never-enabled history
+is explicit. After building the Rust binary with `cargo build --locked --release`:
+
+```sh
+target/release/xmsg-mcp-gateway --state .state/grants.db init
+target/release/xmsg-mcp-gateway --state .state/grants.db migrate-custody
+target/release/xmsg-mcp-gateway --state .state/grants.db migrate-outbound
+target/release/xmsg-mcp-gateway --state .state/grants.db migrate-events --key-file .state/events.key
+target/release/xmsg-mcp-gateway --state .state/grants.db enroll grant-id binding.json
+```
+
+Supply the exact [binding document](../README.md#rust-grant-store-foundation).
+Enrollment creates disabled revision 1. A first enable is an owner command:
+
+```sh
+target/release/xmsg-mcp-gateway --state .state/grants.db enable grant-id 1
+```
+
+It advances the revision and audits release of custody proven to have arrived
+before that grant's first enable. An existing store needs only its outstanding
+migrations; initialization never overwrites it. Migrations are explicit and
+transactional, and no-op migrations fail. Migrated disabled grants have **unknown**
+enable history. Legacy custody remains held even if its recorded revision happens
+to match today's grant. Neither timestamps nor revision parity prove its history.
+New arrivals under an unknown disabled grant also remain held. Use the explicit
+selected release below to authorize retained historical items.
+
+Merge this fragment into the complete owner configuration; it is not a complete
+listener profile:
+
+```json
+{
+  "request_timeout_ms": 60000,
+  "events": {
+    "key_file": "events.key",
+    "grant_id": "grant-id",
+    "dispatch_timeout_ms": 16000
+  }
+}
+```
+
+Set `verifier.required_scopes` to include `identity:read` and `events:subscribe`.
+Send/reply policies may require additional scopes. With `verifier.timeout_ms: 5000`,
+the fragment's budgets meet the Events requirements:
+
+| Budget | Startup requirement |
+|---|---|
+| `events.dispatch_timeout_ms` | At least `verifier.timeout_ms + 11000`, at most 60000 |
+| `request_timeout_ms` | At least `2 * verifier.timeout_ms + 41000`, at most 60000 |
+
+The request bound covers the post-challenge credential recheck as well as initial
+verification, callback work and existing store waits. The messaging profile's
+submission/store-wait requirement also applies. Owner operations and submissions
+share a per-service OS file lease, so an in-flight bounded submission can delay
+another operation. No SQLite transaction stays open across network I/O.
+
+The optional `events.custody_limits` defaults to:
+
+```json
+{
+  "max_items": 1000,
+  "max_bytes": 67108864,
+  "max_item_bytes": 262144,
+  "content_retention_secs": 604800,
+  "max_metadata": 1000,
+  "metadata_retention_secs": 604800,
+  "max_gap_intervals": 1000
+}
+```
+
+If supplied, all seven positive fields are required. Ingestion and session health
+use this same configuration. Relative state, credential, root-certificate and
+Events-key paths resolve against the owner configuration's directory. For example,
+`.state/serving.json` with `grant_store: "grants.db"` and `key_file: "events.key"`
+uses the files created above.
+
+```sh
+target/release/xmsg-mcp-gateway serve --config .state/serving.json
+```
+
+Startup validates the real registered node and its declared limits before
+readiness. An invalid Events profile refuses startup; it does not silently become
+a messaging-only server. Without Events configuration, no inbound poller or
+webhook worker starts. The listener remains OAuth-only and loopback-bound; use
+the existing hosted setup guide for exposure and provider setup rather than the
+example's no-authentication mode.
+
+## Subscription and delivery contract
+
+`initialize` advertises Events when configured. The same authenticated `/mcp`
+endpoint serves `events/list`, `events/subscribe` and `events/unsubscribe`.
+Discovery returns one event, empty subscription arguments and webhook delivery.
+The subscription request shape is:
+
+```json
+{
+  "name": "xmsg.message.received.v1",
+  "arguments": {},
+  "delivery": {
+    "mode": "webhook",
+    "url": "https://receiver.example/events",
+    "secret": "whsec_<base64-encoded-signing-key>"
+  },
+  "cursor": null
+}
+```
+
+This shows the wire shape, not a literal usable secret. The decoded signing key
+must contain 24–64 bytes. The returned subscription ID is deterministic for the
+logical owner, event, arguments and callback. A different callback conflicts;
+ordinary subscribe cannot take over the mailbox. The optional `ttlMs` requests a
+lifetime: default one hour, minimum 60 seconds, maximum 24 hours. Omitted or null
+requests receive a finite grant. `refreshBefore` is the granted subscription
+expiry, separate from the current access token's expiry.
+
+Before activating a callback, the gateway sends a signed, short-lived random
+challenge and requires a successful response echoing it. Successful verification
+is cached for 300 seconds for the same binding and key. Cache hits preserve the
+actual verification time; repeated renewal cannot extend that window indefinitely.
+A replacement signing key is verified again. For 300 seconds the gateway signs
+with both old and new keys; a third rotation during that window conflicts.
+Subscription state, rotation and encrypted credentials survive gateway restart.
+
+A due delivery introspects the stored access token and checks exact identity,
+Events scope, current grant/revision, item eligibility and subscription generation
+under the operation lease. Empty, held, accepted, dead and backoff ticks do not
+introspect. An expired or revoked access token parks delivery until the same
+logical owner renews through `events/subscribe` with a valid credential. It does
+not delete the subscription or revoke the local grant. The gateway implements no
+OAuth refresh flow on behalf of the hosted client. Subscription expiry itself
+stops delivery until renewed.
+
+Each request contains one event object with a stable event ID, first durable
+observation timestamp, mailbox-bound cursor, and `data` containing message ID,
+mailbox, attested origin, correlation, a preview of at most 256 Unicode characters,
+`body_available` and sequence. Fetch full text with `xmsg_read_message`. The exact
+serialized body and event ID survive retries; each attempt gets a fresh signing
+time and Standard Webhooks signature, plus `X-MCP-Subscription-Id`. Complete event
+bodies are limited to 256 KiB, callback responses to 64 KiB, and callback requests
+to ten seconds.
+
+Callbacks require public HTTPS. Every DNS answer must be public; the connection
+is pinned to the checked addresses with the original TLS hostname. Redirects and
+proxy routing are disabled for callbacks. TLS uses the platform trust store;
+`SSL_CERT_FILE` and `SSL_CERT_DIR` are honored and, when supplied, replace native
+root discovery. Configure the real CA bundle for NixOS, macOS or a container as
+needed. Provider private-address pins and provider proxy policy remain separate;
+they do not relax callback validation.
+
+The worker checks eligible work immediately, then polls at 250 ms intervals.
+Delivery is serial per mailbox. There are at most five attempts, including an
+attempt durably reserved before a crash. After a retryable failure, the local delay
+is `min(2^attempt + jitter, 300)` seconds, where jitter is randomly selected from
+zero through `min(2^attempt, 300)`. HTTP 408, 429, 5xx and transport failures retry
+within that budget. On 429 or 503, a valid `Retry-After` seconds value or HTTP date
+is honored if it requires a later attempt; fractional completion time is rounded
+up so retry never starts early.
+
+HTTP 410 makes the **delivery** dead with `delivery_gone`; it does not disable the
+subscription. HTTP 413 makes it dead with `payload_protocol_error`. Other terminal
+responses and exhausted attempts also enter an explicit dead-letter state. A
+backoff or dead-letter head blocks later deliveries and cursor advancement until
+selected replay or retention clears the gap. Mailbox reads remain available.
+
+## Receipt, responsibility and recovery
+
+These states have different meanings:
+
+| State | Meaning |
+|---|---|
+| xmsg acknowledged | The gateway committed durable custody |
+| callback accepted | The hosted endpoint returned 2xx; processing is asynchronous |
+| `xmsg_ack` observed | The consumer durably accepted responsibility for this message |
+| domain result or correlated reply | Application-specific evidence of the work's result |
+
+`xmsg_inbox` and `xmsg_read_message` are repeatable, read-only and bounded. They do
+not release work or record an acknowledgement. `xmsg_message_status(request_id)`
+reads the owned outbound ledger without reserving or submitting anything. It
+returns operation-labelled send/reply results, distinguishing pending, unknown,
+expired unknown and confirmed receipts; an unknown or foreign ID is not-found.
+Uncertain sends must keep their original request ID and identical arguments.
+After upstream deduplication protection expires, reconcile instead of blindly
+resending.
+
+`xmsg_ack(message_id)` is idempotent. Use it only after durably taking responsibility:
+a single durable drainer can record the message locally before ACK, or concurrent
+consumers can deduplicate by message ID and make their effects idempotent. ACK
+is neither a work lease nor proof of task completion. Its response includes
+`state: "observed"`, an opaque `checkpoint`, and a `truncated` flag. It does not
+acknowledge xmsg again. Foreign, unknown, expired or ineligible items are not-found.
+
+One logical owner can have several concurrent tasks; no conversation is an
+exclusive owner. Duplicate and out-of-order wake hints are possible, especially
+if a callback accepts before the gateway records its response. ChatGPT may batch
+separately delivered events into a task. Use message-ID deduplication and the
+existing send/reply request IDs rather than treating a wake as an instruction or
+an exactly-once execution guarantee.
+
+Callback receipt and consumer responsibility have separate durable checkpoints.
+Events cursors survive content-anchor deletion, are opaque and mailbox-bound,
+and never skip earlier eligible undelivered work. The observation checkpoint does
+not pass earlier eligible retained unobserved work. Acknowledgement returns `truncated: true`
+when unavailable history has been recorded; the checkpoint does not turn those missing records
+into observations. Selected historical release can rebase either cursor position while preserving
+all per-message responsibility records. An unavailable-history floor records
+retention gaps separately: expiry never claims receipt or observation. Reconnect
+and explicit resume report truncation when requested history is unavailable.
+Earlier live items remain recoverable even if later items expired. The inbox
+cursor has its own [retained-anchor semantics](serving.md#mailbox-recovery-reads).
+
+During a temporary xmsg daemon outage, recovery reads and status use the last
+validated registered mailbox; they do not need a new live handle to read retained
+custody. Initial startup still requires successful registration and manifest
+validation. Sends and replies require a healthy registration. Disable/re-enable
+or policy changes fence the old subscription and hold earlier-revision work;
+renewal does not silently authorize it.
+
+`xmsg_identity` includes `events_status`: subscription state/generation/expiry,
+opaque callback and observation cursors, retained counts by state, categorized
+failure counts, oldest backlog age and a truncation indication. It exposes no
+callback URL, signing key, token or message content. Use this health data and
+bounded recovery tools to investigate failed delivery, rather than raw HTTP logs.
+
+## Local owner rebind and replay
+
+These commands read state and key paths from `--config`. A global `--state` override
+is refused. Obtain the current subscription ID from the subscribe result and its
+generation from `xmsg_identity` health. Unknown IDs, stale generations and no-op
+mutations fail rather than printing success. Operator and reason are recorded in
+the audit; keep their text free of credentials and message content.
+
+To replace a callback, place its URL in an owner-private file and run:
+
+```sh
+target/release/xmsg-mcp-gateway events-rebind --config .state/serving.json SUBSCRIPTION_ID GENERATION \
+  --callback-file .state/callback-url --cursor OPAQUE_SAFE_CURSOR \
+  --operator local-owner --reason 'replace callback'
+```
+
+The command preserves custody, fences the old binding and returns a replacement
+ID with `verification_required`. The client must subscribe to the replacement
+callback and pass verification before delivery starts. `--cursor` is optional;
+without it, replay selection starts at the prior safe callback checkpoint.
+
+Retry retained dead/accepted events already authorized for the current revision:
+
+```sh
+target/release/xmsg-mcp-gateway events-replay --config .state/serving.json SUBSCRIPTION_ID GENERATION \
+  --cursor OPAQUE_SAFE_CURSOR --operator local-owner --reason 'retry selected range'
+```
+
+A cursor replays the eligible retained range after that position. This does not
+change earlier-revision authority. To explicitly authorize particular historical
+items, instead supply a private JSON file containing 1–100 distinct upstream
+message IDs:
+
+```json
+["retained-message-id-one", "retained-message-id-two"]
+```
+
+```sh
+target/release/xmsg-mcp-gateway events-replay --config .state/serving.json SUBSCRIPTION_ID GENERATION \
+  --release-items-file .state/release-items.json \
+  --operator local-owner --reason 'authorize retained historical messages'
+```
+
+`--cursor` and `--release-items-file` are mutually exclusive. Callback and release
+files must be regular owner-private files (for example mode 0600). Selected release requires an active,
+current authorized subscription and an enabled grant. It can reauthorize the
+owner's retained old held, accepted, dead or unknown-history items; foreign,
+expired, unknown IDs and already-current items refuse the entire selection.
+Every release appends an audit with original and current authorization. Original
+message/event IDs, body and acceptance snapshots stay unchanged. Callback and
+responsibility checkpoint positions are rebased when needed to include newly
+eligible historical work, without deleting per-item observation records.
+
+After the audited first-enable transition, ordinary re-enable, credential renewal,
+subscribe, rebind and reads do not release earlier-revision or ambiguous legacy
+custody. No MCP tool performs these local
+owner administration operations.
+
+## Failure boundaries and fixture coverage
+
+The tests use disposable local nodes, stores and callbacks, not a production hosted
+deployment. The matrix distinguishes tested handoffs from the durable mechanism;
+a simulated uncertain callback response is not a process-crash measurement. Dedicated child-process
+cuts additionally cover durable-attempt and accepted-response handoffs:
+
+| Failure or handoff | Durable behavior | Fixture source |
+|---|---|---|
+| Crash before custody commit | No upstream ACK; delivery can be offered again | [custody inbound](../tests/custody_inbound.rs) |
+| Commit before upstream ACK | Redelivery keeps one message/event and original bytes | [custody inbound](../tests/custody_inbound.rs) |
+| Custody ACK to callback dispatch | The wired session commits and ACKs before the signed owned wake; persisted pending custody survives interruption | [production session integration](../src/serving_events_tests.rs), [dispatcher mechanism](../src/event_dispatch.rs) |
+| Process exits after durable attempt, before webhook | Attempt/body/ID remain stored; restart may retry within the remaining budget | [Events process-crash cuts](../src/event_crash_tests.rs) |
+| Callback accepts, receipt is uncertain | Retry preserves body/ID; duplicate wake permitted; no observation implied | [dispatcher](../src/event_dispatch.rs), [accepted-response crash cut](../src/event_crash_tests.rs), [HTTPS receiver](../tests/events_https.rs) |
+| Stale selection or competing worker | Work and authority are re-read after acquiring the operation lease | [dispatcher](../src/event_dispatch.rs) |
+| Worker exits while holding the operation lease | The OS releases its file lock; the next worker rechecks durable state before submission | [Events process-crash cuts](../src/event_crash_tests.rs), [lease mechanism](../src/outbound_lease.rs) |
+| Disable, grant switch or generation change | Stale authorization cannot submit or commit an outcome | [dispatcher](../src/event_dispatch.rs), [subscription lifecycle](../tests/events_rpc.rs) |
+| Token revoked during verification | Subscription never activates | [subscription lifecycle](../tests/events_rpc.rs) |
+| Repeated cache hits or secret rotation | Actual verification deadline remains bounded; signing keys retain their rotation window | [subscription lifecycle](../tests/events_rpc.rs) |
+| Crash before/after responsibility commit | Only a committed observation survives; retry is idempotent | [responsibility recovery](../src/recovery_tests.rs) |
+| Duplicate/out-of-order or receiver-batched wakes | Repeatable reads, message-ID responsibility records and request-ID effects preserve recovery semantics | [responsibility recovery](../src/recovery_tests.rs), [outbound custody](../tests/custody_outbound.rs); batching is performed by the receiver |
+| Mixed live/expired history | Explicit gap/truncation, without skipping earlier live work or inventing observation | [subscription lifecycle](../tests/events_rpc.rs), [responsibility recovery](../src/recovery_tests.rs) |
+| Selected historical release fails midway | Entire selection rolls back; original snapshots and observations survive | [selected replay](../tests/events_replay.rs) |
+| Uncertain send/reply | Stable request key inside the protection window; reconciliation after expiry | [outbound custody](../tests/custody_outbound.rs) |
+
+The mailbox boundary prevents unrelated bus content from becoming callback data.
+Existing current grants, owned reply destinations and outbound policy remain
+necessary when a wake leads to a tool call. Those checks address the concrete
+outside-facing authority change without adding a second target policy or a
+conversation-specific identity.
+
+Protocol reference: [MCP Events](https://developers.openai.com/plugins/build/mcp-events).

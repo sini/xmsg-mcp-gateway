@@ -294,7 +294,7 @@ CASES.extend(
         (
             "durable-reconnect-before-publication",
             "src/session.rs",
-            "record_link(file.clone(), snapshot.bus.clone(), true).await?",
+            "record_link(file.clone(), snapshot.bus.clone(), true, custody_limits.clone()).await?",
             "tokio::time::Instant::now()",
             "messaging",
             "reconnect_publication_waits_for_a_durable_ledger_commit",
@@ -358,8 +358,8 @@ CASES.append(
     (
         "read-response-id",
         "src/serving.rs",
-        "Ok(Ok(data)) => rpc_result(&id, tool_result(data)),",
-        'Ok(Ok(data)) => rpc_result(&json!("wrong-read-response-id"), tool_result(data)),',
+        "Ok(Ok(data)) => rpc_result(&id, tool_result(data)),\n                    Ok(Err(reads::Error::Arguments)) => {",
+        'Ok(Ok(data)) => rpc_result(&json!("wrong-read-response-id"), tool_result(data)),\n                    Ok(Err(reads::Error::Arguments)) => {',
         "reads",
         "reads_are_advertised_only_with_a_registered_mailbox",
         "read responses changed their JSON-RPC request IDs",

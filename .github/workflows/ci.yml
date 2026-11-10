@@ -51,12 +51,17 @@ jobs:
           assert summaries, "no Rust test summaries"
           counts = [tuple(map(int, row)) for row in summaries]
           assert all(not row[1] and not any(row[3:]) for row in counts), "failed or filtered Rust tests"
-          expected_passed, expected_ignored = (103, 76) if sys.platform == "linux" else (100, 0)
+          expected_passed, expected_ignored = (168, 79) if sys.platform == "linux" else (165, 2)
           assert sum(row[0] for row in counts) == expected_passed, "executed Rust test count mismatch"
           assert sum(row[2] for row in counts) == expected_ignored, "private-node deferral count mismatch"
           print(f"Rust test completion guard: {expected_passed} passed; {expected_ignored} private-node cases run in mandatory transport/custody job")
           PY
       - run: cargo clippy --locked --all-targets -j 4 -- -D warnings
+      - name: Events delivery and recovery source mutants
+        if: runner.os == 'Linux'
+        run: |
+          python3 scripts/events_mutants.py | tee events-mutants.log
+          grep -Fx 'g5-events-mutants-complete:21/21' events-mutants.log
       - name: Grant source mutants
         if: runner.os == 'Linux'
         run: python3 scripts/grant_mutants.py
@@ -94,6 +99,12 @@ jobs:
           python3 scripts/transport_compat.py | tee transport-compat.log
           grep -Fx 'transport-compat-complete:pinned-9-baseline-unix-4' transport-compat.log
           grep -Fx 'copied-control-cached-artifact:refused:real_xmsg' transport-compat.log
+      - name: Real Events custody and signed HTTPS delivery
+        run: |
+          revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')
+          export XMSG_GATEWAY_BIN="$PWD/.artifacts/transport/$revision/xmsg"
+          cargo test --locked --lib serving::events_tests::real_pinned_node_custody_wakes_https_and_recovers_owned_body -- --ignored --exact --nocapture 2>&1 | tee events-transport.log
+          grep -Fx 'events-transport-complete:owned-custody-https' events-transport.log
       - name: Isolated federation admission source mutants
         run: |
           python3 scripts/transport_mutants.py | tee transport-mutants.log

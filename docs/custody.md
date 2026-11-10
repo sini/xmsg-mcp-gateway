@@ -1,4 +1,4 @@
-# Inbound custody foundation
+# Inbound custody
 
 A configured lifetime L guarantees eligibility for at least L seconds and expires
 observable access before L+1 seconds, using one checked ceiling of the sub-second
@@ -6,14 +6,18 @@ observation instant. Repeated access never extends an existing stored expiry.
 Physical reclaim follows the existing access/heartbeat cadence, which bounds its
 lag; no background purger is introduced.
 
-Inbound acceptance uses `xmsg::client::RegisteredService` through the explicit
-`receive_one` library call. The Rust listener separately supports configured MCP
-send/reply through the [outbound layer](outbound.md); it starts no inbound receiving
-worker or callback dispatcher. All accepted inbound messages and outbox
-occurrences remain held. Enabled, current-revision custody can be recovered through
-[mailbox reads](serving.md#mailbox-recovery-reads), which do not change event state. The first-subscription policy has no default, and
-disable/re-enable never rebinds an old acceptance. Those owner decisions and
-[deployment boundaries](serving.md#deployment-boundaries) remain open.
+Inbound acceptance uses `xmsg::client::RegisteredService` and `receive_one`.
+With a configured [Rust Events profile](events.md), the session polls incoming
+service deliveries and the dispatcher sends signed mailbox wake hints. Without
+Events configuration, the listener retains its identity/messaging behavior and
+starts neither inbound polling nor callback delivery.
+
+Custody commits before upstream ACK. Callback acceptance, explicit consumer
+responsibility and application completion are separate states. Recovery
+[inbox/body reads](serving.md#mailbox-recovery-reads) remain read-only. First enable
+can audit release of proven never-enabled traffic. Earlier-revision or ambiguous
+legacy custody stays held until explicit local owner selection; ordinary
+re-enable, subscription renewal and callback rebind do not release it.
 
 Run the owner command `xmsg-mcp-gateway --state FILE migrate-custody` to migrate
 an existing authority database from schema 1 to 2. Migration is explicit and
@@ -23,7 +27,10 @@ An unchanged migration exits nonzero. Missing custody tables in schema 2 fail
 closed. `receive_one` checks readiness before polling and returns
 `MigrationRequired` for v1 without consuming or acknowledging a message.
 There is no NixOS custody startup hook in this foundation: deployment must run
-the separate owner migration command explicitly before a future worker can start.
+the separate owner migration commands explicitly before a worker can start.
+[Events migration](events.md#configure-and-migrate) follows custody and outbound
+migrations and must precede enrollment when a new grant needs proven
+never-enabled history. Legacy disabled history is unknown, never inferred.
 The current configured versus identity-only `serve` behavior is documented and
 linked to its real-node acceptance cells in the
 [messaging profile](serving.md#optional-messaging-profile).
@@ -33,12 +40,17 @@ reused; there is no second storage implementation.
 The configured bus-instance namespace and upstream ID identify a message. Set
 that namespace for the dedicated node database, keep it stable across restarts,
 and change it if the node database is replaced. The local owner selects a grant
-row. Its subject and revision are copied at acceptance. The logical profile name
+row. Its subject and revision are copied at acceptance. With Events migrated,
+acceptance also records enable state and known first-enable history atomically;
+separate dispatch authorization records any later audited release. The logical profile name
 in `Binding.service` need not equal the registration name in `XmsgConfig.service`.
 The mailbox comes only from the actual registered handle; configuration cannot
 supply a mailbox override.
 
-One transaction commits the message and one held outbox event. An event ID is a
+One transaction commits the message and one deduplicated outbox event.
+Current enabled-revision traffic is pending for an eligible subscription;
+never-enabled, earlier-disabled and unknown-history traffic is held according to
+its recorded authorization. Pending work without a subscription remains durable. An event ID is a
 length-delimited SHA-256 derivation of the namespace and upstream ID. A matching
 redelivery returns that stored event ID. The duplicate fingerprint covers the
 attested origin, text, stored envelope and exact optional correlation. Display
@@ -105,10 +117,9 @@ reset an already old message's age; unknown downtime does not create known IDs.
 The status library accepts an effective reply TTL for this comparison. Messaging
 startup now validates reply TTL, idempotency TTL, service queue capacity and body
 bound against the actual registration, including the dedup lifetime comparison.
-Inbound worker activation remains a separate unit: it must reuse that registration
-and the session's configured Limits source. Messaging configuration already uses
-the shared service-name validator; this does not complete the remaining inbound
-activation gates.
+The Events receiver reuses that registration and shares
+`events.custody_limits` with the session, including retention and gap budgets.
+Messaging configuration uses the shared service-name validator.
 
 CI builds revision-verified private daemon fixtures, then requires 22 custody
 cases with zero ignored/filtered tests and all 22 completion markers. The crash
@@ -130,6 +141,8 @@ A graceful SIGTERM/Ctrl-C drain writes a final healthy observation and disconnec
 record, giving a clean stop its actual boundary instead of the coalesced one.
 This does not relax the restart-gap or message-age loss checks.
 
-The session currently uses `custody::Limits::default()`. The future custody worker
-must share one configured Limits source with the session, including its retention
-and gap budgets; it must not introduce independent defaults.
+Without an Events profile, session health uses `custody::Limits::default()`.
+With Events, session health and ingestion share the configured limits described in
+[Events setup](events.md). Events also retain opaque occurrence sequences,
+responsibility checkpoints and an explicit unavailable-history floor; retention
+does not fabricate callback receipt or consumer observation.
