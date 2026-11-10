@@ -34,6 +34,8 @@ pub(crate) enum Error {
     Events(#[from] crate::event_store::Error),
     #[error("recovery record encoding unavailable")]
     Encoding(#[from] serde_json::Error),
+    #[error("broker result unavailable")]
+    Broker(#[from] crate::outbound::Error),
 }
 
 pub(crate) fn owner_key(

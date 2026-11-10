@@ -4,7 +4,9 @@ The Rust gateway serves OAuth-protected MCP tools with durable local grants,
 mailbox custody and optional signed [Events](docs/events.md). A messaging profile
 supports authorized send/reply and repeatable inbox/body reads. An Events profile
 adds service polling, durable webhook delivery, consumer responsibility ACKs and
-read-only outbound status. The shipped product is Rust and has no Python runtime
+read-only outbound status. An optional [gist broker](docs/serving.md#optional-gist-broker)
+profile composes those paths for typed gist operations without a gateway GitHub
+credential. The shipped product is Rust and has no Python runtime
 dependency.
 
 The Python reference’s authenticated Streamable HTTP endpoint is `/mcp`. It offers one tool,

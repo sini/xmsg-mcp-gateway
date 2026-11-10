@@ -203,3 +203,51 @@ pub(crate) fn dispatch(
         }
     }
 }
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn correlated(
+    store: &Store,
+    identity: &VerifiedIdentity,
+    authority: &Authorization,
+    bus: &str,
+    mailbox: &str,
+    correlation: &str,
+    service: &str,
+    node: &str,
+    max_bytes: usize,
+) -> Result<(Vec<String>, bool), crate::outbound::Error> {
+    let version: i64 = store
+        .connection
+        .pragma_query_value(None, "user_version", |r| r.get(0))?;
+    let owned = if version >= crate::grants::EVENTS_SCHEMA_VERSION {
+        OWNED.replace("c.grant_revision=:revision", "EXISTS(SELECT 1 FROM event_authorizations ea WHERE ea.event_id=c.event_id AND ea.dispatch_revision=:revision)")
+    } else {
+        OWNED.to_owned()
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| crate::outbound::Error::Configuration)?
+        .as_secs()
+        .min(i64::MAX as u64) as i64;
+    let owned = owned.replace("AND c.text IS NOT NULL AND c.expires_at>:now", "");
+    let sql=format!("SELECT c.origin,CASE WHEN c.expires_at>:now AND length(CAST(c.text AS BLOB))<=:max_bytes THEN c.text ELSE NULL END FROM custody_items c JOIN grants g ON g.id=c.grant_id WHERE {owned} AND c.in_reply_to=:correlation ORDER BY c.rowid");
+    let mut query = store.connection.prepare(&sql)?;
+    let rows=query.query_map(named_params!{":bus":bus,":mailbox":mailbox,":owner":identity.subject(),":service":identity.service(),":issuer":identity.issuer(),":resource":identity.resource(),":client":identity.hosted_client(),":grant":authority.grant_id,":revision":authority.revision,":now":now,":correlation":correlation,":max_bytes":max_bytes as i64},|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?)))?;
+    let mut result = Vec::new();
+    let mut unavailable = false;
+    for row in rows {
+        let (raw, text) = row?;
+        let Ok(origin) = serde_json::from_str::<xmsg::client::Origin>(&raw) else {
+            continue;
+        };
+        if origin.id.is_none() && origin.service.as_deref() == Some(service) && origin.node == node
+        {
+            if let Some(text) = text {
+                result.push(text);
+            } else {
+                unavailable = true;
+            }
+        }
+    }
+    Ok((result, unavailable))
+}

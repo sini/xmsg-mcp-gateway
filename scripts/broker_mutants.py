@@ -1,0 +1,41 @@
+"""Broker production-source oracles using the existing fresh-artifact mutation harness."""
+
+from pathlib import Path
+
+import events_mutants as harness
+from events_mutants import Case, Edit
+
+ROOT = Path(__file__).resolve().parents[1]
+OWNED = "broker::tests::broker_full_custody_requires_origin_correlation_owner_revision_retention_and_size"
+MCP = "tests/broker_bridge.rs"
+source = (ROOT / "src/serving.rs").read_text()
+start = source.index("let mut result = recovery::dispatch(", source.index("let status_store_file ="))
+lookup = source.index("let broker_result = if let (Some(config), Some(id)) =", start)
+end = source.index("match broker_result {", lookup)
+current = source[start:end]
+stale = source[lookup:end] + source[start:lookup]
+
+CASES = [
+    Case("origin", "lib", OWNED, "src/broker.rs", (Edit("src/reads.rs", "if origin.id.is_none() && origin.service.as_deref() == Some(service) && origin.node == node", "if true"),)),
+    Case("correlation", "lib", OWNED, "src/broker.rs", (Edit("src/reads.rs", "AND c.in_reply_to=:correlation", "AND (:correlation IS NOT NULL)"),)),
+    Case("result-byte-bound", "lib", OWNED, "src/broker.rs", (Edit("src/reads.rs", "length(CAST(c.text AS BLOB))<=:max_bytes", ":max_bytes>0"),)),
+    Case("selected-grant", "broker_bridge", "gist_advertising_and_dispatch_require_selected_grant_and_exact_current_target", MCP, (Edit("src/broker.rs", "grant.grant_id == selected", "true"),)),
+    Case("framed-byte-bound", "broker_bridge", "broker_complete_encoded_request_bound_and_authentication_refuse_before_publication", MCP, (Edit("src/outbound.rs", "if !limits.text_fits(&framed_text) {", "if false {"), Edit("src/outbound.rs", "if !limits.text_fits(&reservation.framed_text) {", "if false {"))),
+    Case("detached-broker-dispatch", "broker_bridge", "cancelling_broker_handler_keeps_the_accepted_submission_owned_by_the_worker", MCP, (Edit("src/serving.rs", "tasks.spawn(broker_work);", "broker_work.await;"),)),
+    Case("final-result-authority", "broker_bridge", "broker_status_rechecks_send_ceiling_at_the_final_result_read", MCP, (Edit("src/serving.rs", current, stale),)),
+]
+
+
+def main():
+    assert len(CASES) == 7, "broker mutant inventory drift"
+    harness.ROOT = ROOT
+    harness.EVIDENCE = ROOT / ".artifacts/broker-mutants"
+    harness.CASES = CASES
+    harness.BASELINE_TARGETS = ["lib", "broker_bridge"]
+    harness.NONCE_TEST = "broker_build_nonce_receipt"
+    harness.main()
+    print("broker-mutants-complete:7/7", flush=True)
+
+
+if __name__ == "__main__":
+    main()

@@ -449,10 +449,38 @@ pub async fn dispatch(
         bus_instance,
         request,
         limits,
+        None,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn dispatch_selected(
+    store: &mut Store,
+    service: &Endpoint,
+    verifier: &crate::auth::Verifier,
+    token: &str,
+    bus_instance: &str,
+    request: &Request,
+    limits: &Limits,
+    selected_grant: &str,
+) -> Result<Outcome, Error> {
+    limits.validate()?;
+    let mut selected_connection = Store::open_for_dispatch(&store.file)?;
+    dispatch_on_connection(
+        &mut selected_connection,
+        service,
+        verifier,
+        token,
+        bus_instance,
+        request,
+        limits,
+        Some(selected_grant),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_on_connection(
     store: &mut Store,
     service: &Endpoint,
@@ -461,6 +489,7 @@ async fn dispatch_on_connection(
     bus_instance: &str,
     request: &Request,
     limits: &Limits,
+    selected_grant: Option<&str>,
 ) -> Result<Outcome, Error> {
     store.require_outbound_ready()?;
     let started = std::time::Instant::now();
@@ -468,6 +497,9 @@ async fn dispatch_on_connection(
         .await
         .map_err(|_| Error::Deadline)??;
     let initial_grant = store.authorize(&identity)?;
+    if selected_grant.is_some_and(|id| id != initial_grant.grant_id) {
+        return Err(Error::Denied);
+    }
     let initial_policy = store.outbound_policy(&initial_grant.grant_id)?;
     let initial_permission = initial_policy.permission(request)?;
     if !verifier.requires_scope(&initial_permission.required_scope) {
@@ -519,6 +551,7 @@ async fn dispatch_on_connection(
             limits,
             &owner,
             &may_have_submitted,
+            selected_grant,
         ),
     )
     .await;
@@ -556,6 +589,7 @@ async fn submit(
     limits: &Limits,
     owner: &str,
     may_have_submitted: &AtomicBool,
+    selected_grant: Option<&str>,
 ) -> Result<Outcome, Error> {
     let identity = verifier.verify(token).await?;
     let fresh_owner = crate::custody::fingerprint(&[
@@ -568,6 +602,9 @@ async fn submit(
         return Err(Error::Denied);
     }
     let authority = store.authorize(&identity)?;
+    if selected_grant.is_some_and(|id| id != authority.grant_id) {
+        return Err(Error::Denied);
+    }
     let policy = store.outbound_policy(&authority.grant_id)?;
     let (op, id, text) = request.parts();
     let permission = policy.permission(request)?;
