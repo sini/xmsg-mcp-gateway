@@ -1,0 +1,56 @@
+name: OCI Image
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  oci:
+    runs-on: ubuntu-latest
+    if: github.repository == 'sini/xmsg-mcp-gateway' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false)
+    # An explicit `shell: bash` runs steps under `bash -eo pipefail`; the implicit default
+    # (`bash -e`) lets a failed pipeline pass.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Build OCI image
+        run: |
+          nix build -L --no-link --print-out-paths .#packages.x86_64-linux.cargoArtifacts
+          nix build -L .#image --out-link result-image --print-out-paths
+
+      - name: Run image oracle check
+        run: |
+          nix build -L --no-link --print-out-paths .#checks.x86_64-linux.image
+
+      - name: Push image to GHCR
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker load < result-image
+          SHA_SHORT=$(git rev-parse --short HEAD)
+          docker tag ghcr.io/sini/xmsg-mcp-gateway:latest "ghcr.io/sini/xmsg-mcp-gateway:sha-$SHA_SHORT"
+          # GHCR sometimes rejects a manifest with "unknown blob" for a layer it has just accepted;
+          # re-pushing uploads nothing new and retries the manifest. Bounded at 3 attempts.
+          push() { for i in 1 2 3; do docker push "$1" && return 0; echo "docker push $1 failed (attempt $i)" >&2; sleep $((i * 10)); done; return 1; }
+          push ghcr.io/sini/xmsg-mcp-gateway:latest
+          push "ghcr.io/sini/xmsg-mcp-gateway:sha-$SHA_SHORT"
+          docker inspect --format='{{range .RepoDigests}}{{println .}}{{end}}' ghcr.io/sini/xmsg-mcp-gateway:latest
