@@ -186,8 +186,15 @@ async fn reconnect_rechecks_changed_limits_and_records_the_link_before_readiness
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     let send = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xmsg_send","arguments":{"request_id":"changed-limits","to":"gateway@gateway.fixture","text":"must refuse"}}});
-    let (status, _, probe) = serving_fixture::request(&serving, "good-token", send).await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let (status, response, probe) = serving_fixture::request(&serving, "good-token", send).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["id"], 2);
+    assert_eq!(response["error"]["code"], -32004);
+    assert_eq!(
+        response["error"]["data"],
+        json!({"submitted":false,"retry":"same request_id"})
+    );
+    assert!(response.get("result").is_none());
     assert_eq!(probe.dispatches.load(Ordering::SeqCst), 0);
     let connection = rusqlite::Connection::open(&fixture.store_file).unwrap();
     let connected: bool = connection
@@ -1309,8 +1316,16 @@ async fn a_request_after_daemon_death_within_the_same_tick_refuses_the_old_snaps
         "dead registration exposed the old mailbox"
     );
     let call = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xmsg_send","arguments":{"request_id":"same-tick","to":"gateway@gateway.fixture","text":"must refuse"}}});
-    let (status, _, request_probe) = serving_fixture::request(&serving, "good-token", call).await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let (status, response, request_probe) =
+        serving_fixture::request(&serving, "good-token", call).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["id"], 2);
+    assert_eq!(response["error"]["code"], -32004);
+    assert_eq!(
+        response["error"]["data"],
+        json!({"submitted":false,"retry":"same request_id"})
+    );
+    assert!(response.get("result").is_none());
     assert_eq!(request_probe.dispatches.load(Ordering::SeqCst), 0);
     assert_eq!(
         tick,
