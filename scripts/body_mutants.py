@@ -11,9 +11,9 @@ SOURCE = (ROOT / "src/serving.rs").read_text()
 EARLY_START = SOURCE.index("    if method == Method::POST\n")
 EARLY_END = SOURCE.index("    let raw = if method == Method::POST", EARLY_START)
 EARLY = SOURCE[EARLY_START:EARLY_END]
-LATE = SOURCE.index(
-    "    let identity = match app.verifier.verify(&token).await", EARLY_END
-)
+VERIFICATION = "    let verification = async { app.verifier.verify(&token).await };"
+assert SOURCE.count(VERIFICATION) == 1
+LATE = SOURCE.index(VERIFICATION, EARLY_END)
 MOVED = SOURCE[:EARLY_START] + SOURCE[EARLY_END:LATE] + EARLY + SOURCE[LATE:]
 BOUND = "if config.max_request_body_bytes < minimum {"
 assert SOURCE.count(BOUND) == 1
