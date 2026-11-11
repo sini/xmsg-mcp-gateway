@@ -33,7 +33,7 @@ resource name).
 | Rust `xmsg-mcp-gateway` + `xmsg --leaf` registration (with and without `/proc`), `xmsg_send` / `xmsg_reply` / `xmsg_inbox` / `xmsg_read_message`, durable custody, and Standard Webhooks Events | **MEASURED** | Verified locally and in CI against pinned `xmsg` (`ci/xmsg-pin.toml`), including crash/restart handoff cells and mutation suites. |
 | Direct OAuth audience override (`verifier.audience` for Kanidm `1.11.2`) and Keycloak `26.8.1` OAuth 2.1 broker fallback (standalone and Kanidm-federated) | **MEASURED** | Verified locally against the unmodified Rust `xmsg-mcp-gateway` verifier (`HTTP 200` on valid PKCE `S256` + refresh tokens, `HTTP 401` on multi-audience and revoked tokens; see [provider-setup.md](provider-setup.md) and [oauth-keycloak.md](oauth-keycloak.md)). |
 | OCI image (`ghcr.io/sini/xmsg-mcp-gateway`) non-root `User`, ELF entrypoint, and absence of Python / `phase1` / `/bin/sh` | **MEASURED** | Enforced on every build by `nix/check_image.py` (`checks.x86_64-linux.image` in `.github/workflows/oci.yml`). |
-| Live hosted ChatGPT **OAuth** connection through `tunnel-client`'s Harpoon OAuth shim (`mcp.oauth_trusted_origins` + `harpoon.oauth_forward_origins`) and live cutover gates | **NOT YET MEASURED** | Executed by the operator at deployment cutover ([Section P4](#p4-cutover-checks-to-record)); confirm the authorization server's `/token` access log and live hosted Events wakeup before enabling outbound send/reply policy. |
+| Live hosted ChatGPT **OAuth** connection through Secure MCP Tunnel, bidirectional messaging and Events delivery | **MEASURED — 2026-11-10** | Production observation: OAuth connected through the tunnel, recipient listing and send/reply worked in both directions, and gateway logs marked Events deliveries `accepted`. This records that deployment; operators still verify their own [cutover checks](#p4-cutover-checks-to-record). |
 
 ---
 
@@ -62,7 +62,7 @@ All hostnames, tunnel IDs, node names and UUIDs below (`https://auth.example`,
     scopes `openid profile email identity:read events:subscribe`, and the
     redirect URI `https://chatgpt.com/connector_platform_oauth_redirect` (confirm
     the exact callback URI displayed by the ChatGPT connection UI during
-    [Section P3](#p3-connect-in-chatgpt-and-verify-events-delivery-cutover--not-yet-measured)). Provision a
+    [Section P3](#p3-connect-in-chatgpt-and-verify-events-delivery-measured-2026-11-10)). Provision a
     separate confidential client for RFC 7662 token introspection.
 - **Host or Kubernetes Pod runtime:**
   - `xmsg` (`ghcr.io/sini/xmsg:latest` or release binary) running in `--leaf`
@@ -294,7 +294,12 @@ Confirm `/readyz` returns `200` (`curl -fsS http://127.0.0.1:18081/readyz`) and
 that startup logs include `harpoon startup catalog digest` and
 `inclusion_reason=oauth-forwarding-origin` before connecting from ChatGPT.
 
-## P3. Connect in ChatGPT and verify Events delivery (cutover — not yet measured)
+## P3. Connect in ChatGPT and verify Events delivery (measured 2026-11-10)
+
+Production observations on 2026-11-10 covered OAuth through the tunnel, listing,
+send/reply in both directions and Events deliveries logged as `accepted`. Callback
+acceptance does not replace checking that a consumer wakes and reads its mailbox
+in each deployment. The following procedure records that deployment-specific check.
 
 1. Open ChatGPT → **Plugins** → **+** → **Add custom MCP server**.
 2. Under **Connection**, choose **Tunnel** and select the associated `tunnel_id`.

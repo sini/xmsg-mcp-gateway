@@ -97,7 +97,7 @@ CASES += [
     ),
     (
         "state-profile",
-        "store\n            .validate_profile(&profile)",
+        "store\n            .validate_profile(&bindings[0])",
         "Ok::<(), GrantError>(())",
         "state_cannot_be_reused_for_another_service_resource_or_owner",
         "foreign authority profile was accepted",

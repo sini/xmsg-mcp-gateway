@@ -49,7 +49,7 @@ CASES = [
         "impl VerifiedIdentity {",
         """impl From<crate::grants::Binding> for VerifiedIdentity {
     fn from(binding: crate::grants::Binding) -> Self {
-        Self { service: binding.service, issuer: binding.issuer, resource: binding.resource,
+        Self { audience: binding.resource.clone(), service: binding.service, issuer: binding.issuer, resource: binding.resource,
             subject: binding.subject, hosted_client: binding.hosted_client, expires_at: u64::MAX }
     }
 }
@@ -98,7 +98,7 @@ RUNTIME = [
     ("subject", 'claims["sub"].as_str() != Some(&self.config.subject)'),
     (
         "hosted-client",
-        'claims["client_id"].as_str() != Some(&self.config.hosted_client)',
+        'client != Some(self.config.hosted_client.as_str())',
     ),
     ("expired", "exp <= now"),
     ("not-before", "nbf > now"),
@@ -156,7 +156,7 @@ CASES.append(
     (
         "configured-audience-hosted-client",
         "src/auth.rs",
-        'claims["client_id"].as_str() != Some(&self.config.hosted_client)',
+        'client != Some(self.config.hosted_client.as_str())',
         "false",
         "configured_audience_requires_the_hosted_client",
     )

@@ -278,3 +278,5 @@ References: [MCP Events](https://developers.openai.com/plugins/build/mcp-events)
 Public operational setup is documented above and in [provider setup](docs/provider-setup.md).
 Run the tests and mutation command from a fresh checkout to reproduce local checks;
 fresh mutation output is written to the gitignored `.artifacts/mutations/` directory.
+
+Planned authentication extension: [multiple verifier profiles and issuer cutover](docs/auth-profiles.md).

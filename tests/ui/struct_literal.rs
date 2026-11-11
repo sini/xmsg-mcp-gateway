@@ -4,5 +4,6 @@ fn main() {
         service: "gateway".into(), issuer: "https://issuer.example/".into(),
         resource: "https://gateway.example/mcp".into(), subject: "owner".into(),
         hosted_client: "hosted-client".into(), expires_at: u64::MAX,
+        audience: "https://gateway.example/mcp".into(),
     };
 }

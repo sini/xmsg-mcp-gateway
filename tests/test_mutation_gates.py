@@ -142,7 +142,7 @@ class MutationGatesTests(unittest.TestCase):
                 "revision": receipt["revision"],
                 "full": False,
                 "selected": ["events"],
-                "changed": ["src/event_dispatch.rs"],
+                "changed": ["src/event_observability_tests.rs"],
             }
             self.assertEqual(
                 gates.verify(plan, [receipt], registry["suites"], root), 25
@@ -172,10 +172,27 @@ class MutationGatesTests(unittest.TestCase):
         )
 
     def test_complete_inventory_and_execution_modes(self):
-        self.assertEqual(len(self.suites), 19)
-        self.assertEqual(sum(s["count"] for s in self.suites), 249)
+        self.assertEqual(len(self.suites), 20)
+        self.assertEqual(sum(s["count"] for s in self.suites), 282)
         modes = {(s["script"], tuple(s["args"])) for s in self.suites}
         self.assertIn(("scripts/reservation_lifetime_mutants.py", ("--live",)), modes)
+
+    def test_profiles_have_full_source_and_named_output_coverage(self):
+        suite = next(s for s in self.suites if s["id"] == "profiles")
+        self.assertEqual(suite["count"], 33)
+        self.assertEqual(len(suite["required_output"]), 66)
+        for source in [
+            "src/auth.rs",
+            "src/grants.rs",
+            "src/event_dispatch.rs",
+            "src/serving.rs",
+            "src/outbound.rs",
+        ]:
+            self.assertIn(source, suite["dependencies"])
+            self.assertIn("profiles", gates.select(self.suites, [source]))
+        self.assertIn("merged-provider", suite["labels"])
+        self.assertIn("events-selected-subscription", suite["labels"])
+        self.assertEqual(suite["completion"], "profile-mutants-complete:33/33")
 
     def test_shared_unknown_and_full_changes_select_every_suite(self):
         expected = [s["id"] for s in self.suites]
@@ -220,7 +237,7 @@ class MutationGatesTests(unittest.TestCase):
         self.assertIn("dispatch_logging", gates.select(self.suites, ["src/serving.rs"]))
         self.assertIn("broker", gates.select(self.suites, ["tests/broker_bridge.rs"]))
         self.assertEqual(
-            len(gates.select(self.suites, ["tests/common/provider.rs"])), 19
+            len(gates.select(self.suites, ["tests/common/provider.rs"])), 20
         )
         self.assertEqual(gates.select(self.suites, ["phase1/worker.py"]), ["python"])
 
@@ -265,7 +282,7 @@ class MutationGatesTests(unittest.TestCase):
             "revision": "revision",
             "full": False,
             "selected": [suite["id"]],
-            "changed": ["src/event_dispatch.rs"],
+            "changed": ["src/event_observability_tests.rs"],
         }
         return plan, receipt
 

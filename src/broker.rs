@@ -32,10 +32,12 @@ impl Config {
         grant: &Authorization,
         selected: &str,
         verifier: &crate::auth::Verifier,
+        identity: &crate::auth::VerifiedIdentity,
     ) -> bool {
         grant.grant_id == selected
             && policy.send.as_ref().is_some_and(|p| {
-                p.targets.contains(&self.destination) && verifier.requires_scope(&p.required_scope)
+                p.targets.contains(&self.destination)
+                    && verifier.requires_scope_for(identity, &p.required_scope)
             })
     }
 }
@@ -286,7 +288,7 @@ pub(crate) fn lookup(
     if target != config.destination {
         return Ok(None);
     }
-    if !config.permitted(&policy, &authority, selected, verifier) {
+    if !config.permitted(&policy, &authority, selected, verifier, identity) {
         return Err(crate::outbound::Error::Denied);
     }
     let Some((_, text)) = framed.split_once('\n') else {

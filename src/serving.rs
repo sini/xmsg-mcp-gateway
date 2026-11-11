@@ -19,8 +19,8 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
-use crate::auth::{self, VerifiedIdentity, Verifier, VerifierConfig};
-use crate::grants::{Authorization, Binding, Error as GrantError, Store};
+use crate::auth::{self, ProfileConfig, VerifiedIdentity, Verifier, VerifierConfig};
+use crate::grants::{Authorization, Error as GrantError, Store};
 use crate::outbound::{self, Outcome, Policy};
 use crate::xmsg_config::{DeploymentManifest, ManifestError, XmsgConfig};
 use crate::{event_dispatch, events, reads, recovery, session};
@@ -120,11 +120,69 @@ struct Configuration {
     max_request_body_bytes: usize,
     allowed_hosts: Vec<String>,
     allowed_origins: Vec<String>,
-    verifier: VerifierConfig,
+    verifier: Option<VerifierConfig>,
+    verifier_profiles: Option<Vec<ProfileConfig>>,
     events: Option<EventsConfiguration>,
     #[serde(default, deserialize_with = "present_messaging")]
     messaging: Option<MessagingConfiguration>,
     broker: Option<crate::broker::Config>,
+}
+
+fn configured_verifier(
+    config: &mut Configuration,
+    store: &Store,
+) -> Result<Arc<Verifier>, StartupError> {
+    let (verifier, collection) = match (config.verifier.take(), config.verifier_profiles.take()) {
+        (Some(single), None) => (Verifier::from_config(single), false),
+        (None, Some(profiles)) => (Verifier::from_profile_configs(profiles), true),
+        _ => return Err(ConfigurationError.into()),
+    };
+    let verifier = verifier.map_err(|_| ConfigurationError)?;
+    if !verifier.requires_scope("identity:read") {
+        return Err(ConfigurationError.into());
+    }
+    let bindings = verifier.bindings();
+    if collection {
+        store
+            .validate_profiles(&bindings)
+            .map_err(|_| ConfigurationError)?;
+    } else {
+        store
+            .validate_profile(&bindings[0])
+            .map_err(|_| ConfigurationError)?;
+    }
+    Ok(Arc::new(verifier))
+}
+
+fn validate_events_profile(
+    store: &Store,
+    verifier: &Verifier,
+    grant_id: &str,
+) -> Result<(), ConfigurationError> {
+    let mut matches = 0;
+    for binding in verifier.bindings() {
+        let found: bool = store.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM grants WHERE id=?1 AND service=?2 AND issuer=?3 AND resource=?4 AND subject=?5 AND hosted_client=?6)",
+            rusqlite::params![grant_id, binding.service, binding.issuer, binding.resource, binding.subject, binding.hosted_client],
+            |row| row.get(0),
+        ).map_err(|_| ConfigurationError)?;
+        if found && verifier.requires_scope_for_binding(&binding, "events:subscribe") {
+            matches += 1;
+        }
+    }
+    if matches != 1 {
+        return Err(ConfigurationError);
+    }
+    Ok(())
+}
+
+fn same_verified_profile(a: &VerifiedIdentity, b: &VerifiedIdentity) -> bool {
+    a.service() == b.service()
+        && a.issuer() == b.issuer()
+        && a.resource() == b.resource()
+        && a.subject() == b.subject()
+        && a.hosted_client() == b.hosted_client()
+        && a.audience() == b.audience()
 }
 
 fn default_header_read_timeout_ms() -> u64 {
@@ -168,7 +226,7 @@ struct App {
     allowed_hosts: Vec<String>,
     allowed_origins: Vec<String>,
     resource: String,
-    issuer: String,
+    issuers: Vec<String>,
     scopes: Vec<String>,
     challenge: HeaderValue,
     messaging: Option<Messaging>,
@@ -207,7 +265,7 @@ impl Serving {
         config_file: &Path,
         transport: Arc<dyn crate::webhook::Transport>,
     ) -> Result<Self, StartupError> {
-        let config = load_configuration(config_file)?;
+        let mut config = load_configuration(config_file)?;
         if (!config.bind.ip().is_loopback() && !config.allow_non_loopback_bind)
             || config.allowed_hosts.is_empty()
             || config.header_read_timeout_ms == 0
@@ -221,11 +279,6 @@ impl Serving {
                 .allowed_hosts
                 .iter()
                 .any(|host| host.trim().is_empty())
-            || !config
-                .verifier
-                .required_scopes
-                .iter()
-                .any(|scope| scope == "identity:read")
         {
             return Err(ConfigurationError.into());
         }
@@ -245,8 +298,13 @@ impl Serving {
                 return Err(ConfigurationError.into());
             }
         }
-        let mut metadata_url =
-            reqwest::Url::parse(&config.verifier.resource).map_err(|_| ConfigurationError)?;
+        let store = Store::open(&config.grant_store).map_err(|_| ConfigurationError)?;
+        let verifier = configured_verifier(&mut config, &store)?;
+        let resource = verifier.resource().to_owned();
+        let issuers = verifier.issuers();
+        let scopes = verifier.scopes();
+        let verification_timeout_ms = verifier.max_timeout_ms();
+        let mut metadata_url = reqwest::Url::parse(&resource).map_err(|_| ConfigurationError)?;
         let resource_path = metadata_url.path().trim_end_matches('/').to_owned();
         if resource_path.contains(['{', '}', '*']) || resource_path.starts_with("/.well-known/") {
             return Err(ConfigurationError.into());
@@ -259,26 +317,8 @@ impl Serving {
         let challenge =
             HeaderValue::from_str(&format!("Bearer resource_metadata=\"{metadata_url}\""))
                 .map_err(|_| ConfigurationError)?;
-        let resource = config.verifier.resource.clone();
-        let issuer = config.verifier.issuer.clone();
-        let scopes = config.verifier.required_scopes.clone();
-        let profile = Binding {
-            service: config.verifier.service.clone(),
-            issuer: config.verifier.issuer.clone(),
-            resource: config.verifier.resource.clone(),
-            subject: config.verifier.subject.clone(),
-            hosted_client: config.verifier.hosted_client.clone(),
-        };
-        let verification_timeout_ms = config.verifier.timeout_ms;
-        let verifier =
-            Arc::new(Verifier::from_config(config.verifier).map_err(|_| ConfigurationError)?);
-        let store = Store::open(&config.grant_store).map_err(|_| ConfigurationError)?;
-        store
-            .validate_profile(&profile)
-            .map_err(|_| ConfigurationError)?;
         let events = if let Some(configuration) = &config.events {
             if config.messaging.is_none()
-                || !verifier.requires_scope("events:subscribe")
                 || configuration.grant_id.is_empty()
                 || configuration.dispatch_timeout_ms > 60_000
                 || configuration.dispatch_timeout_ms
@@ -294,10 +334,7 @@ impl Serving {
                 .custody_limits
                 .validate()
                 .map_err(|_| ConfigurationError)?;
-            let matches:bool=store.connection.query_row("SELECT EXISTS(SELECT 1 FROM grants WHERE id=?1 AND service=?2 AND issuer=?3 AND resource=?4 AND subject=?5 AND hosted_client=?6)",rusqlite::params![configuration.grant_id,profile.service,profile.issuer,profile.resource,profile.subject,profile.hosted_client],|row|row.get(0)).map_err(|_|ConfigurationError)?;
-            if !matches {
-                return Err(ConfigurationError.into());
-            }
+            validate_events_profile(&store, &verifier, &configuration.grant_id)?;
             let key = crate::event_store::EventKey::load(&configuration.key_file)
                 .map_err(|_| ConfigurationError)?;
             store
@@ -382,7 +419,7 @@ impl Serving {
             request_timeout_ms: config.request_timeout_ms,
             max_request_body_bytes: config.max_request_body_bytes,
             resource,
-            issuer,
+            issuers,
             scopes,
             challenge,
             messaging,
@@ -605,7 +642,7 @@ async fn protected_resource(State(app): State<Arc<App>>, request: Request) -> Re
     if !permitted_request(&app, &request) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    Json(json!({"resource": app.resource, "authorization_servers": [app.issuer], "scopes_supported": app.scopes})).into_response()
+    Json(json!({"resource": app.resource, "authorization_servers": app.issuers, "scopes_supported": app.scopes})).into_response()
 }
 
 #[derive(Deserialize)]
@@ -717,27 +754,45 @@ fn pending_response(pending: &PendingReply) -> Response {
     )
 }
 
-fn list_enabled(app: &App, permission: &Option<outbound::Permission>) -> bool {
-    permission
-        .as_ref()
-        .is_some_and(|permission| app.verifier.requires_scope(&permission.required_scope))
+fn list_enabled(
+    app: &App,
+    identity: &VerifiedIdentity,
+    permission: &Option<outbound::Permission>,
+) -> bool {
+    permission.as_ref().is_some_and(|permission| {
+        app.verifier
+            .requires_scope_for(identity, &permission.required_scope)
+    })
 }
 
-fn permission_enabled(app: &App, permission: &Option<outbound::Permission>) -> bool {
-    list_enabled(app, permission)
+fn permission_enabled(
+    app: &App,
+    identity: &VerifiedIdentity,
+    permission: &Option<outbound::Permission>,
+) -> bool {
+    list_enabled(app, identity, permission)
         && permission
             .as_ref()
             .is_some_and(|permission| !permission.targets.is_empty())
 }
 
-fn tools(app: &App, policy: &Policy, grant: &Authorization) -> Value {
+fn tools(app: &App, identity: &VerifiedIdentity, policy: &Policy, grant: &Authorization) -> Value {
+    let scopes: Vec<_> = app
+        .scopes
+        .iter()
+        .filter(|scope| app.verifier.requires_scope_for(identity, scope))
+        .collect();
     let mut tools = vec![
         json!({"name":"xmsg_identity","description":"Read the authenticated gateway identity.",
         "inputSchema":{"type":"object","properties":{},"additionalProperties":false},
         "annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false},
-        "securitySchemes":[{"type":"oauth2","scopes":app.scopes}]}),
+        "securitySchemes":[{"type":"oauth2","scopes":scopes}]}),
     ];
     if app.messaging.is_some() {
+        let custody_selected = app
+            .events
+            .as_ref()
+            .is_none_or(|events| events.selected_grant == grant.grant_id);
         for (name, description, properties, required) in [
             (
                 "xmsg_inbox",
@@ -753,12 +808,15 @@ fn tools(app: &App, policy: &Policy, grant: &Authorization) -> Value {
                 json!(["message_id"]),
             ),
         ] {
+            if !custody_selected {
+                continue;
+            }
             tools.push(json!({"name":name,"description":description,
                 "inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false},
                 "annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false},
-                "securitySchemes":[{"type":"oauth2","scopes":app.scopes}]}));
+                "securitySchemes":[{"type":"oauth2","scopes":scopes}]}));
         }
-        if list_enabled(app, &policy.send) {
+        if list_enabled(app, identity, &policy.send) {
             tools.push(json!({"name":"xmsg_list","description":"List authorized send-policy targets with live status.",
                 "inputSchema":{"type":"object","properties":{"node":{"type":"string","minLength":1},
                     "kind":{"type":"string","enum":["service","instance","subagent"]},
@@ -766,13 +824,13 @@ fn tools(app: &App, policy: &Policy, grant: &Authorization) -> Value {
                     "within":{"type":"integer","minimum":1,"maximum":604800}},
                     "required":[],"additionalProperties":false},
                 "annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false},
-                "securitySchemes":[{"type":"oauth2","scopes":app.scopes}]}));
+                "securitySchemes":[{"type":"oauth2","scopes":scopes}]}));
         }
         for (name, permission, target) in [
             ("xmsg_send", &policy.send, "to"),
             ("xmsg_reply", &policy.reply, "message_id"),
         ] {
-            if !permission_enabled(app, permission) {
+            if !permission_enabled(app, identity, permission) {
                 continue;
             }
             tools.push(json!({"name":name,"description":"Submit authorized external-data text with a durable request_id; retry only with that same request_id.",
@@ -780,31 +838,44 @@ fn tools(app: &App, policy: &Policy, grant: &Authorization) -> Value {
                     target:{"type":"string"},"text":{"type":"string"}},
                     "required":["request_id",target,"text"],"additionalProperties":false},
                 "annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":true,"idempotentHint":true},
-                "securitySchemes":[{"type":"oauth2","scopes":app.scopes}]}));
+                "securitySchemes":[{"type":"oauth2","scopes":scopes}]}));
         }
     }
-    if app.events.is_some() {
+    if app
+        .events
+        .as_ref()
+        .is_some_and(|events| events.selected_grant == grant.grant_id)
+    {
         for (name,argument,description,read_only) in [
             ("xmsg_ack","message_id","Record durable acceptance of responsibility for an owned message. This is not completion; use a durable drainer or deduplication with idempotent effects.",false),
             ("xmsg_message_status","request_id","Read owned send/reply outcomes without retrying or submitting.",true),
         ] {
-            tools.push(json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":{argument:{"type":"string","minLength":1,"maxLength":4096}},"required":[argument],"additionalProperties":false},"annotations":{"readOnlyHint":read_only,"destructiveHint":false,"openWorldHint":false,"idempotentHint":true},"securitySchemes":[{"type":"oauth2","scopes":app.scopes}]}));
+            tools.push(json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":{argument:{"type":"string","minLength":1,"maxLength":4096}},"required":[argument],"additionalProperties":false},"annotations":{"readOnlyHint":read_only,"destructiveHint":false,"openWorldHint":false,"idempotentHint":true},"securitySchemes":[{"type":"oauth2","scopes":scopes}]}));
         }
     }
-    if broker_permitted(app, policy, grant) {
+    if broker_permitted(app, identity, policy, grant) {
         for mut tool in crate::broker::catalog() {
-            tool["securitySchemes"] = json!([{"type":"oauth2","scopes":app.scopes}]);
+            tool["securitySchemes"] = json!([{"type":"oauth2","scopes":scopes}]);
             tools.push(tool);
         }
     }
     json!({"tools":tools})
 }
 
-fn broker_permitted(app: &App, policy: &Policy, grant: &Authorization) -> bool {
+fn broker_permitted(
+    app: &App,
+    identity: &VerifiedIdentity,
+    policy: &Policy,
+    grant: &Authorization,
+) -> bool {
     match (&app.broker, &app.events, &app.messaging) {
-        (Some(config), Some(events), Some(_)) => {
-            config.permitted(policy, grant, &events.selected_grant, &app.verifier)
-        }
+        (Some(config), Some(events), Some(_)) => config.permitted(
+            policy,
+            grant,
+            &events.selected_grant,
+            &app.verifier,
+            identity,
+        ),
         _ => false,
     }
 }
@@ -826,7 +897,13 @@ async fn lookup_broker(
             .ok_or(outbound::Error::Configuration)?;
         let authority = store.authorize(&identity)?;
         let policy = store.outbound_policy(&authority.grant_id)?;
-        if !config.permitted(&policy, &authority, &events.selected_grant, &app.verifier) {
+        if !config.permitted(
+            &policy,
+            &authority,
+            &events.selected_grant,
+            &app.verifier,
+            &identity,
+        ) {
             return Err(outbound::Error::Denied);
         }
         store.retire_outbound(identity.service(), &messaging.limits)?;
@@ -849,6 +926,7 @@ async fn lookup_broker(
 #[allow(clippy::too_many_arguments)]
 async fn broker_call(
     app: Arc<App>,
+    identity: Arc<VerifiedIdentity>,
     token: String,
     id: Value,
     request: outbound::SendArguments,
@@ -898,11 +976,14 @@ async fn broker_call(
             if receipt.is_some() {
                 confirmed_submission = true;
                 tracing::debug!(target:"gateway_broker_submission_confirmed", "submission receipt available; recovering application result");
-                let identity=Arc::new(task_app.verifier.verify(&token).await?);
+                let refreshed=Arc::new(task_app.verifier.verify(&token).await?);
+                if !same_verified_profile(&identity, &refreshed) { return Err(outbound::Error::Denied); }
+                let identity = refreshed;
                 loop {
                     let value=lookup_broker(task_app.clone(),identity.clone(),snapshot.bus.clone(),snapshot.endpoint.sender().to_owned(),request_id.clone()).await?;
                     if value.is_some() {
                         let current=Arc::new(task_app.verifier.verify(&token).await?);
+                        if !same_verified_profile(&identity, &current) { return Err(outbound::Error::Denied); }
                         if let Some(value)=lookup_broker(task_app.clone(),current,snapshot.bus.clone(),snapshot.endpoint.sender().to_owned(),request_id.clone()).await? {
                             return Ok(json!({"request_id":request_id,"submission":"confirmed","receipt":receipt,"broker":value}));
                         }
@@ -957,8 +1038,10 @@ async fn broker_call(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn messaging_call(
     app: Arc<App>,
+    identity: Arc<VerifiedIdentity>,
     token: String,
     id: Value,
     request: outbound::Request,
@@ -978,7 +1061,7 @@ async fn messaging_call(
             &policy.reply,
         ),
     };
-    if !permission_enabled(&app, permission) {
+    if !permission_enabled(&app, &identity, permission) {
         diagnostic::emit(operation, "denied", "policy");
         return StatusCode::FORBIDDEN.into_response();
     }
@@ -1286,7 +1369,7 @@ async fn mcp_request(
         "initialize" => match serde_json::from_value::<Initialize>(rpc.params) {
             Ok(init) => {
                 json!({"protocolVersion": if VERSIONS.contains(&init.protocol_version.as_str()) { init.protocol_version.as_str() } else { VERSIONS[2] },
-                "capabilities": if app.events.is_some() { json!({"tools":{},"events":{}}) } else { json!({"tools":{}}) },"serverInfo":{"name":"xmsg-mcp-gateway","version":env!("CARGO_PKG_VERSION")}})
+                "capabilities": if app.events.as_ref().is_some_and(|events| events.selected_grant == grant.grant_id) { json!({"tools":{},"events":{}}) } else { json!({"tools":{}}) },"serverInfo":{"name":"xmsg-mcp-gateway","version":env!("CARGO_PKG_VERSION")}})
             }
             Err(_) => return rpc_error(&id, -32602, "Invalid params"),
         },
@@ -1297,7 +1380,7 @@ async fn mcp_request(
             match rpc.method.as_str() {
                 "notifications/initialized" => return StatusCode::ACCEPTED.into_response(),
                 "ping" => json!({}),
-                _ => tools(&app, &policy, &grant),
+                _ => tools(&app, &identity, &policy, &grant),
             }
         }
         "tools/call" => {
@@ -1311,7 +1394,7 @@ async fn mcp_request(
                 operation: Some(operation),
             });
             if crate::broker::NAMES.contains(&call.name.as_str()) {
-                if !broker_permitted(&app, &policy, &grant) {
+                if !broker_permitted(&app, &identity, &policy, &grant) {
                     diagnostic::emit(operation, "denied", "policy");
                     return StatusCode::FORBIDDEN.into_response();
                 }
@@ -1322,6 +1405,7 @@ async fn mcp_request(
                 };
                 return broker_call(
                     app,
+                    identity,
                     token,
                     id,
                     request,
@@ -1459,6 +1543,13 @@ async fn mcp_request(
             if matches!(call.name.as_str(), "xmsg_inbox" | "xmsg_read_message")
                 && app.messaging.is_some()
             {
+                if app
+                    .events
+                    .as_ref()
+                    .is_some_and(|events| events.selected_grant != grant.grant_id)
+                {
+                    return StatusCode::FORBIDDEN.into_response();
+                }
                 let request = match call.name.as_str() {
                     "xmsg_inbox" => serde_json::from_value::<reads::InboxArguments>(call.arguments)
                         .map(reads::Request::Inbox),
@@ -1499,7 +1590,7 @@ async fn mcp_request(
                 };
             }
             if call.name == "xmsg_list" && app.messaging.is_some() {
-                if !list_enabled(&app, &policy.send) {
+                if !list_enabled(&app, &identity, &policy.send) {
                     diagnostic::emit(operation, "denied", "policy");
                     return StatusCode::FORBIDDEN.into_response();
                 }
@@ -1569,7 +1660,8 @@ async fn mcp_request(
                     Ok(request) => request,
                     Err(_) => return invalid_dispatch(operation, &id, "Invalid params"),
                 };
-                return messaging_call(app, token, id, request, policy, store, progress).await;
+                return messaging_call(app, identity, token, id, request, policy, store, progress)
+                    .await;
             }
             if call.name != "xmsg_identity" {
                 diagnostic::emit(operation, "invalid", "tool_unavailable");
@@ -1583,7 +1675,11 @@ async fn mcp_request(
                 "resource":identity.resource(),"hosted_client":identity.hosted_client(),"grant_revision":grant.revision});
             if let Some(messaging) = &app.messaging {
                 data["messaging_status"] = messaging.session.status();
-                if let Some(events) = &app.events {
+                if let Some(events) = app
+                    .events
+                    .as_ref()
+                    .filter(|events| events.selected_grant == grant.grant_id)
+                {
                     let (bus, mailbox) = messaging.session.custody_scope();
                     match events.health(&identity, bus, mailbox) {
                         Ok(summary) => data["events_status"] = summary,
@@ -1718,9 +1814,16 @@ fn load_configuration(config_file: &Path) -> Result<Configuration, StartupError>
     let absolute = std::path::absolute(config_file).map_err(|_| ConfigurationError)?;
     let directory = absolute.parent().ok_or(ConfigurationError)?;
     resolve_profile_path(directory, &mut config.grant_store);
-    resolve_profile_path(directory, &mut config.verifier.client_secret_file);
-    if let Some(file) = &mut config.verifier.root_certificate_file {
-        resolve_profile_path(directory, file);
+    for verifier in config.verifier.iter_mut().chain(
+        config
+            .verifier_profiles
+            .iter_mut()
+            .flat_map(|profiles| profiles.iter_mut().map(|profile| &mut profile.config)),
+    ) {
+        resolve_profile_path(directory, &mut verifier.client_secret_file);
+        if let Some(file) = &mut verifier.root_certificate_file {
+            resolve_profile_path(directory, file);
+        }
     }
     if let Some(events) = &mut config.events {
         resolve_profile_path(directory, &mut events.key_file);
@@ -1738,33 +1841,16 @@ fn load_configuration(config_file: &Path) -> Result<Configuration, StartupError>
 
 /// Local owner commands load authority and keys without starting a listener or service session.
 pub fn owner_events(config_file: &Path) -> Result<events::Events, StartupError> {
-    let config = load_configuration(config_file)?;
-    let events = config.events.ok_or(ConfigurationError)?;
+    let mut config = load_configuration(config_file)?;
     let store = Store::open(&config.grant_store).map_err(|_| ConfigurationError)?;
-    let binding = Binding {
-        service: config.verifier.service.clone(),
-        issuer: config.verifier.issuer.clone(),
-        resource: config.verifier.resource.clone(),
-        subject: config.verifier.subject.clone(),
-        hosted_client: config.verifier.hosted_client.clone(),
-    };
-    store
-        .validate_profile(&binding)
-        .map_err(|_| ConfigurationError)?;
-    let matches:bool=store.connection.query_row("SELECT EXISTS(SELECT 1 FROM grants WHERE id=?1 AND service=?2 AND issuer=?3 AND resource=?4 AND subject=?5 AND hosted_client=?6)",rusqlite::params![events.grant_id,binding.service,binding.issuer,binding.resource,binding.subject,binding.hosted_client],|row|row.get(0)).map_err(|_|ConfigurationError)?;
-    if !matches {
-        return Err(ConfigurationError.into());
-    }
+    let verifier = configured_verifier(&mut config, &store)?;
+    let events = config.events.ok_or(ConfigurationError)?;
+    validate_events_profile(&store, &verifier, &events.grant_id)?;
     let key =
         crate::event_store::EventKey::load(&events.key_file).map_err(|_| ConfigurationError)?;
     store
         .require_events_ready(&key)
         .map_err(|_| ConfigurationError)?;
-    let verifier =
-        Arc::new(Verifier::from_config(config.verifier).map_err(|_| ConfigurationError)?);
-    if !verifier.requires_scope("events:subscribe") {
-        return Err(ConfigurationError.into());
-    }
     Ok(events::Events::new(
         config.grant_store,
         key,

@@ -2,12 +2,13 @@ use std::path::Path;
 use std::process::{Command, Output};
 use xmsg_mcp_gateway::grants::Store;
 
-const COMMANDS: [&str; 5] = [
+const COMMANDS: [&str; 6] = [
     "migrate-custody",
     "migrate-custody-summaries",
     "migrate-outbound",
     "migrate-retirement",
     "migrate-events",
+    "migrate-profiles",
 ];
 fn run(file: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_xmsg-mcp-gateway"))
@@ -48,6 +49,9 @@ fn complete(file: &Path, key: &Path) {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(run(file, &["migrate-profiles", "--if-needed"])
+        .status
+        .success());
 }
 
 #[test]
@@ -99,6 +103,9 @@ fn if_needed_chain_migrates_and_all_completed_commands_are_byte_identical_noops(
     )
     .status
     .success());
+    assert!(run(&file, &["migrate-profiles", "--if-needed"])
+        .status
+        .success());
     for command in COMMANDS {
         let before = std::fs::read(&file).unwrap();
         let output = run(&file, &[command, "--if-needed"]);
@@ -229,7 +236,7 @@ fn migrations_pending_matches_shared_predicates_without_writes() {
             "inspection wrote state"
         );
     };
-    inspect(b"migrate-custody\nmigrate-outbound\nmigrate-retirement\nmigrate-custody-summaries\nmigrate-events\n", 10);
+    inspect(b"migrate-custody\nmigrate-outbound\nmigrate-retirement\nmigrate-custody-summaries\nmigrate-events\nmigrate-profiles\n", 10);
     std::fs::remove_file(&file).unwrap();
     complete(&file, &key(dir.path()));
     inspect(b"", 0);
@@ -316,7 +323,7 @@ fn migrations_pending_keeps_one_readonly_snapshot_during_migration() {
     release_tx.send(()).unwrap();
     assert_eq!(
         inspector.join().unwrap().len(),
-        5,
+        6,
         "mixed migration snapshots"
     );
     assert_eq!(
@@ -324,6 +331,11 @@ fn migrations_pending_keeps_one_readonly_snapshot_during_migration() {
             .unwrap()
             .pending_migrations()
             .unwrap(),
-        ["migrate-outbound", "migrate-retirement", "migrate-events"]
+        [
+            "migrate-outbound",
+            "migrate-retirement",
+            "migrate-events",
+            "migrate-profiles"
+        ]
     );
 }

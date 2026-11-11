@@ -512,3 +512,7 @@ or unsupported stores return the normal error exit 1.
 If exit 10 reports work, stop every gateway process, back up the database, then
 run the existing shellless init chain above. Restart only after migration succeeds;
 rollback requires the pre-migration backup. Inspection itself needs no backup.
+
+## Multiple authentication profiles
+
+Planned, not yet released: [authentication profiles](auth-profiles.md) describes exact issuer/client/audience selection, the explicit grant migration, configuration compatibility and owner-run Events cutover. Use `verifier_profiles` instead of `verifier` when configuring more than one accepted binding.

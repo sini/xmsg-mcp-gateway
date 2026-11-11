@@ -70,9 +70,10 @@ fn subscription(
     store: &Store,
     bus: &str,
     mailbox: &str,
+    selected_grant: &str,
     at: i64,
 ) -> Result<Option<Subscription>, Error> {
-    Ok(store.connection.query_row("SELECT s.id,s.owner_key,s.service,s.issuer,s.resource,s.subject,s.hosted_client,s.grant_id,s.grant_revision,s.generation,s.expires,s.url,s.secret,s.old_secret,s.bearer,s.rotation_until,s.callback_cursor FROM event_subscriptions s JOIN grants g ON g.id=s.grant_id WHERE s.bus=?1 AND s.mailbox=?2 AND s.status='active' AND s.expires>?3 AND g.enabled=1 AND g.revision=s.grant_revision AND g.service=s.service AND g.issuer=s.issuer AND g.resource=s.resource AND g.subject=s.subject AND g.hosted_client=s.hosted_client",params![bus,mailbox,at], |r| Ok(Subscription {id:r.get(0)?,owner:r.get(1)?,service:r.get(2)?,issuer:r.get(3)?,resource:r.get(4)?,subject:r.get(5)?,client:r.get(6)?,grant:r.get(7)?,revision:r.get(8)?,generation:r.get(9)?,expires:r.get(10)?,url:r.get(11)?,secret:r.get(12)?,previous:r.get(13)?,bearer:r.get(14)?,rotation:r.get(15)?,cursor:r.get(16)?})).optional()?)
+    Ok(store.connection.query_row("SELECT s.id,s.owner_key,s.service,s.issuer,s.resource,s.subject,s.hosted_client,s.grant_id,s.grant_revision,s.generation,s.expires,s.url,s.secret,s.old_secret,s.bearer,s.rotation_until,s.callback_cursor FROM event_subscriptions s JOIN grants g ON g.id=s.grant_id WHERE s.bus=?1 AND s.mailbox=?2 AND s.grant_id=?4 AND s.status='active' AND s.expires>?3 AND g.enabled=1 AND g.revision=s.grant_revision AND g.service=s.service AND g.issuer=s.issuer AND g.resource=s.resource AND g.subject=s.subject AND g.hosted_client=s.hosted_client",params![bus,mailbox,at,selected_grant], |r| Ok(Subscription {id:r.get(0)?,owner:r.get(1)?,service:r.get(2)?,issuer:r.get(3)?,resource:r.get(4)?,subject:r.get(5)?,client:r.get(6)?,grant:r.get(7)?,revision:r.get(8)?,generation:r.get(9)?,expires:r.get(10)?,url:r.get(11)?,secret:r.get(12)?,previous:r.get(13)?,bearer:r.get(14)?,rotation:r.get(15)?,cursor:r.get(16)?})).optional()?)
 }
 
 fn candidate(
@@ -167,7 +168,7 @@ pub(crate) async fn tick(events: &Events, bus: &str, mailbox: &str) -> Result<Ti
     let store = Store::open_for_dispatch(&events.file)?;
     store.require_events_ready(&events.key)?;
     let at = now()?;
-    let Some(sub) = subscription(&store, bus, mailbox, at)? else {
+    let Some(sub) = subscription(&store, bus, mailbox, &events.selected_grant, at)? else {
         return Ok(Tick::Idle);
     };
     if sub.grant != events.selected_grant {
@@ -183,7 +184,7 @@ pub(crate) async fn tick(events: &Events, bus: &str, mailbox: &str) -> Result<Ti
     };
     // Selection precedes introspection, but due/state must be re-read inside the lease.
     let at = now()?;
-    let Some(sub) = subscription(&store, bus, mailbox, at)? else {
+    let Some(sub) = subscription(&store, bus, mailbox, &events.selected_grant, at)? else {
         return Ok(Tick::Idle);
     };
     if sub.grant != events.selected_grant {
@@ -218,7 +219,9 @@ pub(crate) async fn tick(events: &Events, bus: &str, mailbox: &str) -> Result<Ti
         || identity.resource() != sub.resource
         || identity.subject() != sub.subject
         || identity.hosted_client() != sub.client
-        || !events.verifier.requires_scope("events:subscribe")
+        || !events
+            .verifier
+            .requires_scope_for(&identity, "events:subscribe")
     {
         return Ok(Tick::CredentialRequired);
     }
@@ -449,6 +452,101 @@ impl Drop for Worker {
 mod tests {
     use super::*;
     use crate::events_test_support::{Behavior, Setup};
+    #[tokio::test]
+    async fn cutover_selects_new_subscription_while_both_grants_remain_enabled() {
+        use crate::auth::Verifier;
+        use crate::events_test_support::request;
+        use std::sync::Arc;
+        let setup = Setup::new();
+        setup.subscribe().await;
+        let mut binding = setup.provider.binding.clone();
+        binding.hosted_client = "new-client".into();
+        let mut claims = crate::provider_fixture::claims(&binding);
+        claims["scope"] = serde_json::json!("identity:read events:subscribe");
+        setup
+            .provider
+            .tokens
+            .lock()
+            .unwrap()
+            .insert("new-token".into(), claims);
+        let mut config = setup.provider.config["verifier"].clone();
+        config["hosted_client"] = serde_json::json!(binding.hosted_client);
+        let verifier =
+            Arc::new(Verifier::from_config(serde_json::from_value(config).unwrap()).unwrap());
+        let mut store = Store::open(&setup.provider.store_file).unwrap();
+        store.migrate_profiles().unwrap();
+        store.enroll("new-grant", &binding).unwrap();
+        store.set_enabled("new-grant", 1, true).unwrap();
+        let selected = Events::with_transport(
+            setup.provider.store_file.clone(),
+            setup.key.clone(),
+            verifier.clone(),
+            "new-grant".into(),
+            setup.callback.clone(),
+        );
+        let identity = verifier.verify("new-token").await.unwrap();
+        selected
+            .subscribe(&identity, "new-token", "bus", "dot@bus", request())
+            .await
+            .unwrap();
+        let db = setup.db();
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM grants WHERE enabled=1", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT COUNT(*) FROM event_subscriptions WHERE status='active'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            2
+        );
+        assert_eq!(db.query_row("SELECT grant_id FROM event_subscriptions WHERE bus='bus' AND mailbox='dot@bus' ORDER BY rowid LIMIT 1", [], |r| r.get::<_,String>(0)).unwrap(), "grant", "old subscription must predate the cutover");
+        setup.seed("old-event", "dot@bus", 2, i64::MAX);
+        setup.seed("new-event", "dot@bus", 2, i64::MAX);
+        db.execute(
+            "UPDATE custody_items SET grant_id='new-grant' WHERE event_id='new-event'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            tick(&selected, "bus", "dot@bus").await.unwrap(),
+            Tick::Accepted,
+            "old enabled subscription starved selected new grant"
+        );
+        {
+            let delivered = setup.callback.events.lock().unwrap();
+            assert_eq!(delivered.len(), 1);
+            assert_eq!(
+                serde_json::from_slice::<Value>(&delivered[0].1).unwrap()["eventId"],
+                "new-event"
+            );
+        }
+        assert_eq!(
+            db.query_row(
+                "SELECT state FROM custody_outbox WHERE event_id='old-event'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "pending"
+        );
+        assert_eq!(
+            tick(&setup.runtime(), "bus", "dot@bus").await.unwrap(),
+            Tick::Accepted
+        );
+        let delivered = setup.callback.events.lock().unwrap();
+        assert_eq!(delivered.len(), 2);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&delivered[1].1).unwrap()["eventId"],
+            "old-event"
+        );
+    }
+
     #[tokio::test]
     async fn expiry_redacts_cached_previews_without_inventing_receipt_or_observation() {
         let setup = Setup::new();

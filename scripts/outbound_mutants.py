@@ -21,8 +21,8 @@ start = OUTBOUND.index(
 )
 end = OUTBOUND.index("\n}", start) + 2
 arguments = OUTBOUND[start:end]
-scope_start = AUTH.index("    pub fn requires_scope(")
-scope_end = AUTH.index("    pub async fn verify(", scope_start)
+scope_start = AUTH.index("    pub fn requires_scope_for(")
+scope_end = AUTH.index("\n    }", scope_start) + len("\n    }")
 scope_method = AUTH[scope_start:scope_end]
 permission_start = OUTBOUND.index(
     "        match request {", OUTBOUND.index("    fn permission(")
@@ -96,7 +96,7 @@ CASES = [
         "write-scope",
         "src/auth.rs",
         scope_method,
-        "    pub fn requires_scope(&self, _scope: &str) -> bool { true }\n\n",
+        "    pub fn requires_scope_for(&self, _identity: &VerifiedIdentity, _scope: &str) -> bool { true }\n\n",
         "custody_outbound",
         SEND_TEST,
         "identity-only verifier admitted write scope",

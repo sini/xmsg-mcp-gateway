@@ -761,7 +761,7 @@ pub async fn list(
         list_store.outbound_policy(&authority.grant_id)?
     };
     let permission = policy.send.as_ref().ok_or(Error::Denied)?;
-    if !verifier.requires_scope(&permission.required_scope) {
+    if !verifier.requires_scope_for(&verified, &permission.required_scope) {
         return Err(Error::Denied);
     }
     let remaining = limits.timeout.saturating_sub(started.elapsed());
@@ -865,7 +865,7 @@ async fn dispatch_on_connection(
     }
     let initial_policy = store.outbound_policy(&initial_grant.grant_id)?;
     let initial_permission = initial_policy.permission(request)?;
-    if !verifier.requires_scope(&initial_permission.required_scope) {
+    if !verifier.requires_scope_for(&identity, &initial_permission.required_scope) {
         return Err(Error::Denied);
     }
     let owner = crate::custody::fingerprint(&[
@@ -907,6 +907,11 @@ async fn dispatch_on_connection(
             if !initial_permission.admits_target(target) {
                 return Err(Error::Denied);
             }
+            if reservation.grant_id != initial_grant.grant_id
+                || reservation.sender != service.sender()
+            {
+                return Err(Error::Denied);
+            }
             if let Some(receipt) = reservation.receipt {
                 return Ok(Outcome::Confirmed(serde_json::from_str(&receipt)?));
             }
@@ -923,6 +928,12 @@ async fn dispatch_on_connection(
         return Err(Error::Conflict);
     }
     let (op, id, _) = request.parts();
+    if store
+        .reservation(&owner, op, id)?
+        .is_some_and(|row| row.grant_id != initial_grant.grant_id || row.sender != service.sender())
+    {
+        return Err(Error::Denied);
+    }
     let may_have_submitted = AtomicBool::new(
         store
             .reservation(&owner, op, id)?
@@ -940,6 +951,7 @@ async fn dispatch_on_connection(
             request,
             limits,
             &owner,
+            &identity,
             &may_have_submitted,
             selected_grant,
         ),
@@ -978,6 +990,7 @@ async fn submit(
     request: &Request,
     limits: &Limits,
     owner: &str,
+    initial_identity: &crate::auth::VerifiedIdentity,
     may_have_submitted: &AtomicBool,
     selected_grant: Option<&str>,
 ) -> Result<Outcome, Error> {
@@ -988,7 +1001,11 @@ async fn submit(
         identity.resource(),
         identity.subject(),
     ]);
-    if fresh_owner != owner || identity.expires_at() <= now() as u64 {
+    if fresh_owner != owner
+        || identity.hosted_client() != initial_identity.hosted_client()
+        || identity.audience() != initial_identity.audience()
+        || identity.expires_at() <= now() as u64
+    {
         return Err(Error::Denied);
     }
     let authority = store.authorize(&identity)?;
@@ -998,7 +1015,7 @@ async fn submit(
     let policy = store.outbound_policy(&authority.grant_id)?;
     let (op, id, text) = request.parts();
     let permission = policy.permission(request)?;
-    if !verifier.requires_scope(&permission.required_scope) {
+    if !verifier.requires_scope_for(&identity, &permission.required_scope) {
         return Err(Error::Denied);
     }
     let sender = service.sender.as_str();
@@ -1029,6 +1046,9 @@ async fn submit(
         return Err(Error::Denied);
     }
     if let Some(reservation) = &existing {
+        if reservation.grant_id != authority.grant_id || reservation.sender != sender {
+            return Err(Error::Denied);
+        }
         if let Some(receipt) = &reservation.receipt {
             return Ok(Outcome::Confirmed(serde_json::from_str(receipt)?));
         }
@@ -1128,7 +1148,10 @@ async fn submit(
     };
     tracing::debug!(target:"gateway_outbound_reserved", "pending");
     let current = verifier.verify(token).await?;
-    if current.expires_at() <= now() as u64 || store.authorize(&current)? != authority {
+    if !current.same_profile(&identity)
+        || current.expires_at() <= now() as u64
+        || store.authorize(&current)? != authority
+    {
         return Err(Error::Denied);
     }
     if let Request::Reply(args) = request {

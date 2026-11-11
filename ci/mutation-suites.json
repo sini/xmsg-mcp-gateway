@@ -112,7 +112,7 @@
         "^g5-events RED 25-events-callback-url-log-red:",
         "^g5-events GREEN 25-events-callback-url-log-restored$"
       ],
-      "script_sha256": "7cecfa3381419273f5b103d79a3bcfc233c455d7a7a9b5e8781c59304668bf8f"
+      "script_sha256": "fe147acc98ffc3611f40872eb8b051f68c1cd9faa4f15aab4e1fca5b66c177bc"
     },
     {
       "id": "retirement",
@@ -256,7 +256,7 @@
         "^provider\\-unpinned\\-proxy: GREEN baseline, RED intended identity test$",
         "^configured\\-audience\\-hosted\\-client: GREEN baseline, RED intended identity test$"
       ],
-      "script_sha256": "996eae32819042d444230f13cc56cef9f10677f966cf9038b87d473b70c3171f"
+      "script_sha256": "87a4e5204aea17bb8ab9d8d72f7552b67fff7d12d771333f1a3982fc5924c3ed"
     },
     {
       "id": "broker",
@@ -388,7 +388,7 @@
         "^owner\\-config\\-size: GREEN baseline, RED intended misuse test$",
         "^loopback\\-bind: GREEN baseline, RED intended misuse test$"
       ],
-      "script_sha256": "5d4b5ef7c5f6a2641ef25cbc9a8fe91c1f17a0f1079fe8b4443d54c3f72dbc9c"
+      "script_sha256": "70e760bb1f552285385299724c229d7d36b10ee038909768cc2241a641a7fa7d"
     },
     {
       "id": "header_timeout",
@@ -821,7 +821,7 @@
         "^pending\\-row\\-is\\-uncertain: GREEN baseline / RED intended$",
         "^submission\\-flag\\-before\\-send: GREEN baseline / RED intended$"
       ],
-      "script_sha256": "a3294183a66ef5dc5ab261796fc73172ebbee653057fe40b0336976303b2cbda"
+      "script_sha256": "819debda4cebff11b2101c03d0320ddcf84f4fd5276ca70352837975ae18b444"
     },
     {
       "id": "wiring",
@@ -923,7 +923,7 @@
         "^read\\-response\\-id: GREEN baseline / RED intended$",
         "^broker\\-expired\\-unknown: GREEN baseline / RED intended$"
       ],
-      "script_sha256": "0f57073fbce60254a52603b9fa472fcfcbdc0c4d5432d7fd1a01b662aa7b444a"
+      "script_sha256": "44eae2ca2d8cb3224612be5823abdfcbd1875fc9ff719ad6c0d8b500bf7b4b0b"
     },
     {
       "id": "reservation_acceptance",
@@ -994,6 +994,132 @@
         "^13\\-stored\\-body: GREEN control, RED mutant \\(exit 1\\)$"
       ],
       "script_sha256": "4f6c38ecd6c83c88c2312b830bde80788bb951fd36ddfb2bb947e90ed666d414"
+    },
+    {
+      "id": "profiles",
+      "script": "scripts/profile_mutants.py",
+      "args": [],
+      "count": 33,
+      "fixture": false,
+      "python": false,
+      "completion": "profile-mutants-complete:33/33",
+      "dependencies": [
+        "scripts/profile_mutants.py",
+        "scripts/events_mutants.py",
+        "src/auth.rs",
+        "src/grants.rs",
+        "src/serving.rs",
+        "src/event_dispatch.rs",
+        "src/outbound.rs",
+        "tests/multi_profile_identity.rs",
+        "tests/profile_grants.rs",
+        "tests/profile_outbound.rs",
+        "tests/serving_profiles.rs"
+      ],
+      "labels": [
+        "merged-provider",
+        "merged-scopes",
+        "routing-issuer",
+        "routing-client",
+        "routing-audience",
+        "unsolicited-opaque",
+        "unknown-jws-fallback",
+        "authoritative-active",
+        "authoritative-issuer",
+        "authoritative-audience",
+        "authoritative-subject",
+        "authoritative-client",
+        "authoritative-expiry",
+        "authoritative-not-before",
+        "authoritative-scopes",
+        "two-opaque-defaults",
+        "profile-cap",
+        "canonical-resource",
+        "canonical-service",
+        "duplicate-grant",
+        "duplicate-route",
+        "grant-membership",
+        "grant-migration-required",
+        "grant-exact-index",
+        "events-selected-subscription",
+        "outbound-foreign-pending",
+        "discovery-issuer-set",
+        "exclusive-config",
+        "custody-catalog",
+        "custody-denial",
+        "identity-health-profile",
+        "profile-credentials",
+        "tool-scopes-profile"
+      ],
+      "required_output": [
+        "^g5-events RED 01-merged\\-provider-red:",
+        "^g5-events GREEN 01-merged\\-provider-restored$",
+        "^g5-events RED 02-merged\\-scopes-red:",
+        "^g5-events GREEN 02-merged\\-scopes-restored$",
+        "^g5-events RED 03-routing\\-issuer-red:",
+        "^g5-events GREEN 03-routing\\-issuer-restored$",
+        "^g5-events RED 04-routing\\-client-red:",
+        "^g5-events GREEN 04-routing\\-client-restored$",
+        "^g5-events RED 05-routing\\-audience-red:",
+        "^g5-events GREEN 05-routing\\-audience-restored$",
+        "^g5-events RED 06-unsolicited\\-opaque-red:",
+        "^g5-events GREEN 06-unsolicited\\-opaque-restored$",
+        "^g5-events RED 07-unknown\\-jws\\-fallback-red:",
+        "^g5-events GREEN 07-unknown\\-jws\\-fallback-restored$",
+        "^g5-events RED 08-authoritative\\-active-red:",
+        "^g5-events GREEN 08-authoritative\\-active-restored$",
+        "^g5-events RED 09-authoritative\\-issuer-red:",
+        "^g5-events GREEN 09-authoritative\\-issuer-restored$",
+        "^g5-events RED 10-authoritative\\-audience-red:",
+        "^g5-events GREEN 10-authoritative\\-audience-restored$",
+        "^g5-events RED 11-authoritative\\-subject-red:",
+        "^g5-events GREEN 11-authoritative\\-subject-restored$",
+        "^g5-events RED 12-authoritative\\-client-red:",
+        "^g5-events GREEN 12-authoritative\\-client-restored$",
+        "^g5-events RED 13-authoritative\\-expiry-red:",
+        "^g5-events GREEN 13-authoritative\\-expiry-restored$",
+        "^g5-events RED 14-authoritative\\-not\\-before-red:",
+        "^g5-events GREEN 14-authoritative\\-not\\-before-restored$",
+        "^g5-events RED 15-authoritative\\-scopes-red:",
+        "^g5-events GREEN 15-authoritative\\-scopes-restored$",
+        "^g5-events RED 16-two\\-opaque\\-defaults-red:",
+        "^g5-events GREEN 16-two\\-opaque\\-defaults-restored$",
+        "^g5-events RED 17-profile\\-cap-red:",
+        "^g5-events GREEN 17-profile\\-cap-restored$",
+        "^g5-events RED 18-canonical\\-resource-red:",
+        "^g5-events GREEN 18-canonical\\-resource-restored$",
+        "^g5-events RED 19-canonical\\-service-red:",
+        "^g5-events GREEN 19-canonical\\-service-restored$",
+        "^g5-events RED 20-duplicate\\-grant-red:",
+        "^g5-events GREEN 20-duplicate\\-grant-restored$",
+        "^g5-events RED 21-duplicate\\-route-red:",
+        "^g5-events GREEN 21-duplicate\\-route-restored$",
+        "^g5-events RED 22-grant\\-membership-red:",
+        "^g5-events GREEN 22-grant\\-membership-restored$",
+        "^g5-events RED 23-grant\\-migration\\-required-red:",
+        "^g5-events GREEN 23-grant\\-migration\\-required-restored$",
+        "^g5-events RED 24-grant\\-exact\\-index-red:",
+        "^g5-events GREEN 24-grant\\-exact\\-index-restored$",
+        "^g5-events RED 25-events\\-selected\\-subscription-red:",
+        "^g5-events GREEN 25-events\\-selected\\-subscription-restored$",
+        "^g5-events RED 26-outbound\\-foreign\\-pending-red:",
+        "^g5-events GREEN 26-outbound\\-foreign\\-pending-restored$",
+        "^g5-events RED 27-discovery\\-issuer\\-set-red:",
+        "^g5-events GREEN 27-discovery\\-issuer\\-set-restored$",
+        "^g5-events RED 28-exclusive\\-config-red:",
+        "^g5-events GREEN 28-exclusive\\-config-restored$",
+        "^g5-events RED 29-custody\\-catalog-red:",
+        "^g5-events GREEN 29-custody\\-catalog-restored$",
+        "^g5-events RED 30-custody\\-denial-red:",
+        "^g5-events GREEN 30-custody\\-denial-restored$",
+        "^g5-events RED 31-identity\\-health\\-profile-red:",
+        "^g5-events GREEN 31-identity\\-health\\-profile-restored$",
+        "^g5-events RED 32-profile\\-credentials-red:",
+        "^g5-events GREEN 32-profile\\-credentials-restored$",
+        "^g5-events RED 33-tool\\-scopes\\-profile-red:",
+        "^g5-events GREEN 33-tool\\-scopes\\-profile-restored$"
+      ],
+      "script_sha256": "0f08975e06b3b201d4e3cc01881c3696711af0227da5f098da2965514cf69180"
     }
   ]
 }
