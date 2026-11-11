@@ -196,17 +196,74 @@ impl Store {
         policy: &Policy,
     ) -> Result<i64, Error> {
         self.require_outbound_ready()?;
-        policy.validate()?;
+        let document = validated_policy_document(policy)?;
         let service: String = self
             .connection
             .query_row("SELECT service FROM grants WHERE id=?1", [id], |r| r.get(0))
             .optional()?
             .ok_or(GrantError::NoChange)?;
         let _lease = self.wait_operation_lease(&service, std::time::Duration::from_secs(30))?;
-        let document = serde_json::to_string(policy)?;
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let next = Self::set_outbound_policy_in(&tx, id, revision, &document)?;
+        tx.commit()?;
+        Ok(next)
+    }
+
+    pub fn apply_outbound_policy(
+        &mut self,
+        id: &str,
+        policy: &Policy,
+        enabled: Option<bool>,
+    ) -> Result<ApplyResult, Error> {
+        self.require_outbound_ready()?;
+        let document = validated_policy_document(policy)?;
+        let (service, revision): (String, i64) = self
+            .connection
+            .query_row(
+                "SELECT service, revision FROM grants WHERE id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .ok_or(GrantError::NoChange)?;
+        let _lease = self.wait_operation_lease(&service, std::time::Duration::from_secs(30))?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (current_revision, current_enabled): (i64, bool) = tx
+            .query_row(
+                "SELECT revision, enabled FROM grants WHERE id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .ok_or(GrantError::NoChange)?;
+        if current_revision != revision {
+            return Err(GrantError::NoChange.into());
+        }
+        let previous = outbound_policy_on(&tx, id)?;
+        let mut next = revision;
+        if previous != *policy {
+            next = Self::set_outbound_policy_in(&tx, id, next, &document)?;
+        }
+        if let Some(enabled) = enabled.filter(|enabled| *enabled != current_enabled) {
+            next = Self::set_enabled_in(&tx, id, next, enabled)?;
+        }
+        tx.commit()?;
+        Ok(ApplyResult {
+            revision: next,
+            changed: next != revision,
+        })
+    }
+
+    fn set_outbound_policy_in(
+        tx: &rusqlite::Transaction<'_>,
+        id: &str,
+        revision: i64,
+        document: &str,
+    ) -> Result<i64, Error> {
         let previous: Option<String> = tx
             .query_row(
                 "SELECT document FROM outbound_policy WHERE grant_id=?1",
@@ -214,7 +271,7 @@ impl Store {
                 |r| r.get(0),
             )
             .optional()?;
-        if previous.as_deref() == Some(&document) {
+        if previous.as_deref() == Some(document) {
             return Err(GrantError::NoChange.into());
         }
         if tx.execute(
@@ -227,25 +284,38 @@ impl Store {
         tx.execute("INSERT INTO outbound_policy VALUES (?1,?2) ON CONFLICT(grant_id) DO UPDATE SET document=excluded.document", params![id, document])?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if version >= crate::grants::EVENTS_SCHEMA_VERSION {
-            crate::event_store::revision_changed(&tx, id)?;
+            crate::event_store::revision_changed(tx, id)?;
         }
-        tx.commit()?;
         Ok(revision + 1)
     }
 
     pub(crate) fn outbound_policy(&self, grant_id: &str) -> Result<Policy, Error> {
-        let document: Option<String> = self
-            .connection
-            .query_row(
-                "SELECT document FROM outbound_policy WHERE grant_id=?1",
-                [grant_id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        match document {
-            Some(document) => Ok(serde_json::from_str(&document)?),
-            None => Ok(Policy::default()),
-        }
+        outbound_policy_on(&self.connection, grant_id)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApplyResult {
+    pub revision: i64,
+    pub changed: bool,
+}
+
+fn validated_policy_document(policy: &Policy) -> Result<String, Error> {
+    policy.validate()?;
+    Ok(serde_json::to_string(policy)?)
+}
+
+fn outbound_policy_on(connection: &Connection, grant_id: &str) -> Result<Policy, Error> {
+    let document: Option<String> = connection
+        .query_row(
+            "SELECT document FROM outbound_policy WHERE grant_id=?1",
+            [grant_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match document {
+        Some(document) => Ok(serde_json::from_str(&document)?),
+        None => Ok(Policy::default()),
     }
 }
 
