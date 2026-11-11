@@ -309,6 +309,8 @@ def main():
             output.write(f"matrix={json.dumps(matrix)}\nselected={len(selected)}\n")
     elif options.command == "run":
         suite = next(s for s in suites if s["id"] == options.suite)
+        options.output = (ROOT / options.output).resolve()
+        options.output.relative_to(ROOT)
         options.output.mkdir(parents=True, exist_ok=True)
         log = options.output / f"{suite['id']}.log"
         status = tee_command([sys.executable, suite["script"], *suite["args"]], log)

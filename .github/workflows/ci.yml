@@ -219,6 +219,9 @@ jobs:
           version=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
           rustup toolchain install "$version" --profile minimal
           rustup default "$version"
+      - name: Fetch locked dependencies before offline mutation builds
+        if: ${{ !matrix.python }}
+        run: cargo fetch --locked
       - name: Install pinned Python reference dependencies
         if: matrix.python
         run: |

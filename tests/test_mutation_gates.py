@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -79,6 +80,96 @@ class MutationGatesTests(unittest.TestCase):
             self.assertEqual(len(owned), 1)
             with self.assertRaises(ProcessLookupError):
                 os.kill(owned[0], 0)
+
+    def test_real_cli_relative_output_writes_verifiable_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "scripts").mkdir()
+            (root / "ci").mkdir()
+            (root / "scripts/mutation_gates.py").write_bytes(
+                (ROOT / "scripts/mutation_gates.py").read_bytes()
+            )
+            suite = self.suites[0]
+            output = (
+                "\n".join(
+                    [
+                        f"g5-events {arm} {i + 1:02}-{label}-{suffix}{colon}"
+                        for i, label in enumerate(suite["labels"])
+                        for arm, suffix, colon in [
+                            ("RED", "red", ": intended"),
+                            ("GREEN", "restored", ""),
+                        ]
+                    ]
+                    + [suite["completion"]]
+                )
+                + "\n"
+            )
+            registry = json.loads((ROOT / gates.REGISTRY).read_text())
+            for entry in registry["suites"]:
+                script = root / entry["script"]
+                script.write_text("print(" + repr(output) + ", end='')\n")
+                entry["script_sha256"] = gates.digest(script)
+            (root / gates.REGISTRY).write_text(json.dumps(registry))
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "commit",
+                    "--allow-empty",
+                    "-qm",
+                    "fixture",
+                ],
+                cwd=root,
+                check=True,
+            )
+            command = [
+                sys.executable,
+                str(root / "scripts/mutation_gates.py"),
+                "run",
+                "events",
+                "--output",
+                ".artifacts/receipts",
+            ]
+            result = subprocess.run(command, cwd=root, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            receipt = json.loads((root / ".artifacts/receipts/events.json").read_text())
+            self.assertEqual(receipt["log"], ".artifacts/receipts/events.log")
+            plan = {
+                "revision": receipt["revision"],
+                "full": False,
+                "selected": ["events"],
+                "changed": ["src/event_dispatch.rs"],
+            }
+            self.assertEqual(
+                gates.verify(plan, [receipt], registry["suites"], root), 22
+            )
+            result = subprocess.run(
+                command[:-1] + ["../outside"], cwd=root, capture_output=True, text=True
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((root.parent / "outside").exists())
+
+    def test_every_rust_shard_fetches_before_unchanged_offline_scripts(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        shard = workflow.split("  mutation-suite:", 1)[1].split(
+            "  mutation-completion:", 1
+        )[0]
+        prerequisite = "      - name: Fetch locked dependencies before offline mutation builds\n        if: ${{ !matrix.python }}\n        run: cargo fetch --locked"
+        self.assertIn(prerequisite, shard)
+        self.assertLess(
+            shard.index(prerequisite),
+            shard.index(
+                "      - name: Prepare existing revision-verified daemon fixtures"
+            ),
+        )
+        self.assertLess(
+            shard.index(prerequisite),
+            shard.index("      - name: Complete selected suite with its controls"),
+        )
 
     def test_complete_inventory_and_execution_modes(self):
         self.assertEqual(len(self.suites), 19)
