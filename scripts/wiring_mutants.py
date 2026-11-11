@@ -26,7 +26,7 @@ CASES = [
                     Ok(request) => request,
                     Err(_) => return invalid_dispatch(operation, &id, "Invalid params"),
                 };
-                return messaging_call(app, token, id, request, policy, store, progress).await;""",
+                return messaging_call(app, context, id, request, policy, store, progress).await;""",
         """let request = match request {
                     Ok(mut request) => {
                         let request_id = outbound::RequestId::parse(&id.to_string()).unwrap();
@@ -38,7 +38,7 @@ CASES = [
                     },
                     Err(_) => return invalid_dispatch(operation, &id, "Invalid params"),
                 };
-                return messaging_call(app, token, id, request, policy, store, progress).await;""",
+                return messaging_call(app, context, id, request, policy, store, progress).await;""",
         "messaging",
         MCP,
         "RPC id changed logical send",

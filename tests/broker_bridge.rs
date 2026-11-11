@@ -1037,6 +1037,13 @@ async fn confirmed_broker_recovery_failures_never_claim_no_submission() {
                 StatusCode::FORBIDDEN,
                 "revoked authority leaked broker result: {value}"
             );
+        } else if failure == "provider" {
+            assert_eq!(status, StatusCode::OK, "{value}");
+            assert_eq!(
+                value["result"]["structuredContent"]["submission"],
+                "confirmed"
+            );
+            assert_eq!(fixture.requests.load(Ordering::SeqCst), 1);
         } else {
             assert_eq!(
                 status,
@@ -1238,6 +1245,17 @@ async fn first_call_recovery_retries_identical_requests_after_pending() {
             fixture::request(&serving, "good-token", request.clone()).await
         };
         assert_eq!(first.0, axum::http::StatusCode::OK);
+        if mode == "provider" {
+            assert_eq!(
+                first.1["result"]["structuredContent"]["submission"],
+                "confirmed"
+            );
+            assert_eq!(fixture.requests.load(Ordering::SeqCst), 1);
+            assert_eq!(bus.sends.load(Ordering::SeqCst), 1);
+            let (status, _, _) = fixture::request(&serving, "good-token", request.clone()).await;
+            assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+            continue;
+        }
         assert_eq!(
             first.1["result"]["structuredContent"]["state"], "pending",
             "{mode}: {}",
@@ -1277,7 +1295,7 @@ async fn first_call_recovery_retries_identical_requests_after_pending() {
 #[derive(Clone, Default)]
 struct OutcomeCapture(
     Arc<Mutex<Vec<std::collections::BTreeMap<String, String>>>>,
-    Option<Arc<AtomicUsize>>,
+    Option<std::path::PathBuf>,
 );
 impl tracing::Subscriber for OutcomeCapture {
     fn enabled(&self, m: &tracing::Metadata<'_>) -> bool {
@@ -1293,7 +1311,10 @@ impl tracing::Subscriber for OutcomeCapture {
     fn exit(&self, _: &tracing::span::Id) {}
     fn event(&self, event: &tracing::Event<'_>) {
         if event.metadata().target() == "gateway_broker_submission_confirmed" {
-            self.1.as_ref().unwrap().store(503, Ordering::SeqCst);
+            rusqlite::Connection::open(self.1.as_ref().unwrap())
+                .unwrap()
+                .execute_batch("ALTER TABLE custody_items RENAME TO unavailable_custody_items")
+                .unwrap();
             return;
         }
         struct Fields(std::collections::BTreeMap<String, String>);
@@ -1311,12 +1332,12 @@ impl tracing::Subscriber for OutcomeCapture {
     }
 }
 async fn captured_call(serving: &Serving, body: Value) -> (Value, OutcomeCapture) {
-    captured_call_with_provider_failure(serving, body, None).await
+    captured_call_with_lookup_failure(serving, body, None).await
 }
-async fn captured_call_with_provider_failure(
+async fn captured_call_with_lookup_failure(
     serving: &Serving,
     body: Value,
-    provider: Option<Arc<AtomicUsize>>,
+    store_file: Option<std::path::PathBuf>,
 ) -> (Value, OutcomeCapture) {
     use axum::{
         body::{to_bytes, Body},
@@ -1324,7 +1345,7 @@ async fn captured_call_with_provider_failure(
     };
     use tower::ServiceExt;
     use tracing::instrument::WithSubscriber;
-    let capture = OutcomeCapture(Default::default(), provider);
+    let capture = OutcomeCapture(Default::default(), store_file);
     let request = Request::builder()
         .method("POST")
         .uri("/mcp")
@@ -1431,16 +1452,19 @@ async fn dispatch_outcomes_are_single_static_info_records_without_request_canari
         assert_eq!(value["error"]["code"], -32602, "{operation}: {value}");
         assert_static_outcome(&capture, operation, "invalid", "arguments");
     }
-    let (value, capture) = captured_call_with_provider_failure(
+    let (value, capture) = captured_call_with_lookup_failure(
         &serving,
         input.clone(),
-        Some(fixture.response_status.clone()),
+        Some(fixture.store_file.clone()),
     )
     .await;
     assert_eq!(value["result"]["structuredContent"]["state"], "pending");
-    assert_static_outcome(&capture, "gist", "pending", "verifier_unavailable");
+    assert_static_outcome(&capture, "gist", "pending", "store_database");
     assert_eq!(bus.sends.load(Ordering::SeqCst), 1);
-    fixture.response_status.store(200, Ordering::SeqCst);
+    rusqlite::Connection::open(&fixture.store_file)
+        .unwrap()
+        .execute_batch("ALTER TABLE unavailable_custody_items RENAME TO custody_items")
+        .unwrap();
     let started = std::time::Instant::now();
     let mut confirmed = false;
     for attempt in 0..FIRST_CALL_ATTEMPTS {

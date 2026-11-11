@@ -755,7 +755,7 @@
         "stored-framed-body",
         "dedup-expiry",
         "held-revision",
-        "fresh-token",
+        "fresh-store-authority",
         "owned-correlation",
         "per-service-lease",
         "nonblocking-lease",
@@ -795,7 +795,7 @@
         "^stored\\-framed\\-body: GREEN baseline / RED intended$",
         "^dedup\\-expiry: GREEN baseline / RED intended$",
         "^held\\-revision: GREEN baseline / RED intended$",
-        "^fresh\\-token: GREEN baseline / RED intended$",
+        "^fresh\\-store\\-authority: GREEN baseline / RED intended$",
         "^owned\\-correlation: GREEN baseline / RED intended$",
         "^per\\-service\\-lease: GREEN baseline / RED intended$",
         "^nonblocking\\-lease: GREEN baseline / RED intended$",
@@ -821,7 +821,7 @@
         "^pending\\-row\\-is\\-uncertain: GREEN baseline / RED intended$",
         "^submission\\-flag\\-before\\-send: GREEN baseline / RED intended$"
       ],
-      "script_sha256": "a3294183a66ef5dc5ab261796fc73172ebbee653057fe40b0336976303b2cbda"
+      "script_sha256": "52b90ff212bef1660501b8e0b9a6e31fd0354945960662b837d205091e34d3c2"
     },
     {
       "id": "wiring",
@@ -923,7 +923,7 @@
         "^read\\-response\\-id: GREEN baseline / RED intended$",
         "^broker\\-expired\\-unknown: GREEN baseline / RED intended$"
       ],
-      "script_sha256": "0f57073fbce60254a52603b9fa472fcfcbdc0c4d5432d7fd1a01b662aa7b444a"
+      "script_sha256": "cfb0b4b48e420515817a7b488e759948f8058fc1f866428cd3344be6eb423216"
     },
     {
       "id": "reservation_acceptance",

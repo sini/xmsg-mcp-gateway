@@ -19,7 +19,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
-use crate::auth::{self, VerifiedIdentity, Verifier, VerifierConfig};
+use crate::auth::{self, VerifiedContext, VerifiedIdentity, Verifier, VerifierConfig};
 use crate::grants::{Authorization, Binding, Error as GrantError, Store};
 use crate::outbound::{self, Outcome, Policy};
 use crate::xmsg_config::{DeploymentManifest, ManifestError, XmsgConfig};
@@ -811,7 +811,7 @@ fn broker_permitted(app: &App, policy: &Policy, grant: &Authorization) -> bool {
 
 async fn lookup_broker(
     app: Arc<App>,
-    identity: Arc<VerifiedIdentity>,
+    context: VerifiedContext,
     bus: String,
     mailbox: String,
     request_id: String,
@@ -824,15 +824,17 @@ async fn lookup_broker(
             .messaging
             .as_ref()
             .ok_or(outbound::Error::Configuration)?;
-        let authority = store.authorize(&identity)?;
+        outbound::require_current(&context, &store)?;
+        let identity = context.identity();
+        let authority = context.authority();
         let policy = store.outbound_policy(&authority.grant_id)?;
-        if !config.permitted(&policy, &authority, &events.selected_grant, &app.verifier) {
+        if !config.permitted(&policy, authority, &events.selected_grant, &app.verifier) {
             return Err(outbound::Error::Denied);
         }
         store.retire_outbound(identity.service(), &messaging.limits)?;
         crate::broker::lookup(
             &store,
-            &identity,
+            identity,
             &bus,
             &mailbox,
             &events.selected_grant,
@@ -849,7 +851,7 @@ async fn lookup_broker(
 #[allow(clippy::too_many_arguments)]
 async fn broker_call(
     app: Arc<App>,
-    token: String,
+    context: VerifiedContext,
     id: Value,
     request: outbound::SendArguments,
     mut store: Store,
@@ -887,7 +889,7 @@ async fn broker_call(
             let messaging=task_app.messaging.as_ref().ok_or(outbound::Error::Configuration)?;
             let events=task_app.events.as_ref().ok_or(outbound::Error::Configuration)?;
             let request_id=request.request_id.as_str().to_owned();
-            let result=outbound::dispatch_selected(&mut store,&snapshot.endpoint,&task_app.verifier,&token,&snapshot.bus,&outbound::Request::Send(request),&messaging.limits,&events.selected_grant).await?;
+            let result=outbound::dispatch_selected(&mut store,&snapshot.endpoint,&task_app.verifier,&context,&snapshot.bus,&outbound::Request::Send(request),&messaging.limits,&events.selected_grant).await?;
             let (state,receipt)=match result {
                 Outcome::Confirmed(receipt)=>("pending",Some(receipt)),
                 Outcome::Pending=>("pending",None),
@@ -898,14 +900,9 @@ async fn broker_call(
             if receipt.is_some() {
                 confirmed_submission = true;
                 tracing::debug!(target:"gateway_broker_submission_confirmed", "submission receipt available; recovering application result");
-                let identity=Arc::new(task_app.verifier.verify(&token).await?);
                 loop {
-                    let value=lookup_broker(task_app.clone(),identity.clone(),snapshot.bus.clone(),snapshot.endpoint.sender().to_owned(),request_id.clone()).await?;
-                    if value.is_some() {
-                        let current=Arc::new(task_app.verifier.verify(&token).await?);
-                        if let Some(value)=lookup_broker(task_app.clone(),current,snapshot.bus.clone(),snapshot.endpoint.sender().to_owned(),request_id.clone()).await? {
-                            return Ok(json!({"request_id":request_id,"submission":"confirmed","receipt":receipt,"broker":value}));
-                        }
+                    if let Some(value)=lookup_broker(task_app.clone(),context.clone(),snapshot.bus.clone(),snapshot.endpoint.sender().to_owned(),request_id.clone()).await? {
+                        return Ok(json!({"request_id":request_id,"submission":"confirmed","receipt":receipt,"broker":value}));
                     }
                     if tokio::time::Instant::now()>=deadline {break;}
                     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -959,7 +956,7 @@ async fn broker_call(
 
 async fn messaging_call(
     app: Arc<App>,
-    token: String,
+    context: VerifiedContext,
     id: Value,
     request: outbound::Request,
     policy: Policy,
@@ -1008,11 +1005,11 @@ async fn messaging_call(
                 .messaging
                 .as_ref()
                 .ok_or(outbound::Error::Configuration)?;
-            outbound::dispatch(
+            outbound::dispatch_verified(
                 &mut store,
                 &snapshot.endpoint,
                 &task_app.verifier,
-                &token,
+                &context,
                 &snapshot.bus,
                 &request,
                 &messaging.limits,
@@ -1229,6 +1226,7 @@ async fn mcp_request(
         Ok(grant) => grant,
         Err(response) => return response,
     };
+    let context = VerifiedContext::new(identity.clone(), grant.clone());
     if method != Method::POST {
         return (StatusCode::METHOD_NOT_ALLOWED, [(header::ALLOW, "POST")]).into_response();
     }
@@ -1322,7 +1320,7 @@ async fn mcp_request(
                 };
                 return broker_call(
                     app,
-                    token,
+                    context,
                     id,
                     request,
                     store,
@@ -1525,13 +1523,14 @@ async fn mcp_request(
                 };
                 let mut list_store = store;
                 tracing::info!(target: "gateway_dispatch", operation = "xmsg_list", "dispatch");
-                let result = outbound::list(
+                let result = outbound::list_verified(
                     &mut list_store,
                     &snapshot.endpoint,
                     &app.verifier,
-                    &token,
+                    &context,
                     &arguments,
                     &messaging.limits,
+                    std::time::Instant::now(),
                 )
                 .await;
                 if let Err(error) = &result {
@@ -1569,7 +1568,7 @@ async fn mcp_request(
                     Ok(request) => request,
                     Err(_) => return invalid_dispatch(operation, &id, "Invalid params"),
                 };
-                return messaging_call(app, token, id, request, policy, store, progress).await;
+                return messaging_call(app, context, id, request, policy, store, progress).await;
             }
             if call.name != "xmsg_identity" {
                 diagnostic::emit(operation, "invalid", "tool_unavailable");

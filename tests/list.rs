@@ -1,6 +1,8 @@
 #[allow(dead_code)]
 #[path = "common/serving_fixture.rs"]
 mod fixture;
+#[path = "common/outbound_observer.rs"]
+mod observer;
 #[allow(dead_code)]
 #[path = "common/provider.rs"]
 mod provider;
@@ -27,6 +29,13 @@ struct ListBus {
     list_response: Arc<Mutex<Value>>,
     sent_frames: Arc<Mutex<Vec<Value>>>,
     reply_frames: Arc<Mutex<Vec<Value>>>,
+    list_gate: Arc<Mutex<Option<Arc<ListGate>>>>,
+}
+
+#[derive(Default)]
+struct ListGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
 }
 
 impl Drop for ListBus {
@@ -157,6 +166,8 @@ async fn setup_list_bus(policy: Policy) -> (fixture::Fixture, ListBus) {
     let sent_sink = sent_frames.clone();
     let reply_frames = Arc::new(Mutex::new(Vec::new()));
     let reply_sink = reply_frames.clone();
+    let list_gate: Arc<Mutex<Option<Arc<ListGate>>>> = Arc::new(Mutex::new(None));
+    let gate_source = list_gate.clone();
 
     let agent_task = tokio::spawn(async move {
         loop {
@@ -168,6 +179,11 @@ async fn setup_list_bus(policy: Policy) -> (fixture::Fixture, ListBus) {
             let response = match frame["action"].as_str().unwrap() {
                 "list" => {
                     list_calls_counter.fetch_add(1, Ordering::SeqCst);
+                    let gate = gate_source.lock().unwrap().take();
+                    if let Some(gate) = gate {
+                        gate.entered.notify_one();
+                        gate.release.notified().await;
+                    }
                     let delay = *delay_source.lock().unwrap();
                     if !delay.is_zero() {
                         tokio::time::sleep(delay).await;
@@ -252,12 +268,219 @@ async fn setup_list_bus(policy: Policy) -> (fixture::Fixture, ListBus) {
             list_response,
             sent_frames,
             reply_frames,
+            list_gate,
         },
     )
 }
 
 fn rpc(method: &str, params: Value) -> Value {
     json!({"jsonrpc": "2.0", "id": "list-rpc", "method": method, "params": params})
+}
+
+#[tokio::test]
+async fn send_verifies_provider_once_at_public_entry() {
+    let (fixture, bus) = setup_list_bus(Policy {
+        send: Some(Permission {
+            targets: BTreeSet::from(["alpha@node".into()]),
+            required_scope: "identity:read".into(),
+        }),
+        reply: None,
+    })
+    .await;
+    let serving = Serving::from_owner_file(&fixture.config_file)
+        .await
+        .unwrap();
+    let (status, value, _) = fixture::request(&serving, "good-token", rpc("tools/call",
+        json!({"name":"xmsg_send","arguments":{"request_id":"one-provider-check","to":"alpha@node","text":"hello"}}))).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{value}");
+    assert_eq!(
+        value["result"]["structuredContent"]["state"], "confirmed",
+        "{value}"
+    );
+    assert_eq!(bus.sent_frames.lock().unwrap().len(), 1);
+    assert_eq!(
+        fixture.requests.load(Ordering::SeqCst),
+        1,
+        "send must verify provider exactly once at public entry"
+    );
+}
+
+#[tokio::test]
+async fn confirmed_send_replay_rechecks_grant_after_public_entry() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+    use tracing::instrument::WithSubscriber;
+    let (fixture, bus) = setup_list_bus(Policy {
+        send: Some(Permission {
+            targets: BTreeSet::from(["alpha@node".into()]),
+            required_scope: "identity:read".into(),
+        }),
+        reply: None,
+    })
+    .await;
+    let serving = Serving::from_owner_file(&fixture.config_file)
+        .await
+        .unwrap();
+    let call = rpc(
+        "tools/call",
+        json!({"name":"xmsg_send","arguments":{
+        "request_id":"confirmed-replay-authority","to":"alpha@node","text":"hello"}}),
+    );
+    let (status, value, _) = fixture::request(&serving, "good-token", call.clone()).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{value}");
+    assert_eq!(
+        value["result"]["structuredContent"]["state"], "confirmed",
+        "{value}"
+    );
+    assert_eq!(bus.sent_frames.lock().unwrap().len(), 1);
+    let file = fixture.store_file.clone();
+    let reached = Arc::new(AtomicUsize::new(0));
+    let count = reached.clone();
+    let barrier = observer::AtEvent {
+        target: "gateway_dispatch",
+        action: move || {
+            // Failure outcomes share this target; invalidate only at initial dispatch.
+            if count
+                .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+            {
+                return;
+            }
+            rusqlite::Connection::open(&file)
+                .unwrap()
+                .execute(
+                    "UPDATE grants SET enabled=0, revision=revision+1 WHERE id='grant'",
+                    [],
+                )
+                .unwrap();
+        },
+    };
+    let input = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("host", "gateway.example")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer good-token")
+        .body(Body::from(call.to_string()))
+        .unwrap();
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        serving.router().oneshot(input).with_subscriber(barrier),
+    )
+    .await
+    .expect("confirmed replay did not settle")
+    .unwrap();
+    assert_eq!(
+        reached.load(Ordering::SeqCst),
+        1,
+        "post-entry invalidation barrier was not reached"
+    );
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::FORBIDDEN,
+        "cached receipt bypassed grant invalidation after public entry"
+    );
+    assert_eq!(
+        bus.sent_frames.lock().unwrap().len(),
+        1,
+        "confirmed replay resubmitted"
+    );
+}
+
+async fn refused_between_entry_and_send(expire: bool) {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    let (fixture, bus) = setup_list_bus(Policy {
+        send: Some(Permission {
+            targets: BTreeSet::from(["alpha@node".into()]),
+            required_scope: "identity:read".into(),
+        }),
+        reply: None,
+    })
+    .await;
+    let serving = Serving::from_owner_file(&fixture.config_file)
+        .await
+        .unwrap();
+    let now = || {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    };
+    let expires = now() + 2;
+    if expire {
+        fixture
+            .tokens
+            .lock()
+            .unwrap()
+            .get_mut("good-token")
+            .unwrap()["exp"] = json!(expires);
+    }
+    let gate = Arc::new(ListGate::default());
+    *bus.list_gate.lock().unwrap() = Some(gate.clone());
+    let pending = tokio::spawn(async move {
+        fixture::request(&serving, "good-token", rpc("tools/call",
+            json!({"name":"xmsg_send","arguments":{"request_id":"pre-effect-refusal","to":"alpha@node","text":"must not submit"}}))).await
+    });
+    tokio::time::timeout(Duration::from_secs(3), gate.entered.notified())
+        .await
+        .expect("send did not reach discovery after public authentication");
+    assert!(
+        fixture.requests.load(Ordering::SeqCst) >= 1,
+        "barrier preceded public authentication"
+    );
+    assert!(bus.sent_frames.lock().unwrap().is_empty());
+    if expire {
+        assert!(
+            now() < expires,
+            "entry verification consumed the token lifetime"
+        );
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while now() < expires {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("wall clock did not reach the captured token expiry");
+    } else {
+        // Raw fixture invalidation bypasses the owner lease already held by dispatch.
+        let sql = rusqlite::Connection::open(&fixture.store_file).unwrap();
+        assert_eq!(
+            sql.execute(
+                "UPDATE grants SET enabled=0, revision=revision+1 WHERE id='grant'",
+                []
+            )
+            .unwrap(),
+            1
+        );
+    }
+    gate.release.notify_one();
+    let (status, value, _) = tokio::time::timeout(Duration::from_secs(3), pending)
+        .await
+        .expect("send did not settle after discovery was released")
+        .unwrap();
+    assert_eq!(
+        status,
+        if expire {
+            axum::http::StatusCode::UNAUTHORIZED
+        } else {
+            axum::http::StatusCode::FORBIDDEN
+        },
+        "stale authority reached the effect: {value}"
+    );
+    assert!(
+        bus.sent_frames.lock().unwrap().is_empty(),
+        "stale authority submitted a send"
+    );
+}
+
+#[tokio::test]
+async fn revoked_grant_between_entry_and_effect_prevents_send() {
+    refused_between_entry_and_send(false).await;
+}
+
+#[tokio::test]
+async fn expired_token_at_effect_prevents_send() {
+    refused_between_entry_and_send(true).await;
 }
 
 #[tokio::test]

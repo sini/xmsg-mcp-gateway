@@ -174,13 +174,13 @@ CASES = [
         "old pending work escaped disable and re-enable",
     ),
     (
-        "fresh-token",
+        "fresh-store-authority",
         "src/outbound.rs",
-        "let current = verifier.verify(token).await?;",
-        "let current = identity;",
+        'tracing::debug!(target:"gateway_outbound_reserved", "pending");\n    require_current(context, store)?;',
+        'tracing::debug!(target:"gateway_outbound_reserved", "pending");',
         "custody_outbound",
         SEND_TEST,
-        "revoked token was not rechecked before submission",
+        "revoked grant was not rechecked before submission",
     ),
     (
         "owned-correlation",
