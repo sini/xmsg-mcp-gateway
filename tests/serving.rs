@@ -517,6 +517,8 @@ async fn opt_in_cli_listener_preserves_auth_grants_body_and_public_resource() {
     );
     let base = format!("http://127.0.0.1:{}", address.port());
     let client = reqwest::Client::builder()
+        // Early 413 closes must not race the next authorization assertion.
+        .pool_max_idle_per_host(0)
         .no_proxy()
         .timeout(std::time::Duration::from_secs(3))
         .build()
