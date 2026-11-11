@@ -376,8 +376,8 @@ CASES += [
     (
         "policy-lease",
         "src/outbound.rs",
-        "let _lease = self.wait_operation_lease(&service, std::time::Duration::from_secs(30))?;",
-        "let _lease = ();",
+        'let _lease = self.wait_operation_lease(&service, std::time::Duration::from_secs(30))?;\n        let tx = self\n            .connection\n            .transaction_with_behavior(TransactionBehavior::Immediate)?;\n        let next = Self::set_outbound_policy_in',
+        'let _lease = ();\n        let tx = self\n            .connection\n            .transaction_with_behavior(TransactionBehavior::Immediate)?;\n        let next = Self::set_outbound_policy_in',
         "outbound_lease",
         "owner_policy_write_waits_for_the_same_service_lease",
         "policy write bypassed the service lease",

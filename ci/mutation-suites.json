@@ -127,18 +127,21 @@
       "id": "grant",
       "script": "scripts/grant_mutants.py",
       "args": [],
-      "count": 13,
+      "count": 14,
       "fixture": false,
       "python": false,
-      "completion": "13/13 grant mutants killed",
+      "completion": "14/14 grant mutants killed",
       "dependencies": [
         "scripts/grant_mutants.py",
         "src/grants.rs",
         "src/main.rs",
+        "src/outbound.rs",
+        "tests/apply.rs",
         "tests/grant_cli.rs",
         "tests/grant_core.rs"
       ],
       "labels": [
+        "apply-policy-validation",
         "cli-input-redaction",
         "empty-binding",
         "stale-revision",
@@ -154,6 +157,7 @@
         "cli-exit"
       ],
       "required_output": [
+        "^apply\\-policy\\-validation: GREEN baseline, RED intended test$",
         "^cli\\-input\\-redaction: GREEN baseline, RED intended test$",
         "^empty\\-binding: GREEN baseline, RED intended test$",
         "^stale\\-revision: GREEN baseline, RED intended test$",
@@ -168,7 +172,7 @@
         "^audience\\-array: GREEN baseline, RED intended test$",
         "^cli\\-exit: GREEN baseline, RED intended test$"
       ],
-      "script_sha256": "6e16ce278d085ddf92cb462146beccc4dcfd9ec929dc02cd04a0b0e7cfdae12a"
+      "script_sha256": "8340bd316e6eeeeac84f32560ae2f3f0592252c09ee86905002a9f115183460b"
     },
     {
       "id": "identity",
@@ -800,7 +804,7 @@
         "^pending\\-row\\-is\\-uncertain: GREEN baseline / RED intended$",
         "^submission\\-flag\\-before\\-send: GREEN baseline / RED intended$"
       ],
-      "script_sha256": "9eba0e87f6f314c902f960635eba09fb7ef421af4d8416d2830940aca5cb0f6a"
+      "script_sha256": "a3294183a66ef5dc5ab261796fc73172ebbee653057fe40b0336976303b2cbda"
     },
     {
       "id": "wiring",
