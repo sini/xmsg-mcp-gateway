@@ -1,3 +1,4 @@
+use crate::auth::VerifiedContext;
 use crate::grants::{
     Error as GrantError, Store, CUSTODY_SCHEMA_VERSION, MAX_SUPPORTED_SCHEMA_VERSION,
     OUTBOUND_SCHEMA_VERSION,
@@ -738,6 +739,23 @@ pub async fn list(
     arguments: &ListArguments,
     limits: &Limits,
 ) -> Result<FilteredList, Error> {
+    let started = std::time::Instant::now();
+    let context = verify_context(store, verifier, token, limits).await?;
+    list_verified(
+        store, service, verifier, &context, arguments, limits, started,
+    )
+    .await
+}
+
+pub(crate) async fn list_verified(
+    store: &mut Store,
+    service: &Endpoint,
+    verifier: &crate::auth::Verifier,
+    context: &VerifiedContext,
+    arguments: &ListArguments,
+    limits: &Limits,
+    started: std::time::Instant,
+) -> Result<FilteredList, Error> {
     limits.validate()?;
     arguments.validate()?;
     let store_file = store.file.clone();
@@ -746,18 +764,12 @@ pub async fn list(
         list_store.require_outbound_ready()?;
         list_store.require_retirement_ready()?;
     }
-    let started = std::time::Instant::now();
-    let verified = tokio::time::timeout(limits.timeout, verifier.verify(token))
-        .await
-        .map_err(|_| Error::Deadline)??;
-    if verified.expires_at() <= now() as u64 {
-        return Err(Error::Denied);
-    }
     let policy = {
         let list_store = Store::open_for_dispatch(&store_file)?;
         list_store.require_outbound_ready()?;
         list_store.require_retirement_ready()?;
-        let authority = list_store.authorize(&verified)?;
+        require_current(context, &list_store)?;
+        let authority = context.authority();
         list_store.outbound_policy(&authority.grant_id)?
     };
     let permission = policy.send.as_ref().ok_or(Error::Denied)?;
@@ -791,6 +803,33 @@ pub async fn list(
     filter_recipients(&policy, arguments, listed)
 }
 
+async fn verify_context(
+    store: &mut Store,
+    verifier: &crate::auth::Verifier,
+    token: &str,
+    limits: &Limits,
+) -> Result<VerifiedContext, Error> {
+    limits.validate()?;
+    let identity = tokio::time::timeout(limits.timeout, verifier.verify(token))
+        .await
+        .map_err(|_| Error::Deadline)??;
+    let authority = store.authorize(&identity)?;
+    Ok(VerifiedContext::new(
+        std::sync::Arc::new(identity),
+        authority,
+    ))
+}
+
+pub(crate) fn require_current(context: &VerifiedContext, store: &Store) -> Result<(), Error> {
+    if context.identity().expires_at() <= now() as u64 {
+        return Err(crate::auth::Error::InvalidToken.into());
+    }
+    if store.authorize(context.identity())? != *context.authority() {
+        return Err(Error::Denied);
+    }
+    Ok(())
+}
+
 pub async fn dispatch(
     store: &mut Store,
     service: &Endpoint,
@@ -800,17 +839,45 @@ pub async fn dispatch(
     request: &Request,
     limits: &Limits,
 ) -> Result<Outcome, Error> {
+    let started = std::time::Instant::now();
     limits.validate()?;
     let mut dedicated = Store::open_for_dispatch(&store.file)?;
+    let context = verify_context(&mut dedicated, verifier, token, limits).await?;
     dispatch_on_connection(
         &mut dedicated,
         service,
         verifier,
-        token,
+        &context,
         bus_instance,
         request,
         limits,
         None,
+        started,
+    )
+    .await
+}
+
+pub(crate) async fn dispatch_verified(
+    store: &mut Store,
+    service: &Endpoint,
+    verifier: &crate::auth::Verifier,
+    context: &VerifiedContext,
+    bus_instance: &str,
+    request: &Request,
+    limits: &Limits,
+) -> Result<Outcome, Error> {
+    limits.validate()?;
+    let mut connection = Store::open_for_dispatch(&store.file)?;
+    dispatch_on_connection(
+        &mut connection,
+        service,
+        verifier,
+        context,
+        bus_instance,
+        request,
+        limits,
+        None,
+        std::time::Instant::now(),
     )
     .await
 }
@@ -820,7 +887,7 @@ pub(crate) async fn dispatch_selected(
     store: &mut Store,
     service: &Endpoint,
     verifier: &crate::auth::Verifier,
-    token: &str,
+    context: &VerifiedContext,
     bus_instance: &str,
     request: &Request,
     limits: &Limits,
@@ -832,11 +899,12 @@ pub(crate) async fn dispatch_selected(
         &mut selected_connection,
         service,
         verifier,
-        token,
+        context,
         bus_instance,
         request,
         limits,
         Some(selected_grant),
+        std::time::Instant::now(),
     )
     .await
 }
@@ -846,20 +914,18 @@ async fn dispatch_on_connection(
     store: &mut Store,
     service: &Endpoint,
     verifier: &crate::auth::Verifier,
-    token: &str,
+    context: &VerifiedContext,
     bus_instance: &str,
     request: &Request,
     limits: &Limits,
     selected_grant: Option<&str>,
+    started: std::time::Instant,
 ) -> Result<Outcome, Error> {
     store.require_outbound_ready()?;
     store.require_retirement_ready()?;
     limits.validate()?;
-    let started = std::time::Instant::now();
-    let identity = tokio::time::timeout(limits.timeout, verifier.verify(token))
-        .await
-        .map_err(|_| Error::Deadline)??;
-    let initial_grant = store.authorize(&identity)?;
+    let identity = context.identity();
+    let initial_grant = context.authority();
     if selected_grant.is_some_and(|id| id != initial_grant.grant_id) {
         return Err(Error::Denied);
     }
@@ -908,6 +974,7 @@ async fn dispatch_on_connection(
                 return Err(Error::Denied);
             }
             if let Some(receipt) = reservation.receipt {
+                require_current(context, store)?;
                 return Ok(Outcome::Confirmed(serde_json::from_str(&receipt)?));
             }
         }
@@ -935,7 +1002,7 @@ async fn dispatch_on_connection(
             store,
             service,
             verifier,
-            token,
+            context,
             bus_instance,
             request,
             limits,
@@ -973,7 +1040,7 @@ async fn submit(
     store: &mut Store,
     service: &Endpoint,
     verifier: &crate::auth::Verifier,
-    token: &str,
+    context: &VerifiedContext,
     bus_instance: &str,
     request: &Request,
     limits: &Limits,
@@ -981,17 +1048,8 @@ async fn submit(
     may_have_submitted: &AtomicBool,
     selected_grant: Option<&str>,
 ) -> Result<Outcome, Error> {
-    let identity = verifier.verify(token).await?;
-    let fresh_owner = crate::custody::fingerprint(&[
-        identity.service(),
-        identity.issuer(),
-        identity.resource(),
-        identity.subject(),
-    ]);
-    if fresh_owner != owner || identity.expires_at() <= now() as u64 {
-        return Err(Error::Denied);
-    }
-    let authority = store.authorize(&identity)?;
+    let identity = context.identity();
+    let authority = context.authority();
     if selected_grant.is_some_and(|id| id != authority.grant_id) {
         return Err(Error::Denied);
     }
@@ -1010,8 +1068,8 @@ async fn submit(
                 bus_instance,
                 &args.message_id,
                 sender,
-                &identity,
-                &authority,
+                identity,
+                authority,
                 existing.as_ref(),
                 &permission,
             )?,
@@ -1030,6 +1088,7 @@ async fn submit(
     }
     if let Some(reservation) = &existing {
         if let Some(receipt) = &reservation.receipt {
+            require_current(context, store)?;
             return Ok(Outcome::Confirmed(serde_json::from_str(receipt)?));
         }
         if reservation.expired(limits) {
@@ -1127,17 +1186,14 @@ async fn submit(
         }
     };
     tracing::debug!(target:"gateway_outbound_reserved", "pending");
-    let current = verifier.verify(token).await?;
-    if current.expires_at() <= now() as u64 || store.authorize(&current)? != authority {
-        return Err(Error::Denied);
-    }
+    require_current(context, store)?;
     if let Request::Reply(args) = request {
         if store.reply_target(
             bus_instance,
             &args.message_id,
             sender,
-            &current,
-            &authority,
+            identity,
+            authority,
             None,
             &permission,
         )? != target

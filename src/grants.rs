@@ -28,7 +28,7 @@ pub struct Binding {
     pub hosted_client: String,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Authorization {
     pub grant_id: String,
     pub revision: i64,

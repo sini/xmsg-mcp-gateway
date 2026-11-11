@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 mod grants {
-    pub use xmsg_mcp_gateway::grants::exact_audience;
+    pub use xmsg_mcp_gateway::grants::{exact_audience, Authorization};
 }
 #[path = "../../src/auth.rs"]
 mod auth;

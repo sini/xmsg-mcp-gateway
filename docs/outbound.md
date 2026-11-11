@@ -165,6 +165,19 @@ refusal with no row or submission; retry uses the same request ID. If the outcom
 commit is busy after xmsg accepted, it returns pending rather than reporting a
 failed send. The existing durable pending row recovers with its stored key and
 original upstream message ID. The schema permits no fabricated failed state.
+
+Send and reply calls verify the bearer with the provider once at public entry.
+A crate-private `VerifiedContext` carries that verified identity and the entry grant
+revision through dispatch; the standalone token-taking dispatcher also verifies once
+before entering that path. Immediately before a bus send or reply, one freshness
+check enforces the captured expiry and live store authorization: the enabled grant,
+revision, credential/client and owner binding must still match. Reply custody and
+target authorization are rechecked at the same boundary. Provider-side revocation
+after entry takes effect on the next call; store/grant revocation is checked before
+the effect. No token or provider result is cached across calls. `xmsg_list` and broker
+dispatch reuse their entry context too; broker result reads retain local freshness
+checks. Events subscribe/unsubscribe retain their separate authentication contract.
+
 An asynchronous deadline before any possible submission is a transient refusal,
 not unknown. A resumed unconfirmed reservation is already possibly submitted;
 its deadline cannot be treated as proof of refusal.

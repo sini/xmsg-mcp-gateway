@@ -1,6 +1,7 @@
 use std::fs;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reqwest::Client;
@@ -71,6 +72,32 @@ impl VerifiedIdentity {
     }
     pub fn expires_at(&self) -> u64 {
         self.expires_at
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct VerifiedContext {
+    identity: Arc<VerifiedIdentity>,
+    authority: crate::grants::Authorization,
+}
+
+impl VerifiedContext {
+    pub(crate) fn new(
+        identity: Arc<VerifiedIdentity>,
+        authority: crate::grants::Authorization,
+    ) -> Self {
+        Self {
+            identity,
+            authority,
+        }
+    }
+
+    pub(crate) fn identity(&self) -> &Arc<VerifiedIdentity> {
+        &self.identity
+    }
+
+    pub(crate) fn authority(&self) -> &crate::grants::Authorization {
+        &self.authority
     }
 }
 

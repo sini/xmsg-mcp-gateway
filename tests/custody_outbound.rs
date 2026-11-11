@@ -327,7 +327,7 @@ async fn same_request_reuses_receipt_and_changed_payload_conflicts() {
         ),
         "outbound reservations exceeded their count budget"
     );
-    let tokens = fixture.tokens.clone();
+    let grant_file = fixture.store_file.clone();
     let revoked = request("revoked-after-reserve", &target, "must not submit");
     use tracing::instrument::WithSubscriber;
     let endpoint = Endpoint::from_registered(&service).unwrap();
@@ -344,14 +344,20 @@ async fn same_request_reuses_receipt_and_changed_payload_conflicts() {
     .with_subscriber(observer::AtEvent {
         target: "gateway_outbound_reserved",
         action: move || {
-            tokens.lock().unwrap().get_mut("good-token").unwrap()["active"] =
-                serde_json::json!(false);
+            // Bypass the owner lease to force store invalidation during submission.
+            rusqlite::Connection::open(&grant_file)
+                .unwrap()
+                .execute(
+                    "UPDATE grants SET enabled=0, revision=revision+1 WHERE id='grant'",
+                    [],
+                )
+                .unwrap();
         },
     })
     .await;
     assert!(
-        matches!(result, Err(Error::Authentication(_))),
-        "revoked token was not rechecked before submission"
+        matches!(result, Err(Error::Denied) | Err(Error::Authority(_))),
+        "revoked grant was not rechecked before submission"
     );
     assert!(receiver.poll(0).await.unwrap().is_none());
     drop(store);
@@ -915,7 +921,7 @@ async fn pending_recovery_timeout_during_discovery_remains_unknown() {
         )
         .unwrap();
     let operation = request("unconfirmed-recovery", &target, "existing pending bytes");
-    let tokens = fixture.tokens.clone();
+    let grant_file = fixture.store_file.clone();
     let normal_limits = limits();
     let first = dispatch(
         &mut store,
@@ -929,19 +935,20 @@ async fn pending_recovery_timeout_during_discovery_remains_unknown() {
     .with_subscriber(observer::AtEvent {
         target: "gateway_outbound_reserved",
         action: move || {
-            tokens.lock().unwrap().get_mut("good-token").unwrap()["active"] =
-                serde_json::json!(false);
+            rusqlite::Connection::open(&grant_file)
+                .unwrap()
+                .execute("UPDATE grants SET enabled=0 WHERE id='grant'", [])
+                .unwrap();
         },
     })
     .await;
-    assert!(matches!(first, Err(Error::Authentication(_))));
-    fixture
-        .tokens
-        .lock()
-        .unwrap()
-        .get_mut("good-token")
-        .unwrap()["active"] = serde_json::json!(true);
+    assert!(matches!(
+        first,
+        Err(Error::Denied) | Err(Error::Authority(_))
+    ));
     let sql = rusqlite::Connection::open(&fixture.store_file).unwrap();
+    sql.execute("UPDATE grants SET enabled=1 WHERE id='grant'", [])
+        .unwrap();
     let row: (String, Option<String>) = sql
         .query_row("SELECT state,receipt FROM outbound_reservations", [], |r| {
             Ok((r.get(0)?, r.get(1)?))
