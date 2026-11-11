@@ -3,6 +3,8 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -17,7 +19,6 @@ jobs:
       - run: uv sync --locked --python 3.12 --link-mode copy
       - run: uv run --locked pytest -q
       - run: uv run --locked ruff check phase1 tests scripts
-      - run: uv run --locked python scripts/mutations.py
       - run: python3 scripts/timeout_diagnostics_checks.py
   rust:
     strategy:
@@ -51,47 +52,13 @@ jobs:
           assert summaries, "no Rust test summaries"
           counts = [tuple(map(int, row)) for row in summaries]
           assert all(not row[1] and not any(row[3:]) for row in counts), "failed or filtered Rust tests"
-          expected_passed, expected_ignored = (235, 87) if sys.platform == "linux" else (231, 2)
+          import json
+          expected_passed, expected_ignored = json.loads(pathlib.Path("ci/ordinary-counts.json").read_text())[sys.platform]
           assert sum(row[0] for row in counts) == expected_passed, "executed Rust test count mismatch"
           assert sum(row[2] for row in counts) == expected_ignored, "private-node deferral count mismatch"
           print(f"Rust test completion guard: {expected_passed} passed; {expected_ignored} private-node cases run in mandatory transport/custody job")
           PY
       - run: cargo clippy --locked --all-targets -j 4 -- -D warnings
-      - name: Events delivery and recovery source mutants
-        if: runner.os == 'Linux'
-        run: |
-          python3 scripts/events_mutants.py | tee events-mutants.log
-          grep -Fx 'g5-events-mutants-complete:22/22' events-mutants.log
-      - name: Reservation retirement source mutant
-        if: runner.os == 'Linux'
-        run: |
-          python3 scripts/retirement_mutants.py | tee retirement-mutants.log
-          grep -Fx 'retirement-mutants-complete:1/1' retirement-mutants.log
-      - name: Grant source mutants
-        if: runner.os == 'Linux'
-        run: python3 scripts/grant_mutants.py
-      - name: Identity boundary source mutants
-        if: runner.os == 'Linux'
-        run: python3 scripts/identity_mutants.py
-      - name: Broker authority and correlation source mutants
-        if: runner.os == 'Linux'
-        run: |
-          python3 scripts/broker_mutants.py | tee broker-mutants.log
-          grep -Fx 'broker-mutants-complete:12/12' broker-mutants.log
-          python3 scripts/dispatch_logging_mutants.py | tee dispatch-logging-mutants.log
-          grep -Fx 'dispatch-logging-mutants-complete:1/1' dispatch-logging-mutants.log
-      - name: Serving misuse source mutants
-        if: runner.os == 'Linux'
-        run: python3 scripts/serving_mutants.py
-      - name: Serving exposure source mutants
-        if: runner.os == 'Linux'
-        run: |
-          python3 scripts/header_timeout_mutants.py
-          python3 scripts/connection_cap_mutants.py
-          python3 scripts/body_mutants.py
-          python3 scripts/provider_eof_mutants.py
-          python3 scripts/reservation_lifetime_mutants.py
-          python3 scripts/custody_retention_mutants.py
 
   transport:
     runs-on: ubuntu-latest
@@ -130,11 +97,6 @@ jobs:
           export XMSG_GATEWAY_BIN="$PWD/.artifacts/transport/$revision/xmsg"
           cargo test --locked --test gateway_leaf_reply mcp_leaf_send_reply_enters_owned_custody_with_attested_origin -- --ignored --exact --nocapture 2>&1 | tee gateway-leaf-reply.log
           grep -Fx 'gateway-leaf-reply-complete:mcp-owned-custody-attested-origin' gateway-leaf-reply.log
-      - name: Isolated federation admission source mutants
-        run: |
-          python3 scripts/transport_mutants.py | tee transport-mutants.log
-          grep -Fx 'transport-admission-mutants-complete:4/4' transport-mutants.log
-
       - name: Private-node custody and completion controls
         run: |
           revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')
@@ -142,12 +104,6 @@ jobs:
           python3 scripts/custody_checks.py | tee custody-checks.log
           grep -Fx 'custody-checks-complete:23' custody-checks.log
           grep -Fx 'copied-control-cached-artifact:refused:custody_inbound' custody-checks.log
-      - name: Custody source mutants
-        run: |
-          revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')
-          export XMSG_GATEWAY_BIN="$PWD/.artifacts/transport/$revision/xmsg"
-          python3 scripts/custody_mutants.py | tee custody-mutants.log
-          grep -Fx 'custody-mutants-complete:32' custody-mutants.log
       - name: Private-node outbound custody and completion controls
         run: |
           revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')
@@ -164,13 +120,6 @@ jobs:
           grep -Fx 'outbound-retirement-complete:send-reply-cross-operation-restart' retirement-transport.log
           grep -Fx 'outbound-retirement-complete:gist-quota-reclaimed-old-id-fenced' retirement-transport.log
           grep -Fx 'outbound-retirement-complete:inflight-lease-and-outcome-preserved' retirement-transport.log
-      - name: Outbound custody source mutants
-        run: |
-          revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')
-          export XMSG_GATEWAY_BIN="$PWD/.artifacts/transport/$revision/xmsg"
-          python3 scripts/outbound_mutants.py | tee outbound-mutants.log
-          grep -Fx 'outbound-schema-floor-control:passed' outbound-mutants.log
-          grep -Fx 'outbound-mutants-complete:38' outbound-mutants.log
       - name: MCP startup and messaging completion controls
         run: |
           revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')
@@ -178,18 +127,6 @@ jobs:
           python3 scripts/wiring_checks.py | tee wiring-checks.log
           grep -Fx 'copied-control-cached-artifact:refused:messaging' wiring-checks.log
           grep -Fx 'wiring-checks-complete:28' wiring-checks.log
-      - name: MCP wiring source mutants
-        run: |
-          revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')
-          export XMSG_GATEWAY_BIN="$PWD/.artifacts/transport/$revision/xmsg"
-          python3 scripts/wiring_mutants.py | tee wiring-mutants.log
-          grep -Fx 'wiring-mutants-complete:38' wiring-mutants.log
-      - name: Bounded uncertainty acceptance source mutant
-        run: |
-          revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')
-          export XMSG_GATEWAY_BIN="$PWD/.artifacts/transport/$revision/xmsg"
-          python3 scripts/reservation_lifetime_mutants.py --live | tee reservation-acceptance.log
-          grep -Fx 'reservation-acceptance-mutants-complete:1' reservation-acceptance.log
       - name: Maximum escaped send through the HTTP listener
         run: |
           revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')
@@ -240,3 +177,100 @@ jobs:
           assert result["exit_code"] == 0
           assert result["local_genie_override"] is False, "CI must build the public pinned genie-root"
           PY
+
+  mutation-selection:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.selection.outputs.matrix }}
+      selected: ${{ steps.selection.outputs.selected }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - id: selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
+        run: python3 scripts/mutation_gates.py select --event "$EVENT_NAME" --base "$BASE_SHA" --head "$HEAD_SHA" --output .artifacts/mutation-plan.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mutation-plan
+          path: .artifacts/mutation-plan.json
+          include-hidden-files: true
+          if-no-files-found: error
+
+  mutation-suite:
+    needs: mutation-selection
+    if: needs.mutation-selection.outputs.selected != '0'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.mutation-selection.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Install pinned Rust toolchain
+        if: ${{ !matrix.python }}
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          rustup toolchain install "$version" --profile minimal
+          rustup default "$version"
+      - name: Install pinned Python reference dependencies
+        if: matrix.python
+        run: |
+          python3 -m pip install uv==0.13.5
+          uv sync --locked --python 3.12 --link-mode copy
+      - name: Prepare existing revision-verified daemon fixtures
+        if: matrix.fixture
+        run: |
+          python3 scripts/transport_compat.py --build-only
+          revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')
+          printf 'XMSG_GATEWAY_BIN=%s/.artifacts/transport/%s/xmsg\nXMSG_GATEWAY_REVISION=%s\n' "$PWD" "$revision" "$revision" >> "$GITHUB_ENV"
+      - name: Complete selected suite with its controls
+        env:
+          SUITE: ${{ matrix.suite }}
+          PYTHON_REFERENCE: ${{ matrix.python }}
+        run: |
+          if [ "$PYTHON_REFERENCE" = true ]; then
+            uv run --locked python scripts/mutation_gates.py run "$SUITE" --output .artifacts/mutation-receipts
+          else
+            python3 scripts/mutation_gates.py run "$SUITE" --output .artifacts/mutation-receipts
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: mutation-receipt-${{ matrix.suite }}
+          path: .artifacts/mutation-receipts/
+          include-hidden-files: true
+          if-no-files-found: error
+
+  mutation-completion:
+    needs: [mutation-selection, mutation-suite]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: mutation-plan
+          path: .artifacts/
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: needs.mutation-selection.outputs.selected != '0'
+        with:
+          pattern: mutation-receipt-*
+          path: .artifacts/mutation-receipts/
+          merge-multiple: true
+      - name: Validate selected execution receipts and full inventory
+        env:
+          SELECTION_RESULT: ${{ needs.mutation-selection.result }}
+          SUITE_RESULT: ${{ needs.mutation-suite.result }}
+          SELECTED: ${{ needs.mutation-selection.outputs.selected }}
+        run: |
+          test "$SELECTION_RESULT" = success
+          if [ "$SELECTED" != 0 ]; then test "$SUITE_RESULT" = success; fi
+          mkdir -p .artifacts/mutation-receipts
+          python3 scripts/mutation_gates.py verify --plan .artifacts/mutation-plan.json --receipts .artifacts/mutation-receipts
