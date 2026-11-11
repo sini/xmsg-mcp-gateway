@@ -1063,15 +1063,15 @@ async fn authorized_ack_deadline_has_body_without_claiming_rollback() {
     };
     use tower::ServiceExt;
     use tracing::instrument::WithSubscriber;
-    let (fixture, _bus) = setup().await;
+    let (fixture, bus) = setup().await;
     let serving = Arc::new(
         Serving::from_owner_file(&fixture.config_file)
             .await
             .unwrap(),
     );
-    let (_, initial, _) = fixture::request(
+    let (_, initial, _) = confirmed_first_call(
         &serving,
-        "good-token",
+        &bus,
         rpc(
             "tools/call",
             json!({"name":"gist_read","arguments":{"request_id":"ack-deadline-setup","id":"abc"}}),
@@ -1079,9 +1079,10 @@ async fn authorized_ack_deadline_has_body_without_claiming_rollback() {
     )
     .await;
     assert_eq!(
-        initial["result"]["structuredContent"]["broker"]["state"],
-        "confirmed"
+        initial["result"]["structuredContent"]["broker"]["state"], "confirmed",
+        "ACK deadline setup did not confirm: {initial}"
     );
+    eprintln!("ack-deadline-setup-complete:confirmed:one-send");
     let entered = Arc::new(AtomicUsize::new(0));
     let reached = entered.clone();
     let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
