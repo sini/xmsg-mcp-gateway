@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -199,6 +200,49 @@ def verify(plan, receipts, suites, root=ROOT):
     return sum(known[s]["count"] for s in selected)
 
 
+def tee_command(command, log, console=None):
+    """Keep live progress and the hashed execution log byte-identical."""
+    console = sys.stdout.buffer if console is None else console
+    child = subprocess.Popen(
+        command,
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    previous_term = signal.getsignal(signal.SIGTERM)
+
+    def interrupted(_signum, _frame):
+        raise InterruptedError("mutation suite interrupted")
+
+    signal.signal(signal.SIGTERM, interrupted)
+    try:
+        with log.open("wb") as output, child.stdout:
+            while chunk := child.stdout.read1(65536):
+                output.write(chunk)
+                output.flush()
+                console.write(chunk)
+                console.flush()
+        return child.wait()
+    except BaseException:
+        # This process group contains only the child launched above and its descendants.
+        try:
+            os.killpg(child.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            child.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            child.wait(timeout=3)
+        raise
+    finally:
+        signal.signal(signal.SIGTERM, previous_term)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -267,16 +311,9 @@ def main():
         suite = next(s for s in suites if s["id"] == options.suite)
         options.output.mkdir(parents=True, exist_ok=True)
         log = options.output / f"{suite['id']}.log"
-        with log.open("w") as output:
-            result = subprocess.run(
-                [sys.executable, suite["script"], *suite["args"]],
-                cwd=ROOT,
-                stdout=output,
-                stderr=subprocess.STDOUT,
-            )
-        if result.returncode:
-            print(log.read_text(), end="")
-            raise SystemExit(result.returncode)
+        status = tee_command([sys.executable, suite["script"], *suite["args"]], log)
+        if status:
+            raise SystemExit(status)
         validate_output(suite, log.read_text())
         revision = subprocess.check_output(
             ["git", "rev-parse", "HEAD"], text=True, cwd=ROOT

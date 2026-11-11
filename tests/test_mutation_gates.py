@@ -2,7 +2,9 @@
 
 import copy
 import importlib.util
+import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -20,6 +22,63 @@ SPEC.loader.exec_module(gates)
 class MutationGatesTests(unittest.TestCase):
     def setUp(self):
         self.suites = gates.load_registry()
+
+    def test_live_tee_preserves_stdout_stderr_bytes_and_failure_exit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "execution.log"
+            console = io.BytesIO()
+            command = [
+                sys.executable,
+                "-c",
+                "import os; os.write(1,b'arm started\\n'); os.write(2,b'arm failed\\n'); raise SystemExit(7)",
+            ]
+            self.assertEqual(gates.tee_command(command, log, console), 7)
+            self.assertEqual(log.read_bytes(), b"arm started\narm failed\n")
+            self.assertEqual(console.getvalue(), log.read_bytes())
+
+    def test_tee_delivers_progress_before_child_can_finish(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            released = root / "released"
+
+            class Console(io.BytesIO):
+                def write(self, chunk):
+                    released.touch()
+                    return super().write(chunk)
+
+            console = Console()
+            program = (
+                "import os,time,pathlib; os.write(1,b'first\\n'); end=time.monotonic()+2; flag=pathlib.Path("
+                + repr(str(released))
+                + "); "
+                + "\nwhile not flag.exists() and time.monotonic()<end: time.sleep(.01)\nraise SystemExit(0 if flag.exists() else 9)"
+            )
+            self.assertEqual(
+                gates.tee_command(
+                    [sys.executable, "-c", program], root / "log", console
+                ),
+                0,
+            )
+            self.assertEqual(console.getvalue(), b"first\n")
+
+    def test_tee_interrupt_reaps_its_owned_child(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            owned = []
+
+            class InterruptConsole:
+                def write(self, chunk):
+                    owned.append(int(chunk))
+                    raise InterruptedError("forced console interruption")
+
+            program = "import os,time; print(os.getpid(),flush=True); time.sleep(60)"
+            with self.assertRaises(InterruptedError):
+                gates.tee_command(
+                    [sys.executable, "-c", program], root / "log", InterruptConsole()
+                )
+            self.assertEqual(len(owned), 1)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(owned[0], 0)
 
     def test_complete_inventory_and_execution_modes(self):
         self.assertEqual(len(self.suites), 19)
