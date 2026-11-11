@@ -445,6 +445,166 @@ async fn incomplete_or_exposed_serving_profiles_are_refused() {
 }
 
 #[tokio::test]
+async fn non_loopback_bind_requires_explicit_opt_in() {
+    let mut fixture = Fixture::new();
+    for bind in ["0.0.0.0:0", "[::]:0"] {
+        fixture.config["bind"] = json!(bind);
+        for flag in [None, Some(json!(false)), Some(json!(true))] {
+            fixture
+                .config
+                .as_object_mut()
+                .unwrap()
+                .remove("allow_non_loopback_bind");
+            if let Some(value) = &flag {
+                fixture.config["allow_non_loopback_bind"] = value.clone();
+            }
+            fixture::private_file(
+                &fixture.config_file,
+                &serde_json::to_vec(&fixture.config).unwrap(),
+            );
+            assert_eq!(
+                Serving::from_owner_file(&fixture.config_file).await.is_ok(),
+                flag == Some(json!(true)),
+                "non-loopback bind must require explicit opt-in: {bind} {flag:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn opt_in_cli_listener_preserves_auth_grants_body_and_public_resource() {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let mut fixture = Fixture::new();
+    fixture.config["bind"] = json!("0.0.0.0:0");
+    fixture.config["allow_non_loopback_bind"] = json!(true);
+    fixture.config["max_request_body_bytes"] = json!(65536);
+    fixture::private_file(
+        &fixture.config_file,
+        &serde_json::to_vec(&fixture.config).unwrap(),
+    );
+    let mut wrong_audience = provider::claims(&fixture.binding);
+    wrong_audience["aud"] = json!("https://foreign.example/mcp");
+    fixture
+        .tokens
+        .lock()
+        .unwrap()
+        .insert("wrong-audience".into(), wrong_audience);
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_xmsg-mcp-gateway"))
+        .arg("serve")
+        .arg("--config")
+        .arg(&fixture.config_file)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let ready = tokio::time::timeout(std::time::Duration::from_secs(5), lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .expect("opt-in non-loopback listener did not start");
+    let address: std::net::SocketAddr = ready
+        .strip_prefix("serving MCP at ")
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        address.ip().is_unspecified(),
+        "listener did not bind wildcard"
+    );
+    let base = format!("http://127.0.0.1:{}", address.port());
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .unwrap();
+    let response = client
+        .post(format!("{base}/mcp"))
+        .header("host", "gateway.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+    assert_eq!(response.headers()["www-authenticate"],
+        "Bearer resource_metadata=\"https://gateway.example/mcp/.well-known/oauth-protected-resource\"");
+    for path in [
+        "/.well-known/oauth-protected-resource",
+        "/.well-known/oauth-protected-resource/mcp",
+        "/mcp/.well-known/oauth-protected-resource",
+    ] {
+        let response = client
+            .get(format!("{base}{path}"))
+            .header("host", "gateway.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(body["resource"], fixture.binding.resource);
+        assert_eq!(
+            body["authorization_servers"],
+            json!([fixture.binding.issuer])
+        );
+    }
+    for (token, body, expected) in [
+        (
+            "good-token",
+            Fixture::call().to_string(),
+            reqwest::StatusCode::OK,
+        ),
+        (
+            "wrong-audience",
+            Fixture::call().to_string(),
+            reqwest::StatusCode::UNAUTHORIZED,
+        ),
+        (
+            "good-token",
+            " ".repeat(65537),
+            reqwest::StatusCode::PAYLOAD_TOO_LARGE,
+        ),
+    ] {
+        let response = client
+            .post(format!("{base}/mcp"))
+            .header("host", "gateway.example")
+            .bearer_auth(token)
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+        if expected == reqwest::StatusCode::OK {
+            let body: serde_json::Value =
+                serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+            assert_eq!(
+                body["result"]["structuredContent"]["resource"],
+                fixture.binding.resource
+            );
+        }
+    }
+    xmsg_mcp_gateway::grants::Store::open(&fixture.store_file)
+        .unwrap()
+        .set_enabled("grant", 2, false)
+        .unwrap();
+    let response = client
+        .post(format!("{base}/mcp"))
+        .header("host", "gateway.example")
+        .bearer_auth("good-token")
+        .header("content-type", "application/json")
+        .body(Fixture::call().to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+    child.kill().await.unwrap();
+    child.wait().await.unwrap();
+}
+
+#[tokio::test]
 async fn unavailable_provider_is_retryable_and_never_opens_the_store() {
     let mut fixture = Fixture::new();
     let serving = fixture.serving().await;

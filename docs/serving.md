@@ -177,8 +177,8 @@ configuration file may be read-only world-readable (such as mode 0444 in the Nix
 store) or owner-private (mode 0600 or 0400), and must not be group- or world-writable
 on Unix; credential files remain owner-private (mode 0600 or 0400). Unknown fields are refused.
 Relative state, lookup-secret, root-certificate and Events-key paths resolve against its
-containing directory. The current listener binds only loopback; it accepts OAuth
-credentials and has no local bearer/no-authentication mode.
+containing directory. The listener requires a loopback bind by default; it accepts
+OAuth credentials and has no local bearer/no-authentication mode.
 
 Example identity-only `.state/serving.json`, with every provider/client/owner value replaced by
 the values from the actual provider setup:
@@ -332,8 +332,22 @@ renewal, rebind and read tools cannot authorize that release.
 
 ## Exposure and request protection
 
-The listener remains OAuth-only and loopback-bound, including when reached through
-a tunnel. Header deadlines and a connection cap bound admission and idle keepalive.
+The listener remains OAuth-only. The optional owner-file boolean
+`allow_non_loopback_bind` defaults to `false`; non-loopback `bind` addresses refuse
+startup unless it is explicitly `true`. For an ingress-fronted listener, set it to
+`true` with the required address, for example `"bind": "0.0.0.0:8787"`. A wildcard
+listener also accepts the existing tunnel sidecar's loopback connection.
+
+TLS termination and public exposure belong to the deployment. Restrict plaintext
+upstream access to the trusted ingress and tunnel sidecar using deployment network
+controls; the switch supplies no TLS or network isolation. Preserve the public Host,
+Authorization, Origin and MCP headers and all protected-resource metadata paths.
+Keep the same configured HTTPS resource URL for both routes: metadata and the 401
+challenge derive from `verifier.resource`, never the bind address or proxy headers.
+OAuth verification, grants, Host/Origin checks and body budgets apply identically
+after opting in. This switch does not add support for multiple OAuth client profiles.
+
+Header deadlines and a connection cap bound admission and idle keepalive.
 A declared Content-Length above the request limit returns 413 before body reading,
 provider requests or dispatch. Streamed bodies retain the configured byte bound.
 

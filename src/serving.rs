@@ -110,6 +110,8 @@ struct Configuration {
     #[serde(default = "default_header_read_timeout_ms")]
     header_read_timeout_ms: u64,
     bind: SocketAddr,
+    #[serde(default)]
+    allow_non_loopback_bind: bool,
     grant_store: PathBuf,
     request_timeout_ms: u64,
     #[serde(default = "default_max_connections")]
@@ -206,7 +208,7 @@ impl Serving {
         transport: Arc<dyn crate::webhook::Transport>,
     ) -> Result<Self, StartupError> {
         let config = load_configuration(config_file)?;
-        if !config.bind.ip().is_loopback()
+        if (!config.bind.ip().is_loopback() && !config.allow_non_loopback_bind)
             || config.allowed_hosts.is_empty()
             || config.header_read_timeout_ms == 0
             || config.header_read_timeout_ms > 60_000
