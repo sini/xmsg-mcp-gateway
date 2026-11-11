@@ -16,6 +16,14 @@ from transport_compat import invocation_evidence
 ROOT = Path(__file__).resolve().parents[1]
 CASES = [
     (
+        "apply-policy-validation",
+        "src/outbound.rs",
+        "    policy.validate()?;",
+        "    let _ = policy;",
+        "apply",
+        "invalid_apply_policy_and_missing_grant_never_write_business_state",
+    ),
+    (
         "cli-input-redaction",
         "src/main.rs",
         '#[error("invalid enrollment binding document")]',

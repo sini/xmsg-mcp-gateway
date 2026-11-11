@@ -189,6 +189,17 @@ impl Store {
             .ok_or(Error::NoChange)?;
         let _lease = self.wait_operation_lease(&service, Duration::from_secs(30))?;
         let tx = self.connection.transaction()?;
+        let next = Self::set_enabled_in(&tx, id, revision, enabled)?;
+        tx.commit()?;
+        Ok(next)
+    }
+
+    pub(crate) fn set_enabled_in(
+        tx: &rusqlite::Transaction<'_>,
+        id: &str,
+        revision: i64,
+        enabled: bool,
+    ) -> Result<i64, Error> {
         let changed = tx.execute(
             "UPDATE grants SET enabled = ?1, revision = revision + 1
              WHERE id = ?2 AND revision = ?3 AND enabled != ?1",
@@ -208,9 +219,8 @@ impl Store {
         })?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if version >= EVENTS_SCHEMA_VERSION {
-            crate::event_store::enabled_transition(&tx, id, next, enabled)?;
+            crate::event_store::enabled_transition(tx, id, next, enabled)?;
         }
-        tx.commit()?;
         Ok(next)
     }
 

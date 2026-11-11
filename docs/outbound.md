@@ -36,6 +36,30 @@ Store API. Policy is empty until explicitly written; writing policy increments
 the grant revision and never enables it. There is no MCP policy mutation tool,
 automatic population, or fixture-only constructor.
 
+For repeatable configuration, use the idempotent owner command:
+
+```sh
+xmsg-mcp-gateway --state FILE apply --id GRANT --policy POLICY.json --enabled
+```
+
+Omit both state flags to preserve the grant's current enablement. Use `--disabled`
+to explicitly disable it; `--enabled` and `--disabled` conflict. An already matching
+policy and requested state print `unchanged at revision N` and exit successfully.
+Policies are compared as typed values, so JSON key order, whitespace, target order
+and duplicate targets do not cause a write. A policy change on an enabled grant
+keeps it enabled unless `--disabled` is specified.
+
+Each actual policy change writes policy once and advances the revision by one;
+an enablement change advances it by one more. Thus policy-only and enable-only
+changes are +1, both changes are +2, and an unchanged apply is +0. All changes,
+including Events transitions, commit atomically under the existing service lease.
+Apply snapshots the revision before waiting on that lease and rechecks it even
+for a prospective no-op. Invalid policy, missing grants, a concurrent revision
+change or an enable-uniqueness conflict refuse without changing business state.
+Retry a refused concurrent apply after inspecting the winning configuration.
+The existing `set-outbound-policy`, `enable` and `disable` commands remain
+available with their explicit revision arguments and existing behavior.
+
 For example, an owner policy document can allow one exact destination:
 
 ```json

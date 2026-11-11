@@ -61,6 +61,16 @@ enum Command {
         #[arg(long)]
         key_file: PathBuf,
     },
+    Apply {
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        policy: PathBuf,
+        #[arg(long, conflicts_with = "disabled")]
+        enabled: bool,
+        #[arg(long)]
+        disabled: bool,
+    },
     SetOutboundPolicy {
         id: String,
         revision: i64,
@@ -214,6 +224,31 @@ async fn run(cli: Cli) -> Result<(), CommandError> {
             let policy = serde_json::from_slice(&document).map_err(CommandError::InvalidPolicy)?;
             let next = Store::open(&state)?.set_outbound_policy(&id, revision, &policy)?;
             println!("outbound policy changed at revision {next}");
+        }
+        (
+            Some(state),
+            Command::Apply {
+                id,
+                policy,
+                enabled,
+                disabled,
+            },
+        ) => {
+            let document = std::fs::read(policy).map_err(CommandError::ReadPolicy)?;
+            let policy = serde_json::from_slice(&document).map_err(CommandError::InvalidPolicy)?;
+            let enabled = if enabled {
+                Some(true)
+            } else if disabled {
+                Some(false)
+            } else {
+                None
+            };
+            let result = Store::open(&state)?.apply_outbound_policy(&id, &policy, enabled)?;
+            if result.changed {
+                println!("grant applied at revision {}", result.revision);
+            } else {
+                println!("unchanged at revision {}", result.revision);
+            }
         }
         (Some(state), Command::Enroll { id, binding }) => {
             let document = std::fs::read(binding).map_err(CommandError::ReadBinding)?;
