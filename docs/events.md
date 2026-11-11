@@ -270,6 +270,39 @@ failure counts, oldest backlog age and a truncation indication. It exposes no
 callback URL, signing key, token or message content. Use this health data and
 bounded recovery tools to investigate failed delivery, rather than raw HTTP logs.
 
+## Consumer wake and session recipe
+
+At session start and on every wake, call `xmsg_inbox` and inspect
+`events_status.subscription.state`. Successful inbox and message reads expose this
+small, owned subscription state in the same read-only transaction as the content.
+`xmsg_identity` remains available for the fuller Events status. If the state is
+`disabled`, `expired` or `not_subscribed`, subscribe again through the existing
+Events method. If it is `verifying`, check state again before creating another
+subscription. A ChatGPT subscribe/task-service error can still complete later;
+check for `active` before deleting the automation or replacing it.
+
+Drain the current inbox view to its end, following `next` pagination and reading
+full message bodies when needed. Deduplicate by durable message ID, including
+across duplicate or reordered wakes. Process each new item, then call `xmsg_ack`
+after handling it and durably recording responsibility. ACK is not a completion receipt
+and does not delete retained inbox entries: an empty page or the end of pagination
+means there is no more content in that view, while already-handled entries are
+skipped using the consumer's durable deduplication/checkpoint state. Serialize or
+coordinate concurrent wakes for the same logical mailbox owner.
+
+An optional bounded periodic inbox/state check can reconcile independently of
+webhook wakes. It is useful after a session restart or missed wake, and is not
+proof that a callback was processed. Use the existing resubscribe and replay
+mechanisms; there is no terminal fencing webhook or new consumer tool.
+
+At the default filter, `gateway_events` INFO records subscription transitions,
+delivery outcomes and held/released counts using closed static reasons and
+numeric fields. They contain no callback URLs, cursors, message IDs, secrets or
+bodies. Expiry is observed once for the current subscription generation per worker
+lifetime without changing stored state; a worker restart may repeat that observation. Inspect these records together with owned subscription state; do not
+collect raw credential-bearing request logs. An explicit `RUST_LOG` filter replaces
+the default, so `RUST_LOG=warn` hides these INFO records.
+
 ## Local owner rebind and replay
 
 These commands read state and key paths from `--config`. A global `--state` override

@@ -108,7 +108,7 @@ pub(crate) fn dispatch(
         ":resource":scope.identity.resource(), ":client":scope.identity.hosted_client(),
         ":grant":scope.authority.grant_id, ":revision":scope.authority.revision, ":now":now,
     };
-    match request {
+    let result: Result<Value, Error> = match request {
         Request::Read(args) => {
             let limit = args.limit.unwrap_or(READ_MAX);
             if limit == 0
@@ -201,7 +201,14 @@ pub(crate) fn dispatch(
             }
             Ok(json!({"items":items,"next":next}))
         }
+    };
+    let mut value = result?;
+    if version >= crate::grants::EVENTS_SCHEMA_VERSION {
+        let owner = crate::events::owner_key(identity, bus, mailbox, &scope.authority.grant_id);
+        let state = crate::event_status::subscription_state(&store.connection, &owner, now)?;
+        value["events_status"] = json!({"subscription":{"state":state}});
     }
+    Ok(value)
 }
 
 #[allow(clippy::too_many_arguments)]

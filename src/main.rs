@@ -347,7 +347,7 @@ where
 {
     use tracing_subscriber::prelude::*;
     let filter: tracing_subscriber::filter::Targets = explicit
-        .unwrap_or("warn,gateway_dispatch=info")
+        .unwrap_or("warn,gateway_dispatch=info,gateway_events=info")
         .parse()
         .map_err(|_| LoggingConfigurationError)?;
     Ok(tracing_subscriber::registry().with(
@@ -430,6 +430,7 @@ mod logging_tests {
                 super::default_subscriber(capture.clone(), explicit).unwrap(),
                 || {
                     tracing::info!(target:"gateway_dispatch",operation="xmsg_send",class="pre_effect_unavailable",kind="not_found","dispatch outcome");
+                    tracing::info!(target:"gateway_events",class="subscription",reason="enabled","Events default control");
                     tracing::info!(target:"gateway_registration",address="CANARY_ADDRESS_34","CANARY_REGISTRATION_34");
                     tracing::warn!(target:"default_warning_control","existing warning retained");
                 },
@@ -440,6 +441,7 @@ mod logging_tests {
                 visible,
                 "actual subscriber ignored default/explicit filter: {text}"
             );
+            assert_eq!(text.contains("Events default control"), visible);
             assert!(
                 !text.contains("CANARY_"),
                 "default subscriber exposed other INFO data: {text}"

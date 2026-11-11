@@ -222,8 +222,8 @@ pub(crate) fn enabled_transition(
     id: &str,
     next: i64,
     enabled: bool,
-) -> Result<(), rusqlite::Error> {
-    revision_changed(tx, id)?;
+) -> Result<crate::event_diagnostic::Fence, rusqlite::Error> {
+    let mut change = revision_changed(tx, id)?;
     if enabled {
         let first: bool = tx.query_row(
             "SELECT ever_enabled=0 FROM grants_event_history WHERE grant_id=?1",
@@ -233,14 +233,14 @@ pub(crate) fn enabled_transition(
         if first {
             tx.execute("INSERT INTO event_release_audit(event_id,grant_id,old_revision,new_revision,operator,reason) SELECT c.event_id,c.grant_id,c.grant_revision,?2,'local-owner','first-enable' FROM custody_items c JOIN event_authorizations a ON a.event_id=c.event_id WHERE c.grant_id=?1 AND a.acceptance_class='never_enabled' AND a.acceptance_enabled=0 AND a.acceptance_ever_enabled=0 AND a.dispatch_revision IS NULL", params![id,next])?;
             tx.execute("UPDATE event_authorizations SET dispatch_revision=?2 WHERE event_id IN (SELECT c.event_id FROM custody_items c WHERE c.grant_id=?1) AND acceptance_class='never_enabled' AND acceptance_enabled=0 AND acceptance_ever_enabled=0 AND dispatch_revision IS NULL", params![id,next])?;
-            tx.execute("UPDATE custody_outbox SET state='pending' WHERE state='held' AND event_id IN (SELECT c.event_id FROM custody_items c JOIN event_authorizations a ON a.event_id=c.event_id WHERE c.grant_id=?1 AND a.dispatch_revision=?2)", params![id,next])?;
+            change.released = tx.execute("UPDATE custody_outbox SET state='pending' WHERE state='held' AND event_id IN (SELECT c.event_id FROM custody_items c JOIN event_authorizations a ON a.event_id=c.event_id WHERE c.grant_id=?1 AND a.dispatch_revision=?2)", params![id,next])?;
         }
         tx.execute(
             "UPDATE grants_event_history SET ever_enabled=1 WHERE grant_id=?1",
             [id],
         )?;
     }
-    Ok(())
+    Ok(change)
 }
 
 pub(crate) fn policy_changed(
@@ -257,10 +257,17 @@ pub(crate) fn policy_changed(
     Ok(())
 }
 
-pub(crate) fn revision_changed(tx: &Transaction<'_>, id: &str) -> Result<(), rusqlite::Error> {
-    tx.execute("UPDATE custody_outbox SET state='held' WHERE state IN ('pending','dispatching') AND event_id IN (SELECT event_id FROM custody_items WHERE grant_id=?1)", [id])?;
-    tx.execute("UPDATE event_subscriptions SET status='disabled',generation=generation+1 WHERE grant_id=?1", [id])?;
-    Ok(())
+pub(crate) fn revision_changed(
+    tx: &Transaction<'_>,
+    id: &str,
+) -> Result<crate::event_diagnostic::Fence, rusqlite::Error> {
+    let held = tx.execute("UPDATE custody_outbox SET state='held' WHERE state IN ('pending','dispatching') AND event_id IN (SELECT event_id FROM custody_items WHERE grant_id=?1)", [id])?;
+    let subscriptions = tx.execute("UPDATE event_subscriptions SET status='disabled',generation=generation+1 WHERE grant_id=?1", [id])?;
+    Ok(crate::event_diagnostic::Fence {
+        held,
+        subscriptions,
+        released: 0,
+    })
 }
 
 pub(crate) fn record_expiry(tx: &Transaction<'_>, now: i64) -> Result<(), rusqlite::Error> {

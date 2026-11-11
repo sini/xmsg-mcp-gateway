@@ -253,8 +253,11 @@ impl Store {
             .ok_or(Error::NoChange)?;
         let _lease = self.wait_operation_lease(&service, Duration::from_secs(30))?;
         let tx = self.connection.transaction()?;
-        let next = Self::set_enabled_in(&tx, id, revision, enabled)?;
+        let (next, events_change) = Self::set_enabled_in(&tx, id, revision, enabled)?;
         tx.commit()?;
+        if let Some(change) = events_change {
+            change.committed();
+        }
         Ok(next)
     }
 
@@ -263,7 +266,7 @@ impl Store {
         id: &str,
         revision: i64,
         enabled: bool,
-    ) -> Result<i64, Error> {
+    ) -> Result<(i64, Option<crate::event_diagnostic::Fence>), Error> {
         let changed = tx.execute(
             "UPDATE grants SET enabled = ?1, revision = revision + 1
              WHERE id = ?2 AND revision = ?3 AND enabled != ?1",
@@ -282,10 +285,14 @@ impl Store {
             r.get(0)
         })?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version >= EVENTS_SCHEMA_VERSION {
-            crate::event_store::enabled_transition(tx, id, next, enabled)?;
-        }
-        Ok(next)
+        let events_change = if version >= EVENTS_SCHEMA_VERSION {
+            Some(crate::event_store::enabled_transition(
+                tx, id, next, enabled,
+            )?)
+        } else {
+            None
+        };
+        Ok((next, events_change))
     }
 
     pub fn validate_profile(&self, binding: &Binding) -> Result<(), Error> {

@@ -5,17 +5,21 @@
       "id": "events",
       "script": "scripts/events_mutants.py",
       "args": [],
-      "count": 24,
+      "count": 25,
       "fixture": false,
       "python": false,
-      "completion": "g5-events-mutants-complete:24/24",
+      "completion": "g5-events-mutants-complete:25/25",
       "dependencies": [
         "scripts/events_mutants.py",
         "src/custody.rs",
+        "src/event_diagnostic.rs",
         "src/event_dispatch.rs",
+        "src/event_observability_tests.rs",
+        "src/event_status.rs",
         "src/event_store.rs",
         "src/events.rs",
         "src/outbound.rs",
+        "src/reads.rs",
         "src/recovery.rs",
         "src/recovery_tests.rs",
         "src/serving.rs",
@@ -53,7 +57,8 @@
         "custody-expiry-retains-preview",
         "reply-dispatch-revision",
         "policy-change-fences-events",
-        "policy-promotes-unapproved-history"
+        "policy-promotes-unapproved-history",
+        "events-callback-url-log"
       ],
       "required_output": [
         "^g5-events RED 01-candidate\\-mailbox-red:",
@@ -103,9 +108,11 @@
         "^g5-events RED 23-policy-change-fences-events-red:",
         "^g5-events GREEN 23-policy-change-fences-events-restored$",
         "^g5-events RED 24-policy-promotes-unapproved-history-red:",
-        "^g5-events GREEN 24-policy-promotes-unapproved-history-restored$"
+        "^g5-events GREEN 24-policy-promotes-unapproved-history-restored$",
+        "^g5-events RED 25-events-callback-url-log-red:",
+        "^g5-events GREEN 25-events-callback-url-log-restored$"
       ],
-      "script_sha256": "9a02513cdf65f966267b5236238488442aafa8e784a3af56c5ab931e6da53d6f"
+      "script_sha256": "7cecfa3381419273f5b103d79a3bcfc233c455d7a7a9b5e8781c59304668bf8f"
     },
     {
       "id": "retirement",

@@ -379,6 +379,14 @@ CASES.extend([
     )),
 ])
 
+CASES.append(Case(
+    "events-callback-url-log", "lib",
+    "event_observability_tests::committed_fence_dead_letter_and_consumer_state_are_private_and_read_only",
+    "src/event_observability_tests.rs", (
+        Edit("src/events.rs", "let url = webhook::callback_url(&request.delivery.url)?.to_string();", "let url = webhook::callback_url(&request.delivery.url)?.to_string();\n        tracing::info!(target: \"gateway_events\", url = %url, \"callback URL\");", start="pub async fn subscribe(", end="pub async fn unsubscribe("),
+    ),
+))
+
 def sha(file):
     return hashlib.sha256(file.read_bytes()).hexdigest()
 

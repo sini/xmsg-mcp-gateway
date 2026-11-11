@@ -4,6 +4,7 @@ pub mod auth;
 pub mod broker;
 mod deadline;
 mod dispatch_outcome;
+mod event_diagnostic;
 pub mod grants;
 mod reads;
 pub mod serving;
@@ -47,3 +48,6 @@ mod event_callback_fixture;
 #[cfg(test)]
 #[path = "../tests/common/outbound_observer.rs"]
 mod event_observer_fixture;
+
+#[cfg(test)]
+mod event_observability_tests;

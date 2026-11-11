@@ -161,6 +161,7 @@ impl Events {
             tx.execute("UPDATE event_checkpoints SET observation_checkpoint=MIN(observation_checkpoint,?1) WHERE owner_key=?2",params![boundary,binding.owner])?;
         }
         tx.commit()?;
+        crate::event_diagnostic::transition("release", 0, 0, selected.len());
         Ok(json!({"id":id,"released":selected.len(),"grant_revision":binding.revision}))
     }
 }

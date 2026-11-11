@@ -248,10 +248,14 @@ impl Store {
         if previous != *policy {
             next = Self::set_outbound_policy_in(&tx, id, next, &document)?;
         }
+        let mut events_change = None;
         if let Some(enabled) = enabled.filter(|enabled| *enabled != current_enabled) {
-            next = Self::set_enabled_in(&tx, id, next, enabled)?;
+            (next, events_change) = Self::set_enabled_in(&tx, id, next, enabled)?;
         }
         tx.commit()?;
+        if let Some(change) = events_change {
+            change.committed();
+        }
         Ok(ApplyResult {
             revision: next,
             changed: next != revision,

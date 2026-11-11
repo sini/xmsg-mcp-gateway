@@ -282,9 +282,9 @@ withholds the broker result. Unavailable reads, Events operations and local ACK
 writes have a JSON-RPC error body without a claim that a local commit rolled back.
 `tools/list` retains the shared predispatch authentication/admission behavior.
 
-The CLI defaults to `warn,gateway_dispatch=info`: dispatch INFO is visible while
-other targets remain at WARN. Set `RUST_LOG` to replace this default with an
-explicit level/target filter; for example, `RUST_LOG=warn` hides dispatch INFO.
+The CLI defaults to `warn,gateway_dispatch=info,gateway_events=info`: dispatch and Events INFO
+are visible while other targets remain at WARN. Set `RUST_LOG` to replace this default with an
+explicit level/target filter; for example, `RUST_LOG=warn` hides dispatch and Events INFO.
 An invalid explicit filter is rejected rather than falling back to the default.
 
 At INFO level, `gateway_dispatch` also emits one `dispatch outcome`

@@ -325,6 +325,28 @@ that startup logs include `harpoon startup catalog digest` and
      the idle dot conversation, which reads the message via `xmsg_inbox` /
      `xmsg_read_message` with the sender's attested `origin`.
 
+### Consumer session and wake recovery
+
+At session start and after each wake, call `xmsg_inbox` and check
+`events_status.subscription.state` (also available on successful
+`xmsg_read_message` responses). Re-subscribe through the existing Events method if
+it is `disabled`, `expired` or `not_subscribed`; check a `verifying` subscription
+again before replacing it. A failed ChatGPT subscribe/task-service call can finish
+on its own: check for `active` before deleting the automation.
+
+Drain the paged inbox view until no more entries remain, reading full bodies as
+needed. Deduplicate by message ID, handle new work, then ACK after handling it and durably recording
+responsibility. ACK does not remove retained inbox entries or prove task
+completion, so retain deduplication/checkpoint state and coordinate concurrent
+wakes. Duplicate or reordered wakes are normal. An optional bounded periodic
+inbox/state check reconciles independently of wake delivery.
+
+For diagnosis, use owned Events status and the content-free `gateway_events` INFO
+transition/delivery records, including dead-letter reasons and held/released
+counts. The default filter includes that target; explicit `RUST_LOG=warn` hides
+it. Do not record raw requests, callback credentials or message bodies. See the
+[consumer recipe](events.md#consumer-wake-and-session-recipe) for details.
+
 ## P4. Cutover checks to record
 
 Record content-free pass/fail results and timestamps for each check below (never

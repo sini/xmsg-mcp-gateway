@@ -20,6 +20,7 @@ impl Events {
         }
         let owner = owner_key(identity, bus, mailbox, &authority.grant_id);
         let subscription:Option<(String,i64,i64,i64,i64)>=store.connection.query_row("SELECT status,generation,expires,callback_cursor,observation_checkpoint FROM event_subscriptions WHERE owner_key=?1",[&owner],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).optional()?;
+        let effective_state = subscription_state(&store.connection, &owner, now)?;
         let observed: i64 = store
             .connection
             .query_row(
@@ -30,8 +31,8 @@ impl Events {
             .optional()?
             .unwrap_or(0);
         let observation_checkpoint = crate::event_cursor::encode(&self.key, &owner, observed)?;
-        let subscription=subscription.map(|(state,generation,expires,callback,observed)| ->Result<Value,Error> {
-            Ok(json!({"state":if state=="active" && expires<=now {"expired"} else {state.as_str()},"generation":generation,"refresh_before_unix":expires,
+        let subscription=subscription.map(|(_state,generation,expires,callback,observed)| ->Result<Value,Error> {
+            Ok(json!({"state":effective_state,"generation":generation,"refresh_before_unix":expires,
                 "callback_cursor":crate::event_cursor::encode(&self.key,&owner,callback)?,"observation_checkpoint":crate::event_cursor::encode(&self.key,&owner,observed)?}))
         }).transpose()?.unwrap_or(json!({"state":"not_subscribed"}));
         let mut states = Map::new();
@@ -66,4 +67,26 @@ impl Events {
             json!({"subscription":subscription,"retained_events_by_state":states,"delivery_failures_by_reason":failures,"oldest_backlog_age_seconds":oldest.map(|first|now.saturating_sub(first)),"history_truncated":missing>0,"observation_checkpoint":observation_checkpoint}),
         )
     }
+}
+
+pub(crate) fn subscription_state(
+    db: &rusqlite::Connection,
+    owner: &str,
+    now: i64,
+) -> Result<&'static str, rusqlite::Error> {
+    let row: Option<(String, i64)> = db
+        .query_row(
+            "SELECT status,expires FROM event_subscriptions WHERE owner_key=?1",
+            [owner],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(match row {
+        Some((state, expires)) if state == "active" && expires <= now => "expired",
+        Some((state, _)) if state == "active" => "active",
+        Some((state, _)) if state == "verifying" => "verifying",
+        Some((state, _)) if state == "disabled" => "disabled",
+        Some(_) => "unrecognized",
+        None => "not_subscribed",
+    })
 }

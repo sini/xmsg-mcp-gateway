@@ -405,6 +405,7 @@ impl Events {
         if changed != 1 {
             return Err(Error::Conflict);
         }
+        crate::event_diagnostic::transition("verifying", 1, 0, 0);
         // The OS lease orders verification with disable/rebind. No SQLite transaction spans this I/O.
         let verified_at = if cached {
             old.as_ref()
@@ -418,12 +419,22 @@ impl Events {
         self.fresh(identity, token, &authority).await?;
         let tx = store.connection.unchecked_transaction()?;
         if tx.execute("UPDATE event_subscriptions SET status='active',verified_at=?1 WHERE owner_key=?2 AND generation=?3 AND status='verifying' AND grant_revision=?4",params![verified_at,owner,generation,authority.revision])?!=1 {return Err(Error::Conflict)}
-        tx.execute("UPDATE custody_outbox SET state='pending' WHERE state='held' AND event_id IN (SELECT c.event_id FROM custody_items c JOIN event_authorizations a ON a.event_id=c.event_id WHERE c.bus=?1 AND c.mailbox=?2 AND c.owner=?3 AND c.grant_id=?4 AND a.dispatch_revision=?5 AND c.text IS NOT NULL AND c.expires_at>?6)",params![bus,mailbox,identity.subject(),authority.grant_id,authority.revision,stamp])?;
+        let mut released = tx.execute("UPDATE custody_outbox SET state='pending' WHERE state='held' AND event_id IN (SELECT c.event_id FROM custody_items c JOIN event_authorizations a ON a.event_id=c.event_id WHERE c.bus=?1 AND c.mailbox=?2 AND c.owner=?3 AND c.grant_id=?4 AND a.dispatch_revision=?5 AND c.text IS NOT NULL AND c.expires_at>?6)",params![bus,mailbox,identity.subject(),authority.grant_id,authority.revision,stamp])?;
         if request.cursor.is_some() && after < callback_cursor {
-            tx.execute("UPDATE custody_outbox SET state='pending',attempts=0,next_attempt=0,last_error=NULL WHERE state='accepted' AND event_id IN (SELECT c.event_id FROM custody_items c JOIN event_authorizations a ON a.event_id=c.event_id JOIN event_occurrences o ON o.event_id=c.event_id LEFT JOIN event_observations seen ON seen.event_id=c.event_id WHERE c.bus=?1 AND c.mailbox=?2 AND c.owner=?3 AND c.grant_id=?4 AND a.dispatch_revision=?5 AND c.text IS NOT NULL AND c.expires_at>?6 AND o.seq>?7 AND seen.event_id IS NULL)",params![bus,mailbox,identity.subject(),authority.grant_id,authority.revision,stamp,after])?;
+            released += tx.execute("UPDATE custody_outbox SET state='pending',attempts=0,next_attempt=0,last_error=NULL WHERE state='accepted' AND event_id IN (SELECT c.event_id FROM custody_items c JOIN event_authorizations a ON a.event_id=c.event_id JOIN event_occurrences o ON o.event_id=c.event_id LEFT JOIN event_observations seen ON seen.event_id=c.event_id WHERE c.bus=?1 AND c.mailbox=?2 AND c.owner=?3 AND c.grant_id=?4 AND a.dispatch_revision=?5 AND c.text IS NOT NULL AND c.expires_at>?6 AND o.seq>?7 AND seen.event_id IS NULL)",params![bus,mailbox,identity.subject(),authority.grant_id,authority.revision,stamp,after])?;
             tx.execute("UPDATE event_subscriptions SET callback_cursor=?1 WHERE owner_key=?2 AND generation=?3",params![after,owner,generation])?;
         }
         tx.commit()?;
+        crate::event_diagnostic::transition(
+            if old.as_ref().is_some_and(|old| old.status == "active") {
+                "renewed"
+            } else {
+                "enabled"
+            },
+            1,
+            0,
+            released,
+        );
         Ok(
             json!({"id":id,"refreshBefore":formatted(expires)?,"cursor":crate::event_cursor::encode(&self.key,&owner,after)?,"truncated":truncated}),
         )
@@ -493,15 +504,26 @@ impl Events {
                 .transpose()?
         };
         let tx = store.connection.unchecked_transaction()?;
+        let mut released = 0;
         if status == "verifying" {
             // A selected replacement must replay the retained eligible range after verification.
-            tx.execute("UPDATE custody_outbox SET state='pending',attempts=0,next_attempt=0,last_error=NULL WHERE state IN ('accepted','dead') AND event_id IN (SELECT c.event_id FROM custody_items c JOIN event_authorizations a ON a.event_id=c.event_id JOIN event_occurrences o ON o.event_id=c.event_id JOIN event_subscriptions s ON s.grant_id=c.grant_id AND s.bus=c.bus AND s.mailbox=c.mailbox AND s.subject=c.owner JOIN grants g ON g.id=c.grant_id WHERE s.owner_key=?1 AND a.dispatch_revision=s.grant_revision AND g.enabled=1 AND g.revision=s.grant_revision AND c.text IS NOT NULL AND c.expires_at>?2 AND o.seq>?3)",params![owner,now()?,replay.unwrap_or(old.callback_cursor)])?;
+            released = tx.execute("UPDATE custody_outbox SET state='pending',attempts=0,next_attempt=0,last_error=NULL WHERE state IN ('accepted','dead') AND event_id IN (SELECT c.event_id FROM custody_items c JOIN event_authorizations a ON a.event_id=c.event_id JOIN event_occurrences o ON o.event_id=c.event_id JOIN event_subscriptions s ON s.grant_id=c.grant_id AND s.bus=c.bus AND s.mailbox=c.mailbox AND s.subject=c.owner JOIN grants g ON g.id=c.grant_id WHERE s.owner_key=?1 AND a.dispatch_revision=s.grant_revision AND g.enabled=1 AND g.revision=s.grant_revision AND c.text IS NOT NULL AND c.expires_at>?2 AND o.seq>?3)",params![owner,now()?,replay.unwrap_or(old.callback_cursor)])?;
         }
         if tx.execute("UPDATE event_subscriptions SET id=?1,generation=?2,url=?3,secret=?4,old_secret=?5,bearer=?6,status=?7,callback_cursor=?8 WHERE owner_key=?9 AND generation=?10",params![id,generation,self.key.seal(&aad(owner,"url",generation),url.as_bytes())?,self.key.seal(&aad(owner,"secret",generation),secret.as_bytes())?,old_secret.map(|secret|self.key.seal(&aad(owner,"old_secret",generation),secret.as_bytes())).transpose()?,self.key.seal(&aad(owner,"bearer",generation),bearer.as_bytes())?,status,replay.unwrap_or(old.callback_cursor),owner,old.generation])?!=1{return Err(Error::Conflict)}
         if let Some((operator, reason)) = audit {
             tx.execute("INSERT INTO event_binding_audit(subscription_id,old_generation,new_generation,operator,reason,replay_after) VALUES (?1,?2,?3,?4,?5,?6)",params![id,old.generation,generation,operator,reason,replay.unwrap_or(old.callback_cursor)])?;
         }
         tx.commit()?;
+        crate::event_diagnostic::transition(
+            if status == "verifying" {
+                "rebind"
+            } else {
+                "unsubscribed"
+            },
+            1,
+            0,
+            released,
+        );
         Ok(generation)
     }
     pub fn rebind(
@@ -606,6 +628,7 @@ impl Events {
         tx.execute("UPDATE event_subscriptions SET callback_cursor=?1 WHERE owner_key=?2 AND generation=?3",params![after,owner,old.generation])?;
         tx.execute("INSERT INTO event_binding_audit(subscription_id,old_generation,new_generation,operator,reason,replay_after) VALUES (?1,?2,?2,?3,?4,?5)",params![id,old.generation,operator,reason,after])?;
         tx.commit()?;
+        crate::event_diagnostic::transition("replay", 0, 0, changed);
         Ok(json!({"id":id,"replayed":changed,"truncated":truncated}))
     }
 }

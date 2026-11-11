@@ -194,13 +194,22 @@ pub(crate) async fn tick(events: &Events, bus: &str, mailbox: &str) -> Result<Ti
     };
     if item.attempts >= 5 {
         store.connection.execute("UPDATE custody_outbox SET state='dead',last_error='attempts_exhausted' WHERE event_id=?1",[&item.id])?;
+        crate::event_diagnostic::delivery("dead", Some("attempts_exhausted"), item.attempts);
         return Ok(Tick::Dead);
     }
     let bearer = open_text(events, &sub, "bearer", &sub.bearer)?;
     let identity = match events.verifier.verify(&bearer).await {
         Ok(identity) => identity,
         Err(_) => {
+            let parked:bool=store.connection.query_row("SELECT COALESCE(last_error='credential_required',0) FROM custody_outbox WHERE event_id=?1",[&item.id],|r|r.get(0))?;
             store.connection.execute("UPDATE custody_outbox SET last_error='credential_required',next_attempt=?2 WHERE event_id=?1",params![item.id,at.saturating_add(5)])?;
+            if !parked {
+                crate::event_diagnostic::delivery(
+                    "token_parked",
+                    Some("credential_required"),
+                    item.attempts,
+                );
+            }
             return Ok(Tick::CredentialRequired);
         }
     };
@@ -230,6 +239,7 @@ pub(crate) async fn tick(events: &Events, bus: &str, mailbox: &str) -> Result<Ti
     let body = payload(events, &store, &sub, &current_item)?;
     if body.len() > crate::webhook::MAX_EVENT_BYTES {
         store.connection.execute("UPDATE custody_outbox SET state='dead',last_error='payload_protocol_error' WHERE event_id=?1",[&item.id])?;
+        crate::event_diagnostic::delivery("dead", Some("payload_protocol_error"), item.attempts);
         return Ok(Tick::Dead);
     }
     let url = open_text(events, &sub, "url", &sub.url)?;
@@ -320,11 +330,54 @@ pub(crate) async fn tick(events: &Events, bus: &str, mailbox: &str) -> Result<Ti
         tx.execute("UPDATE event_subscriptions SET callback_cursor=MAX(callback_cursor,?2) WHERE id=?1 AND generation=?3",params![sub.id,item.sequence,sub.generation])?;
     }
     tx.commit()?;
+    crate::event_diagnostic::delivery(
+        if state == "pending" {
+            if next > local_due {
+                "backoff"
+            } else {
+                "retry"
+            }
+        } else {
+            state
+        },
+        reason,
+        attempt,
+    );
     Ok(outcome)
 }
 
 pub(crate) fn interval() -> Duration {
     Duration::from_millis(250)
+}
+
+#[derive(Default)]
+pub(crate) struct ExpiryObservation {
+    last: Option<(String, i64)>,
+}
+impl ExpiryObservation {
+    pub(crate) fn observe(
+        &mut self,
+        events: &Events,
+        bus: &str,
+        mailbox: &str,
+    ) -> Result<(), Error> {
+        let store = Store::open_for_dispatch(&events.file)?;
+        let at = now()?;
+        let expired: Option<(String,i64)> = store.connection.query_row(
+            "SELECT s.id,s.generation FROM event_subscriptions s JOIN grants g ON g.id=s.grant_id
+             WHERE s.bus=?1 AND s.mailbox=?2 AND s.grant_id=?3 AND s.status='active' AND s.expires<=?4
+               AND g.enabled=1 AND g.revision=s.grant_revision AND g.service=s.service AND g.issuer=s.issuer
+               AND g.resource=s.resource AND g.subject=s.subject AND g.hosted_client=s.hosted_client",
+            params![bus,mailbox,events.selected_grant,at], |row|Ok((row.get(0)?,row.get(1)?)),
+        ).optional()?;
+        if let Some(expired) = expired {
+            if self.last.as_ref() != Some(&expired) {
+                self.last = Some(expired);
+                crate::event_diagnostic::expired();
+            }
+        }
+        Ok(())
+    }
 }
 
 pub(crate) struct Worker {
@@ -342,10 +395,14 @@ impl Worker {
         let stop = std::sync::Arc::new(tokio::sync::Notify::new());
         let stopped = stop.clone();
         let handle = tokio::spawn(async move {
+            let mut expiry = ExpiryObservation::default();
             loop {
                 tokio::select! {
                     _=stopped.notified()=>return,
-                    result=tokio::time::timeout(budget,tick(&events,&bus,&mailbox))=>{
+                    result=tokio::time::timeout(budget,async {
+                        expiry.observe(&events,&bus,&mailbox)?;
+                        tick(&events,&bus,&mailbox).await
+                    })=>{
                         if !matches!(result,Ok(Ok(_))) {
                             tracing::warn!(target:"gateway_events", "Events worker temporarily unavailable; retained custody is unchanged");
                         }
