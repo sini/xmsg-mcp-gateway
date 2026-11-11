@@ -64,6 +64,15 @@ pub fn exact_audience(value: &Value, resource: &str) -> bool {
     }
 }
 
+#[derive(Clone, Copy)]
+pub enum Migration {
+    Custody,
+    CustodySummaries,
+    Outbound,
+    Retirement,
+    Events,
+}
+
 pub struct Store {
     pub(crate) connection: Connection,
     pub(crate) file: PathBuf,
@@ -146,6 +155,61 @@ impl Store {
         connection.busy_timeout(wait)?;
         connection.pragma_update(None, "synchronous", "FULL")?;
         Ok(connection)
+    }
+
+    pub fn migration_applied(&self, migration: Migration) -> Result<bool, crate::outbound::Error> {
+        let marker: i64 = self
+            .connection
+            .pragma_query_value(None, "application_id", |r| r.get(0))?;
+        let version: i64 = self
+            .connection
+            .pragma_query_value(None, "user_version", |r| r.get(0))?;
+        let recognized = match marker {
+            LEGACY_APPLICATION_ID => {
+                (SCHEMA_VERSION..=MAX_SUPPORTED_SCHEMA_VERSION).contains(&version)
+            }
+            SUMMARY_APPLICATION_ID => {
+                (CUSTODY_SCHEMA_VERSION..=MAX_SUPPORTED_SCHEMA_VERSION).contains(&version)
+            }
+            RETIREMENT_APPLICATION_ID => {
+                (OUTBOUND_SCHEMA_VERSION..=MAX_SUPPORTED_SCHEMA_VERSION).contains(&version)
+            }
+            _ => false,
+        };
+        if !recognized {
+            return Err(Error::InvalidStore.into());
+        }
+        let retirement_tables: i64 = self.connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('outbound_retirement_schema','outbound_request_fences','outbound_retired','outbound_retirement_clock')",[],|r|r.get(0))?;
+        let recovery_column: i64 = self.connection.query_row("SELECT COUNT(*) FROM pragma_table_info('outbound_reservations') WHERE name='recovery_until'",[],|r|r.get(0))?;
+        let retirement = retirement_tables == 4 && recovery_column == 1;
+        if retirement {
+            if version < OUTBOUND_SCHEMA_VERSION {
+                return Err(Error::InvalidStore.into());
+            }
+            self.require_retirement_ready()?;
+        } else if retirement_tables != 0
+            || recovery_column != 0
+            || marker == RETIREMENT_APPLICATION_ID
+        {
+            return Err(Error::InvalidStore.into());
+        }
+        if version == EVENTS_SCHEMA_VERSION {
+            let key_check: bool = self.connection.query_row(
+                "SELECT COUNT(*)=1 AND MAX(id)=1 AND MIN(length(value))>0 FROM event_key_check",
+                [],
+                |r| r.get(0),
+            )?;
+            if !key_check {
+                return Err(Error::InvalidStore.into());
+            }
+        }
+        Ok(match migration {
+            Migration::Custody => version >= CUSTODY_SCHEMA_VERSION,
+            Migration::CustodySummaries => marker == SUMMARY_APPLICATION_ID,
+            Migration::Outbound => version >= OUTBOUND_SCHEMA_VERSION,
+            Migration::Retirement => retirement,
+            Migration::Events => version == EVENTS_SCHEMA_VERSION,
+        })
     }
 
     pub fn enroll(&mut self, id: &str, binding: &Binding) -> Result<(), Error> {

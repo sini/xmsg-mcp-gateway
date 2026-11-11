@@ -53,13 +53,27 @@ enum Command {
         reason: String,
     },
     Init,
-    MigrateCustody,
-    MigrateCustodySummaries,
-    MigrateOutbound,
-    MigrateRetirement,
+    MigrateCustody {
+        #[arg(long)]
+        if_needed: bool,
+    },
+    MigrateCustodySummaries {
+        #[arg(long)]
+        if_needed: bool,
+    },
+    MigrateOutbound {
+        #[arg(long)]
+        if_needed: bool,
+    },
+    MigrateRetirement {
+        #[arg(long)]
+        if_needed: bool,
+    },
     MigrateEvents {
         #[arg(long)]
-        key_file: PathBuf,
+        if_needed: bool,
+        #[arg(long, required_unless_present = "if_needed")]
+        key_file: Option<PathBuf>,
     },
     Apply {
         #[arg(long)]
@@ -94,6 +108,8 @@ enum Command {
 enum CommandError {
     #[error("--state is required for owner grant commands")]
     MissingState,
+    #[error("--key-file is required when Events migration is needed")]
+    MissingEventsKey,
     #[error("configuration-based commands obtain state only from the owner configuration file")]
     UnexpectedState,
     #[error(transparent)]
@@ -191,25 +207,63 @@ async fn run(cli: Cli) -> Result<(), CommandError> {
             Store::initialize(&state)?;
             println!("authority store initialized");
         }
-        (Some(state), Command::MigrateCustodySummaries) => {
-            Store::open(&state)?.migrate_custody_summaries()?;
+        (Some(state), Command::MigrateCustodySummaries { if_needed }) => {
+            let mut store = Store::open(&state)?;
+            if if_needed
+                && store.migration_applied(xmsg_mcp_gateway::grants::Migration::CustodySummaries)?
+            {
+                println!("already migrated");
+                return Ok(());
+            }
+            store.migrate_custody_summaries()?;
             println!("custody observations folded into bounded summaries");
         }
-        (Some(state), Command::MigrateCustody) => {
-            Store::open(&state)?.migrate_custody()?;
+        (Some(state), Command::MigrateCustody { if_needed }) => {
+            let mut store = Store::open(&state)?;
+            if if_needed && store.migration_applied(xmsg_mcp_gateway::grants::Migration::Custody)? {
+                println!("already migrated");
+                return Ok(());
+            }
+            store.migrate_custody()?;
             println!("custody schema migrated; worker startup remains unavailable");
         }
-        (Some(state), Command::MigrateEvents { key_file }) => {
+        (
+            Some(state),
+            Command::MigrateEvents {
+                key_file,
+                if_needed,
+            },
+        ) => {
+            let mut store = Store::open(&state)?;
+            if if_needed && store.migration_applied(xmsg_mcp_gateway::grants::Migration::Events)? {
+                println!("already migrated");
+                return Ok(());
+            }
+            let key_file = key_file.ok_or(CommandError::MissingEventsKey)?;
             let key = xmsg_mcp_gateway::event_store::EventKey::load(&key_file)?;
-            Store::open(&state)?.migrate_events(&key)?;
+            store.migrate_events(&key)?;
             println!("Events schema migrated");
         }
-        (Some(state), Command::MigrateRetirement) => {
-            Store::open(&state)?.migrate_retirement()?;
+        (Some(state), Command::MigrateRetirement { if_needed }) => {
+            let mut store = Store::open(&state)?;
+            if if_needed
+                && store.migration_applied(xmsg_mcp_gateway::grants::Migration::Retirement)?
+            {
+                println!("already migrated");
+                return Ok(());
+            }
+            store.migrate_retirement()?;
             println!("outbound retirement schema migrated");
         }
-        (Some(state), Command::MigrateOutbound) => {
-            Store::open(&state)?.migrate_outbound()?;
+        (Some(state), Command::MigrateOutbound { if_needed }) => {
+            let mut store = Store::open(&state)?;
+            if if_needed
+                && store.migration_applied(xmsg_mcp_gateway::grants::Migration::Outbound)?
+            {
+                println!("already migrated");
+                return Ok(());
+            }
+            store.migrate_outbound()?;
             println!("outbound schema migrated");
         }
         (

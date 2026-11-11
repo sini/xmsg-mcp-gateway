@@ -438,3 +438,51 @@ Portable tests in `tests/reads.rs` exercise the real OAuth verifier over a local
 TLS introspection fixture and actual service registration/poll over a fixture Unix
 socket. They verify ownership through real `accept_delivery` calls, without a
 private daemon binary or a deployed service.
+
+## Repeatable migrations in a shell-less init chain
+
+Each existing `migrate-*` command accepts `--if-needed`. It performs a needed
+migration normally, or prints `already migrated` and exits 0 without writing an
+already-migrated database. Without that flag, existing strict refusal behavior
+remains. Unknown markers, unsupported schemas, malformed or partial migrations
+still fail; errors are never treated as successful no-ops.
+
+For an already initialized and enrolled state volume, run these init steps in
+order. Each row is a separate container's `args` array, using the gateway image's
+existing entrypoint; no shell, conditional command or scratch database is needed.
+
+| Step | Container `args` |
+|---|---|
+| Custody | `["--state", "/state/grants.db", "migrate-custody", "--if-needed"]` |
+| Outbound | `["--state", "/state/grants.db", "migrate-outbound", "--if-needed"]` |
+| Retirement | `["--state", "/state/grants.db", "migrate-retirement", "--if-needed"]` |
+| Custody summaries | `["--state", "/state/grants.db", "migrate-custody-summaries", "--if-needed"]` |
+| Events, when used | `["--state", "/state/grants.db", "migrate-events", "--if-needed", "--key-file", "/config/events-key"]` |
+| Owner policy | `["--state", "/state/grants.db", "apply", "--id", "grant-id", "--policy", "/config/policy.json", "--enabled"]` |
+
+For example, this init container preserves the OCI entrypoint:
+
+```yaml
+initContainers:
+  - name: migrate-custody
+    image: gateway-image
+    args: ["--state", "/state/grants.db", "migrate-custody", "--if-needed"]
+    volumeMounts:
+      - {name: state, mountPath: /state}
+      - {name: config, mountPath: /config, readOnly: true}
+```
+
+Use the same pinned gateway image and state mount for every step and for the main
+container; mount the policy and optional Events key where the args specify. Add
+one init container per remaining row. Initial database creation and enrollment
+remain explicit owner actions. Stop all gateway processes and take a backup before
+running migrations; follow the existing backup/rollback requirements. This recipe
+is a deployment example, not an instruction to change a running service.
+
+Events needs a key only when its migration actually runs. Thus
+`migrate-events --if-needed` can skip completed Events state even without a key
+argument; if migration is needed, `--key-file` is required. Skipping is not key
+validation: normal Events startup still verifies the configured key. Marker
+lineage is recognized explicitly, not by numeric ordering. A summarized store
+with valid retirement metadata already satisfies retirement; fresh custody
+summaries alone, before outbound retirement is installed, do not.
