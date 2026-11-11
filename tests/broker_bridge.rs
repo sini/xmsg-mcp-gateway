@@ -525,7 +525,7 @@ async fn cancelling_broker_handler_keeps_the_accepted_submission_owned_by_the_wo
     tokio::time::timeout(std::time::Duration::from_secs(3),async {
         loop {let receipt:i64=rusqlite::Connection::open(&fixture.store_file).unwrap().query_row("SELECT COUNT(*) FROM outbound_reservations WHERE request_id='cancelled-call' AND receipt IS NOT NULL",[],|r|r.get(0)).unwrap();if receipt==1{break;}tokio::time::sleep(std::time::Duration::from_millis(10)).await;}
     }).await.unwrap();
-    let (_, value, _) = fixture::request(&serving, "good-token", request).await;
+    let (_, value, _) = confirmed_first_call(&serving, &bus, request).await;
     assert_eq!(
         value["result"]["structuredContent"]["broker"]["state"], "confirmed",
         "{value}"
