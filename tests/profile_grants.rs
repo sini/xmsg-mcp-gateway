@@ -23,7 +23,9 @@ fn migration_preserves_authority_and_exact_bindings_can_coexist() {
     store.enroll("first", &first).unwrap();
     assert_eq!(store.set_enabled("first", 1, true).unwrap(), 2);
     assert!(store.require_profiles_ready().is_err());
-    assert!(store.validate_profiles(std::slice::from_ref(&first)).is_err());
+    assert!(store
+        .validate_profiles(std::slice::from_ref(&first))
+        .is_err());
     store.migrate_profiles().unwrap();
     store.require_profiles_ready().unwrap();
     assert!(store.migration_applied(Migration::Profiles).unwrap());
@@ -82,7 +84,9 @@ fn configured_profile_membership_is_exact_including_disabled_clients() {
     let first = binding();
     store.enroll("first", &first).unwrap();
     store.migrate_profiles().unwrap();
-    store.validate_profiles(std::slice::from_ref(&first)).unwrap();
+    store
+        .validate_profiles(std::slice::from_ref(&first))
+        .unwrap();
     assert!(store.validate_profiles(&[]).is_err());
     for field in 0..5 {
         let mut wrong = first.clone();

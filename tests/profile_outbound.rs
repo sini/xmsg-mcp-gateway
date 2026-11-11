@@ -214,6 +214,23 @@ async fn foreign_pending_and_confirmed_reservations_are_denied_before_reverifica
                     Outcome::Confirmed(receipt),
                     "own-grant receipt recovery positive control failed"
                 );
+            } else if contended {
+                assert_eq!(
+                    dispatch(
+                        &mut store,
+                        &endpoint,
+                        &verifier,
+                        &own_bearer,
+                        "bus",
+                        &request,
+                        &limits
+                    )
+                    .await
+                    .unwrap(),
+                    Outcome::Pending,
+                    "own-grant contended reservation must remain pending"
+                );
+                assert_eq!(reservation(&db), before);
             }
             drop(lease);
             drop(endpoint);
