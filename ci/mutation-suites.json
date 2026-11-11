@@ -145,7 +145,8 @@
         "src/outbound.rs",
         "tests/apply.rs",
         "tests/grant_cli.rs",
-        "tests/grant_core.rs"
+        "tests/grant_core.rs",
+        "tests/migrations.rs"
       ],
       "labels": [
         "apply-policy-validation",
