@@ -60,14 +60,10 @@ CASES = [
     ),
     (
         "precedence",
-        """    if identity_spoof(&body) {
-        return StatusCode::FORBIDDEN.into_response();
-    }""",
-        """    if identity_spoof(&body) {
-        return rpc_result(&body["id"], json!({"subject": body["params"]["_meta"].get("subject").unwrap_or(&body["params"]["arguments"]["subject"])}));
-    }""",
+        '"subject":identity.subject()',
+        '"subject":call._metadata.get("sub").and_then(Value::as_str).unwrap_or_else(|| identity.subject())',
         "caller_identity_fields_cannot_override_verified_identity",
-        "caller identity data was accepted",
+        "caller identity data overrode verified identity",
     ),
     (
         "order",

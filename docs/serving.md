@@ -262,8 +262,8 @@ carry an expired credential into dispatch. No identity is cached per session or
 connection.
 
 Invalid or unapproved credentials receive 401 with the protected-resource metadata
-challenge. Disabled/missing grants and identity-spoofing arguments or metadata
-receive 403. Failures before authenticated tool dispatch (including provider/store
+challenge. Disabled or missing grants receive 403; request arguments and metadata
+never select or override the verified identity or grant. Failures before authenticated tool dispatch (including provider/store
 admission and body deadlines) retain HTTP 503 with `Retry-After: 1`; authentication
 and authorization failures retain their 401/403 responses. Once a tool or Events
 operation is dispatched, unavailable state returns an HTTP 200 JSON-RPC error

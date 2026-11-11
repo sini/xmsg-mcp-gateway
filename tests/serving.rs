@@ -77,40 +77,156 @@ async fn approved_token_reports_an_unavailable_store_as_retryable() {
 async fn caller_identity_fields_cannot_override_verified_identity() {
     let fixture = Fixture::new();
     let serving = fixture.serving().await;
-    let (status, _, positive) = request(&serving, "good-token", Fixture::call()).await;
+    let (status, baseline, positive) = request(&serving, "good-token", Fixture::call()).await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(positive.opens.load(Ordering::SeqCst), 1);
     assert_eq!(positive.dispatches.load(Ordering::SeqCst), 1);
-    for location in ["arguments", "_meta"] {
-        for field in ["subject", "issuer", "hosted_client", "resource", "verified"] {
+    let expected = baseline["result"]["structuredContent"].clone();
+    assert_eq!(expected["service"], "gateway");
+    assert_eq!(expected["subject"], "owner");
+    assert_eq!(expected["issuer"], fixture.binding.issuer);
+    assert_eq!(expected["resource"], fixture.binding.resource);
+    assert_eq!(expected["hosted_client"], fixture.binding.hosted_client);
+    assert_eq!(expected["grant_revision"], 2);
+
+    // Oracle 1: a benign nested `subject` key is accepted (where the removed blacklist returned 403).
+    let mut benign_meta = Fixture::call();
+    benign_meta["params"]["_meta"] = json!({"context": {"subject": "benign-topic"}});
+    let (status, response, probe) = request(&serving, "good-token", benign_meta).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "benign nested subject key was refused"
+    );
+    assert_eq!(
+        response["result"]["structuredContent"], expected,
+        "caller identity data overrode verified identity"
+    );
+    assert_eq!(probe.opens.load(Ordering::SeqCst), 1);
+    assert_eq!(probe.dispatches.load(Ordering::SeqCst), 1);
+
+    let init_with_nested_subject = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {"experimental": {"subject": "benign-capability"}},
+            "clientInfo": {"name": "fixture", "version": "1"},
+            "_meta": {"trace": {"subject": "benign-trace"}}
+        }
+    });
+    let (status, response, _) = request(&serving, "good-token", init_with_nested_subject).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["result"]["protocolVersion"], "2025-11-25");
+
+    // Oracle 2: request JSON carrying identity/claim keys (top-level, nested, _meta) never changes
+    // VerifiedIdentity, the grant, or the owner a call runs as, while strict tool/RPC schemas hold.
+    let identity_keys = [
+        "subject",
+        "issuer",
+        "hosted_client",
+        "resource",
+        "verified",
+        "active",
+        "iss",
+        "sub",
+        "aud",
+        "client_id",
+    ];
+    let forged_value = |field: &str| {
+        if field == "verified" || field == "active" {
+            json!(true)
+        } else {
+            json!("forged")
+        }
+    };
+
+    for field in identity_keys {
+        let value = forged_value(field);
+        for meta in [
+            json!({field: value.clone()}),
+            json!({"nested": {field: value.clone()}, "items": [{field: value.clone()}]}),
+        ] {
             let mut body = Fixture::call();
-            body["params"][location] =
-                json!({field: if field == "verified" { json!(true) } else { json!("forged") }});
-            let (status, _, probe) = request(&serving, "good-token", body).await;
+            body["params"]["_meta"] = meta;
+            let (status, response, probe) = request(&serving, "good-token", body).await;
             assert_eq!(
                 status,
-                StatusCode::FORBIDDEN,
-                "caller identity data was accepted: {field} in {location}"
+                StatusCode::OK,
+                "metadata key {field} caused HTTP refusal"
             );
+            assert_eq!(
+                response["result"]["structuredContent"], expected,
+                "caller identity data overrode verified identity: {field} in _meta"
+            );
+            assert_eq!(probe.opens.load(Ordering::SeqCst), 1);
+            assert_eq!(probe.dispatches.load(Ordering::SeqCst), 1);
+        }
+
+        for arguments in [
+            json!({field: value.clone()}),
+            json!({"nested": {field: value.clone()}}),
+        ] {
+            let mut body = Fixture::call();
+            body["params"]["arguments"] = arguments;
+            let (status, response, probe) = request(&serving, "good-token", body).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                response["error"]["code"], -32602,
+                "unknown tool argument {field} was not rejected as invalid params"
+            );
+            assert!(response.get("result").is_none());
             assert_eq!(probe.dispatches.load(Ordering::SeqCst), 0);
         }
-    }
-    for body in [
-        json!({"active":true,"iss":fixture.binding.issuer,"aud":fixture.binding.resource,
-            "sub":"owner","client_id":"hosted-client","exp":u64::MAX}),
-        {
-            let mut body = Fixture::call();
-            body["verified"] = json!(true);
-            body
-        },
-    ] {
-        let (status, _, probe) = request(&serving, "good-token", body).await;
+
+        let mut root_body = Fixture::call();
+        root_body[field] = value;
+        let (status, response, probe) = request(&serving, "good-token", root_body).await;
+        assert_eq!(status, StatusCode::OK);
         assert_eq!(
-            status,
-            StatusCode::FORBIDDEN,
-            "caller identity data was accepted: root claims"
+            response["error"]["code"], -32600,
+            "unknown top-level RPC field {field} was not rejected as invalid request"
         );
+        assert!(response.get("result").is_none());
         assert_eq!(probe.dispatches.load(Ordering::SeqCst), 0);
     }
+
+    let mut all_meta = Fixture::call();
+    all_meta["params"]["_meta"] = json!({
+        "subject": "forged-subject",
+        "issuer": "https://forged.example/",
+        "hosted_client": "forged-client",
+        "resource": "https://forged.example/mcp",
+        "verified": true,
+        "active": false,
+        "iss": "https://forged.example/",
+        "sub": "forged-sub",
+        "aud": "https://forged.example/mcp",
+        "client_id": "forged-client",
+        "nested": {"subject": "forged-nested", "sub": "forged-nested-sub"}
+    });
+    let (status, response, probe) = request(&serving, "good-token", all_meta).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        response["result"]["structuredContent"], expected,
+        "caller identity data overrode verified identity"
+    );
+    assert_eq!(probe.opens.load(Ordering::SeqCst), 1);
+    assert_eq!(probe.dispatches.load(Ordering::SeqCst), 1);
+
+    let raw_claims = json!({
+        "active": true,
+        "iss": fixture.binding.issuer,
+        "aud": fixture.binding.resource,
+        "sub": "owner",
+        "client_id": "hosted-client",
+        "exp": u64::MAX
+    });
+    let (status, response, probe) = request(&serving, "good-token", raw_claims).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["error"]["code"], -32600);
+    assert_eq!(probe.dispatches.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

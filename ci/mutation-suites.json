@@ -367,7 +367,7 @@
         "^owner\\-config\\-size: GREEN baseline, RED intended misuse test$",
         "^loopback\\-bind: GREEN baseline, RED intended misuse test$"
       ],
-      "script_sha256": "f3b91de957d3ecd26d6f09d4d2f6c9414e966c51bdb480ed017fc9985e3e06ed"
+      "script_sha256": "5d4b5ef7c5f6a2641ef25cbc9a8fe91c1f17a0f1079fe8b4443d54c3f72dbc9c"
     },
     {
       "id": "header_timeout",

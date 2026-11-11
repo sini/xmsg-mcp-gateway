@@ -664,60 +664,6 @@ struct Initialize {
     _metadata: Map<String, Value>,
 }
 
-fn reserved_identity(value: &Value) -> bool {
-    match value {
-        Value::Object(fields) => fields.iter().any(|(key, value)| {
-            matches!(
-                key.as_str(),
-                "subject"
-                    | "issuer"
-                    | "hosted_client"
-                    | "resource"
-                    | "verified"
-                    | "active"
-                    | "iss"
-                    | "sub"
-                    | "aud"
-                    | "client_id"
-            ) || reserved_identity(value)
-        }),
-        Value::Array(values) => values.iter().any(reserved_identity),
-        _ => false,
-    }
-}
-
-fn identity_spoof(body: &Value) -> bool {
-    body.as_object().is_some_and(|fields| {
-        fields.keys().any(|key| {
-            matches!(
-                key.as_str(),
-                "subject"
-                    | "issuer"
-                    | "hosted_client"
-                    | "resource"
-                    | "verified"
-                    | "active"
-                    | "iss"
-                    | "sub"
-                    | "aud"
-                    | "client_id"
-            )
-        })
-    }) || if body["method"] == "tools/call"
-        && crate::broker::NAMES
-            .iter()
-            .any(|name| body["params"]["name"] == *name)
-    {
-        let mut arguments = body["params"]["arguments"].clone();
-        if let Some(fields) = arguments.as_object_mut() {
-            fields.remove("files");
-        }
-        reserved_identity(&arguments)
-    } else {
-        reserved_identity(&body["params"]["arguments"])
-    } || reserved_identity(&body["params"]["_meta"])
-}
-
 fn rpc_result(id: &Value, result: Value) -> Response {
     Json(json!({"jsonrpc":"2.0", "id": id, "result": result})).into_response()
 }
@@ -1302,9 +1248,6 @@ async fn mcp_request(
         Ok(body) => body,
         Err(_) => return rpc_error(&Value::Null, -32700, "Parse error"),
     };
-    if identity_spoof(&body) {
-        return StatusCode::FORBIDDEN.into_response();
-    }
     let rpc: Rpc = match serde_json::from_value(body) {
         Ok(rpc) => rpc,
         Err(_) => return rpc_error(&Value::Null, -32600, "Invalid Request"),
