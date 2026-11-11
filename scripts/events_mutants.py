@@ -361,8 +361,8 @@ CASES.extend(
             (
                 Edit(
                     "src/outbound.rs",
-                    "AND ea.dispatch_revision=?9",
-                    "AND ?9 IS NOT NULL",
+                    "AND ea.dispatch_revision IS NOT NULL",
+                    "AND 1=1",
                 ),
             ),
         ),

@@ -1323,3 +1323,128 @@ async fn node_scoped_targets_send_to_sessions_and_subagents_and_enforce_reply_or
         replies_before_refusal
     );
 }
+
+#[tokio::test]
+async fn events_reply_survives_policy_revision_but_keeps_current_authority_and_targets() {
+    use xmsg_mcp_gateway::event_store::EventKey;
+    let allowed = Policy {
+        send: None,
+        reply: Some(Permission {
+            targets: BTreeSet::from(["source@node".into()]),
+            required_scope: "identity:read".into(),
+        }),
+    };
+    let (fixture, bus) = setup_list_bus(allowed.clone()).await;
+    *bus.list_response.lock().unwrap() = json!({"status":"ok","nodes":[{"node":"node","status":"ok"}],"recipients":[{"address":"source@node","node":"node","kind":"service","harness":"svc","status":"live","user":"fixture"}]});
+    let key_file = fixture.keys._directory.path().join("events-reply-key");
+    fixture::private_file(&key_file, &[42; 32]);
+    let mut store = Store::open(&fixture.store_file).unwrap();
+    store
+        .migrate_events(&EventKey::load(&key_file).unwrap())
+        .unwrap();
+    let sql = rusqlite::Connection::open(&fixture.store_file).unwrap();
+    let messages = [
+        "01ARZ3NDEKTSV4RRFFQ69G5M01",
+        "01ARZ3NDEKTSV4RRFFQ69G5M02",
+        "01ARZ3NDEKTSV4RRFFQ69G5M03",
+    ];
+    for (index, id) in messages.iter().enumerate() {
+        let owner = if index == 2 {
+            "foreign-owner"
+        } else {
+            fixture.binding.subject.as_str()
+        };
+        sql.execute("INSERT INTO custody_items(bus,upstream_id,event_id,grant_id,grant_revision,mailbox,owner,origin,text,envelope,fingerprint,received_at,expires_at,held) VALUES ('bus',?1,?1,'grant',3,'gateway@bus',?2,?3,'accepted text','{}',?1,?4,9999999999,1)",rusqlite::params![id,owner,json!({"service":"source","id":null,"node":"node"}).to_string(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64]).unwrap();
+        sql.execute("INSERT INTO event_authorizations(event_id,acceptance_class,acceptance_enabled,acceptance_ever_enabled,dispatch_revision) VALUES (?1,?2,?3,?3,?4)",rusqlite::params![id,if index==1 {"unknown"}else{"current"},if index==1 {None}else{Some(true)},if index==1 {None}else{Some(3i64)}]).unwrap();
+    }
+    let mut widened = allowed.clone();
+    widened
+        .reply
+        .as_mut()
+        .unwrap()
+        .targets
+        .insert("other@node".into());
+    store.set_outbound_policy("grant", 3, &widened).unwrap();
+    let serving = Serving::from_owner_file(&fixture.config_file)
+        .await
+        .unwrap();
+    let request = |request_id: &str, message_id: &str| {
+        rpc(
+            "tools/call",
+            json!({"name":"xmsg_reply","arguments":{"request_id":request_id,"message_id":message_id,"text":"reply"}}),
+        )
+    };
+    let original = request("reply-after-policy", messages[0]);
+    let (_, value, _) = confirmed_first_call(&serving, original.clone()).await;
+    assert_eq!(
+        value["result"]["structuredContent"]["state"], "confirmed",
+        "authorized reply was orphaned by a policy-only revision"
+    );
+    assert_eq!(bus.reply_frames.lock().unwrap().len(), 1);
+    let narrowed = Policy {
+        send: None,
+        reply: Some(Permission {
+            targets: BTreeSet::from(["other@node".into()]),
+            required_scope: "identity:read".into(),
+        }),
+    };
+    store.set_outbound_policy("grant", 4, &narrowed).unwrap();
+    for input in [original.clone(), request("narrowed-new-id", messages[0])] {
+        let (status, value, _) = fixture::request(&serving, "good-token", input).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::FORBIDDEN,
+            "current narrowed reply policy bypassed: {value}"
+        );
+    }
+    assert_eq!(
+        bus.reply_frames.lock().unwrap().len(),
+        1,
+        "same-ID replay bypassed current reply targets"
+    );
+    store.set_outbound_policy("grant", 5, &allowed).unwrap();
+    store.set_enabled("grant", 6, false).unwrap();
+    let (status, _, _) =
+        fixture::request(&serving, "good-token", request("disabled", messages[0])).await;
+    assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+    store.set_enabled("grant", 7, true).unwrap();
+    confirmed_first_call(&serving, request("reenabled-authorized", messages[0])).await;
+    for (request_id, message_id) in [
+        ("held-never-authorized", messages[1]),
+        ("wrong-subject", messages[2]),
+    ] {
+        let (status, value, _) =
+            fixture::request(&serving, "good-token", request(request_id, message_id)).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::FORBIDDEN,
+            "held or foreign custody admitted: {value}"
+        );
+    }
+    store.set_enabled("grant", 8, false).unwrap();
+    store.enroll("new-grant", &fixture.binding).unwrap();
+    store.set_outbound_policy("new-grant", 1, &allowed).unwrap();
+    store.set_enabled("new-grant", 2, true).unwrap();
+    let (status, value, _) = fixture::request(
+        &serving,
+        "good-token",
+        request("different-grant", messages[0]),
+    )
+    .await;
+    assert_eq!(
+        status,
+        axum::http::StatusCode::FORBIDDEN,
+        "new grant claimed another grant's custody: {value}"
+    );
+    assert_eq!(bus.reply_frames.lock().unwrap().len(), 2);
+    assert_eq!(
+        sql.query_row(
+            "SELECT dispatch_revision FROM event_authorizations WHERE event_id=?1",
+            [messages[0]],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        3,
+        "reply rewrote original authorization witness"
+    );
+}

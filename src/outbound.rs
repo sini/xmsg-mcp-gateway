@@ -563,7 +563,7 @@ impl Store {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get(0))?;
         let authority_predicate = if version >= crate::grants::EVENTS_SCHEMA_VERSION {
-            "EXISTS(SELECT 1 FROM event_authorizations ea WHERE ea.event_id=c.event_id AND ea.dispatch_revision=?9)"
+            "EXISTS(SELECT 1 FROM event_authorizations ea WHERE ea.event_id=c.event_id AND ea.dispatch_revision IS NOT NULL)"
         } else {
             "c.grant_revision=?9"
         };
@@ -1404,18 +1404,42 @@ mod events_reply_tests {
         store.set_enabled("grant", 2, false).unwrap();
         store.set_enabled("grant", 3, true).unwrap();
         let current = store.authorize(&identity).unwrap();
-        assert!(matches!(
-            store.reply_target(
-                "bus",
-                "first",
-                "gateway@bus",
-                &identity,
-                &current,
-                None,
-                &permission
+        assert_eq!(
+            store
+                .reply_target(
+                    "bus",
+                    "first",
+                    "gateway@bus",
+                    &identity,
+                    &current,
+                    None,
+                    &permission
+                )
+                .unwrap(),
+            "source@source-node"
+        );
+        store
+            .connection
+            .execute(
+                "UPDATE event_authorizations SET dispatch_revision=NULL WHERE event_id='first'",
+                [],
+            )
+            .unwrap();
+        assert!(
+            matches!(
+                store.reply_target(
+                    "bus",
+                    "first",
+                    "gateway@bus",
+                    &identity,
+                    &current,
+                    None,
+                    &permission
+                ),
+                Err(Error::Denied)
             ),
-            Err(Error::Denied)
-        ));
+            "never-authorized held custody admitted for reply"
+        );
         assert_eq!(
             store
                 .connection

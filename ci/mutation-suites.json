@@ -26,6 +26,7 @@
         "tests/events_replay.rs",
         "tests/events_rpc.rs",
         "tests/events_store.rs",
+        "tests/list.rs",
         "tests/webhook.rs"
       ],
       "labels": [
@@ -98,7 +99,7 @@
         "^g5-events RED 22-reply\\-dispatch\\-revision-red:",
         "^g5-events GREEN 22-reply\\-dispatch\\-revision-restored$"
       ],
-      "script_sha256": "8915921ab63c444db8d3ed0753717efa4911469f906c7162f06a6c56944fe524"
+      "script_sha256": "975b954c4cc3f08223f3aadab75e3b3a9e9c455c29d0db079012988b30955ff1"
     },
     {
       "id": "retirement",

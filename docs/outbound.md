@@ -232,3 +232,14 @@ quotas. The exact permanent ID archive grows with historical requests: total
 metadata storage is unbounded over an unlimited lifetime. SQLite pages, indexes
 and WAL overhead also remain outside the framed-content byte limit. Archive
 capacity failures fail closed; deleting its witnesses is not a safe cleanup.
+
+With the Events schema, a new reply may use retained custody owned by the same
+currently authorized grant, mailbox and subject when that item has a recorded
+non-null dispatch authorization. A policy-only revision or disable/re-enable
+cycle does not erase that historical authorization. Current grant enablement and
+current reply targets still apply, including to same-request-ID receipt replay;
+never-authorized held items remain ineligible. This does not release Events,
+change recovery-read visibility or rewrite the item's original authorization.
+Legacy custody lacks the Events authorization witness, so its existing exact
+accepted-revision check remains conservative; a policy revision can still make
+that legacy correlation ineligible.
