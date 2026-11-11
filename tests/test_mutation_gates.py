@@ -145,7 +145,7 @@ class MutationGatesTests(unittest.TestCase):
                 "changed": ["src/event_dispatch.rs"],
             }
             self.assertEqual(
-                gates.verify(plan, [receipt], registry["suites"], root), 22
+                gates.verify(plan, [receipt], registry["suites"], root), 24
             )
             result = subprocess.run(
                 command[:-1] + ["../outside"], cwd=root, capture_output=True, text=True
@@ -173,7 +173,7 @@ class MutationGatesTests(unittest.TestCase):
 
     def test_complete_inventory_and_execution_modes(self):
         self.assertEqual(len(self.suites), 19)
-        self.assertEqual(sum(s["count"] for s in self.suites), 245)
+        self.assertEqual(sum(s["count"] for s in self.suites), 247)
         modes = {(s["script"], tuple(s["args"])) for s in self.suites}
         self.assertIn(("scripts/reservation_lifetime_mutants.py", ("--live",)), modes)
 
@@ -273,7 +273,7 @@ class MutationGatesTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             plan, receipt = self.fixture(root)
-            self.assertEqual(gates.verify(plan, [receipt], self.suites, root), 22)
+            self.assertEqual(gates.verify(plan, [receipt], self.suites, root), 24)
             for receipts in [[], [receipt, receipt]]:
                 with self.assertRaises(ValueError):
                     gates.verify(plan, receipts, self.suites, root)

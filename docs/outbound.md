@@ -232,3 +232,20 @@ quotas. The exact permanent ID archive grows with historical requests: total
 metadata storage is unbounded over an unlimited lifetime. SQLite pages, indexes
 and WAL overhead also remain outside the framed-content byte limit. Archive
 capacity failures fail closed; deleting its witnesses is not a safe cleanup.
+
+A policy-only edit carries only this grant's currently authorized Events custody
+and current subscription revision to the new revision. It keeps the subscription
+active without rotating its generation or secrets, resetting expiry/cursors, or
+holding pending wakes. Older or NULL authority, foreign grants, and original
+acceptance snapshots remain unchanged. Existing callback verification and delivery
+hold the service lease through receipt commit, so a concurrent policy edit cannot
+lose an accepted callback outcome. `apply` followed by an actual enablement change
+still performs that enablement transition and its existing fences atomically.
+
+Events replies still require exact current authorization, ownership and current
+reply targets, including same-request-ID receipt replay. Carry-forward preserves
+reply eligibility across policy-only edits; disable/re-enable cycles, new bindings
+and explicit rebinds retain their fences. Legacy custody has no Events authority
+witness, so its conservative exact accepted-revision guard remains unchanged.
+Recovery item visibility survives policy-only edits, but revision-bound inbox
+pagination cursors must be restarted. Recovery reads do not mutate custody.

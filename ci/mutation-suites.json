@@ -5,10 +5,10 @@
       "id": "events",
       "script": "scripts/events_mutants.py",
       "args": [],
-      "count": 22,
+      "count": 24,
       "fixture": false,
       "python": false,
-      "completion": "g5-events-mutants-complete:22/22",
+      "completion": "g5-events-mutants-complete:24/24",
       "dependencies": [
         "scripts/events_mutants.py",
         "src/custody.rs",
@@ -26,6 +26,7 @@
         "tests/events_replay.rs",
         "tests/events_rpc.rs",
         "tests/events_store.rs",
+        "tests/list.rs",
         "tests/webhook.rs"
       ],
       "labels": [
@@ -50,7 +51,9 @@
         "retry-changes-webhook-id",
         "dispatcher-expiry-retains-preview",
         "custody-expiry-retains-preview",
-        "reply-dispatch-revision"
+        "reply-dispatch-revision",
+        "policy-change-fences-events",
+        "policy-promotes-unapproved-history"
       ],
       "required_output": [
         "^g5-events RED 01-candidate\\-mailbox-red:",
@@ -96,9 +99,13 @@
         "^g5-events RED 21-custody\\-expiry\\-retains\\-preview-red:",
         "^g5-events GREEN 21-custody\\-expiry\\-retains\\-preview-restored$",
         "^g5-events RED 22-reply\\-dispatch\\-revision-red:",
-        "^g5-events GREEN 22-reply\\-dispatch\\-revision-restored$"
+        "^g5-events GREEN 22-reply\\-dispatch\\-revision-restored$",
+        "^g5-events RED 23-policy-change-fences-events-red:",
+        "^g5-events GREEN 23-policy-change-fences-events-restored$",
+        "^g5-events RED 24-policy-promotes-unapproved-history-red:",
+        "^g5-events GREEN 24-policy-promotes-unapproved-history-restored$"
       ],
-      "script_sha256": "8915921ab63c444db8d3ed0753717efa4911469f906c7162f06a6c56944fe524"
+      "script_sha256": "9a02513cdf65f966267b5236238488442aafa8e784a3af56c5ab931e6da53d6f"
     },
     {
       "id": "retirement",

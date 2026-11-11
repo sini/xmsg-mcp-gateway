@@ -284,7 +284,7 @@ impl Store {
         tx.execute("INSERT INTO outbound_policy VALUES (?1,?2) ON CONFLICT(grant_id) DO UPDATE SET document=excluded.document", params![id, document])?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if version >= crate::grants::EVENTS_SCHEMA_VERSION {
-            crate::event_store::revision_changed(tx, id)?;
+            crate::event_store::policy_changed(tx, id, revision, revision + 1)?;
         }
         Ok(revision + 1)
     }

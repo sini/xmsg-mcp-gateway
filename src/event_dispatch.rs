@@ -880,3 +880,185 @@ mod authority_race_tests {
 #[cfg(test)]
 #[path = "event_crash_tests.rs"]
 mod crash_tests;
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+    use crate::events_test_support::{Behavior, Setup};
+    use crate::outbound::{Permission, Policy};
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn policy_edit_preserves_subscription_pending_wakes_and_inflight_callback_outcome() {
+        let setup = Setup::new();
+        setup.subscribe().await;
+        setup.seed("old-pending", "dot@bus", 2, i64::MAX);
+        let lifecycle = || {
+            setup.db().query_row("SELECT status,generation,expires,url,secret,bearer,callback_cursor,observation_checkpoint FROM event_subscriptions",[],|row|Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?,row.get::<_,i64>(2)?,row.get::<_,Vec<u8>>(3)?,row.get::<_,Vec<u8>>(4)?,row.get::<_,Vec<u8>>(5)?,row.get::<_,i64>(6)?,row.get::<_,i64>(7)?))).unwrap()
+        };
+        let before = lifecycle();
+        let first = Policy {
+            send: Some(Permission {
+                targets: ["first@peer".into()].into(),
+                required_scope: "identity:read".into(),
+            }),
+            reply: None,
+        };
+        let mut store = Store::open(&setup.provider.store_file).unwrap();
+        assert_eq!(store.set_outbound_policy("grant", 2, &first).unwrap(), 3);
+        assert_eq!(
+            lifecycle(),
+            before,
+            "policy edit invalidated subscription or reset lifecycle"
+        );
+        assert_eq!(
+            setup
+                .db()
+                .query_row("SELECT grant_revision FROM event_subscriptions", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            tick(&setup.runtime(), "bus", "dot@bus").await.unwrap(),
+            Tick::Accepted,
+            "policy edit stranded an old pending wake"
+        );
+        setup.seed("new-wake", "dot@bus", 3, i64::MAX);
+        assert_eq!(
+            tick(&setup.runtime(), "bus", "dot@bus").await.unwrap(),
+            Tick::Accepted,
+            "policy edit stranded a new wake"
+        );
+        setup.seed("inflight", "dot@bus", 3, i64::MAX);
+        let (entered, received) = tokio::sync::oneshot::channel();
+        let (resume, released) = tokio::sync::oneshot::channel();
+        setup
+            .callback
+            .behaviors
+            .lock()
+            .unwrap()
+            .push_back(Behavior::Pause {
+                entered,
+                resume: released,
+            });
+        let runtime = setup.runtime();
+        let delivery = tokio::spawn(async move { tick(&runtime, "bus", "dot@bus").await });
+        tokio::time::timeout(Duration::from_secs(3), received)
+            .await
+            .unwrap()
+            .unwrap();
+        let (waiting, waited) = tokio::sync::oneshot::channel();
+        let waiting = Arc::new(Mutex::new(Some(waiting)));
+        let file = setup.provider.store_file.clone();
+        let next = Policy {
+            send: Some(Permission {
+                targets: ["next@peer".into()].into(),
+                required_scope: "identity:read".into(),
+            }),
+            reply: None,
+        };
+        let policy = tokio::task::spawn_blocking(move || {
+            tracing::subscriber::with_default(
+                selection_observer::AtEvent {
+                    target: "gateway_operation_wait",
+                    action: move || {
+                        if let Some(sender) = waiting.lock().unwrap().take() {
+                            let _ = sender.send(());
+                        }
+                    },
+                },
+                || {
+                    Store::open(&file)
+                        .unwrap()
+                        .set_outbound_policy("grant", 3, &next)
+                },
+            )
+        });
+        tokio::time::timeout(Duration::from_secs(3), waited)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            setup
+                .db()
+                .query_row("SELECT revision FROM grants WHERE id='grant'", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            3,
+            "policy writer bypassed callback lease"
+        );
+        resume.send(()).unwrap();
+        assert_eq!(delivery.await.unwrap().unwrap(), Tick::Accepted);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), policy)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            setup
+                .db()
+                .query_row(
+                    "SELECT state FROM custody_outbox WHERE event_id='inflight'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "accepted",
+            "policy edit lost an accepted callback outcome"
+        );
+        assert_eq!(
+            setup
+                .db()
+                .query_row(
+                    "SELECT status,generation,grant_revision FROM event_subscriptions",
+                    [],
+                    |r| Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?
+                    ))
+                )
+                .unwrap(),
+            ("active".into(), 1, 4)
+        );
+        setup.seed("fenced", "dot@bus", 4, i64::MAX);
+        store.set_enabled("grant", 4, false).unwrap();
+        store.set_enabled("grant", 5, true).unwrap();
+        store
+            .set_outbound_policy("grant", 6, &Policy::default())
+            .unwrap();
+        assert_eq!(
+            tick(&setup.runtime(), "bus", "dot@bus").await.unwrap(),
+            Tick::Idle
+        );
+        assert_eq!(
+            setup
+                .db()
+                .query_row(
+                    "SELECT state FROM custody_outbox WHERE event_id='fenced'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "held"
+        );
+        assert_eq!(
+            setup
+                .db()
+                .query_row(
+                    "SELECT dispatch_revision FROM event_authorizations WHERE event_id='fenced'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            4,
+            "policy edit revived authority fenced by disable/reenable"
+        );
+        assert_eq!(setup.callback.events.lock().unwrap().len(), 3);
+    }
+}

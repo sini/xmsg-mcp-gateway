@@ -253,7 +253,7 @@ fn apply_reuses_events_transitions_at_each_actual_revision_change() {
     );
     let sql = Connection::open(&file).unwrap();
     let released:(i64,i64,String,i64)=sql.query_row("SELECT a.old_revision,a.new_revision,o.state,s.generation FROM event_release_audit a JOIN custody_outbox o USING(event_id),event_subscriptions s",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
-    assert_eq!(released, (1, 3, "pending".into(), 3));
+    assert_eq!(released, (1, 3, "pending".into(), 2));
     assert_eq!(
         store
             .apply_outbound_policy("grant", &policy("b@node"), Some(true))
@@ -269,7 +269,7 @@ fn apply_reuses_events_transitions_at_each_actual_revision_change() {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap();
-    assert_eq!(held, ("held".into(), 4));
+    assert_eq!(held, ("pending".into(), 2));
     assert_eq!(
         sql.query_row("SELECT COUNT(*) FROM event_release_audit", [], |r| r
             .get::<_, i64>(0))

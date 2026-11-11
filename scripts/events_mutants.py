@@ -370,6 +370,15 @@ CASES.extend(
 )
 
 
+CASES.extend([
+    Case("policy-change-fences-events", "lib", "event_dispatch::policy_tests::policy_edit_preserves_subscription_pending_wakes_and_inflight_callback_outcome", "src/event_dispatch.rs", (
+        Edit("src/outbound.rs", "crate::event_store::policy_changed(tx, id, revision, revision + 1)?;", "crate::event_store::revision_changed(tx, id)?;"),
+    )),
+    Case("policy-promotes-unapproved-history", "events_store", "policy_revision_carries_only_current_authority_without_mutating_wakes_or_subscriptions", "tests/events_store.rs", (
+        Edit("src/event_store.rs", "WHERE dispatch_revision=?2 AND event_id IN", "WHERE ?2 IS NOT NULL AND event_id IN"),
+    )),
+])
+
 def sha(file):
     return hashlib.sha256(file.read_bytes()).hexdigest()
 

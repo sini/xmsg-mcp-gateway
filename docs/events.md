@@ -250,8 +250,19 @@ During a temporary xmsg daemon outage, recovery reads and status use the last
 validated registered mailbox; they do not need a new live handle to read retained
 custody. Initial startup still requires successful registration and manifest
 validation. Sends and replies require a healthy registration. Disable/re-enable
-or policy changes fence the old subscription and hold earlier-revision work;
-renewal does not silently authorize it.
+cycles and explicit rebinds retain their existing fences; renewal does not
+silently authorize earlier-revision work. A policy-only edit atomically carries
+that grant's current item authorizations and subscription revision forward. It
+preserves subscription status, generation, secrets, expiry and cursors, and every
+pending or completed wake outcome. NULL and older authorization revisions and
+other grants are never promoted. The same service lease serializes policy writes
+with callback verification and delivery through their receipt commits.
+
+Replies remain gated by current enablement, the same grant and owner, and current
+reply targets. Policy-only edits preserve eligible reply custody; disable/re-enable
+does not. Recovery reads remain read-only and retain item visibility after a
+policy edit. Their revision-bound pagination cursors must be restarted after the
+revision changes.
 
 `xmsg_identity` includes `events_status`: subscription state/generation/expiry,
 opaque callback and observation cursors, retained counts by state, categorized

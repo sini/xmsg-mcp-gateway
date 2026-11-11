@@ -206,20 +206,61 @@ fn encryption_key_requires_owner_only_file_and_authenticated_ciphertext() {
 }
 
 #[test]
-fn policy_revision_change_atomically_holds_work_and_invalidates_subscription_generation() {
+fn policy_revision_carries_only_current_authority_without_mutating_wakes_or_subscriptions() {
     let (dir, mut store, file) = base();
     let key = key(dir.path(), "key", 12);
     store.migrate_events(&key).unwrap();
     store.enroll("grant", &binding()).unwrap();
+    store.enroll("foreign", &binding()).unwrap();
     store.set_enabled("grant", 1, true).unwrap();
     let db = Connection::open(file).unwrap();
-    seed(&db, "pending", 2, "current");
-    seed(&db, "dispatching", 2, "current");
-    db.execute("UPDATE event_authorizations SET dispatch_revision=2", [])
+    for (id, revision) in [
+        ("pending", Some(2i64)),
+        ("dispatching", Some(2)),
+        ("older", Some(1)),
+        ("never", None),
+        ("foreign", Some(2)),
+    ] {
+        seed(&db, id, 2, "current");
+        db.execute(
+            "UPDATE event_authorizations SET dispatch_revision=?2 WHERE event_id=?1",
+            params![id, revision],
+        )
         .unwrap();
-    db.execute("UPDATE custody_outbox SET state=event_id", [])
-        .unwrap();
-    db.execute("INSERT INTO event_subscriptions(id,owner_key,service,issuer,resource,subject,hosted_client,bus,mailbox,grant_id,grant_revision,generation,expires,url,secret,bearer,status) VALUES ('sub','owner','gateway','issuer','resource','owner','hosted','bus','gateway@bus','grant',2,8,9999999999,x'00',x'00',x'00','active')",[]).unwrap();
+    }
+    db.execute(
+        "UPDATE custody_items SET grant_id='foreign' WHERE event_id='foreign'",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE custody_outbox SET state=event_id WHERE event_id IN ('pending','dispatching')",
+        [],
+    )
+    .unwrap();
+    db.execute("UPDATE custody_outbox SET attempts=2,next_attempt=77,body=x'010203',last_error='retry',subscription_generation=8",[]).unwrap();
+    for (id, grant, revision) in [
+        ("current", "grant", 2),
+        ("older", "grant", 1),
+        ("foreign", "foreign", 2),
+    ] {
+        db.execute("INSERT INTO event_subscriptions(id,owner_key,service,issuer,resource,subject,hosted_client,bus,mailbox,grant_id,grant_revision,generation,expires,url,secret,old_secret,bearer,status,rotation_until,callback_cursor,observation_checkpoint) VALUES (?1,?1,'gateway','issuer','resource','owner','hosted','bus','gateway@bus',?2,?3,8,9999999999,x'00',x'01',x'02',x'03','active',99,4,3)",params![id,grant,revision]).unwrap();
+    }
+    let snapshot = |query: &str| {
+        let mut statement = db.prepare(query).unwrap();
+        let count = statement.column_count();
+        statement
+            .query_map([], |row| {
+                Ok((0..count)
+                    .map(|i| format!("{:?}", row.get_ref(i).unwrap()))
+                    .collect::<Vec<_>>())
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    let wakes = snapshot("SELECT * FROM custody_outbox ORDER BY event_id");
+    let subscriptions=snapshot("SELECT id,status,generation,expires,url,secret,old_secret,bearer,rotation_until,callback_cursor,observation_checkpoint FROM event_subscriptions ORDER BY id");
     assert_eq!(
         store
             .set_outbound_policy("grant", 2, &Default::default())
@@ -227,27 +268,45 @@ fn policy_revision_change_atomically_holds_work_and_invalidates_subscription_gen
         3
     );
     assert_eq!(
-        db.query_row(
-            "SELECT COUNT(*) FROM custody_outbox WHERE state='held'",
-            [],
-            |r| r.get::<_, i64>(0)
-        )
-        .unwrap(),
-        2
+        snapshot("SELECT * FROM custody_outbox ORDER BY event_id"),
+        wakes,
+        "policy edit fenced or reset retained wakes"
     );
-    let subscription: (String, i64) = db
-        .query_row(
-            "SELECT status,generation FROM event_subscriptions",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(subscription, ("disabled".into(), 9));
+    assert_eq!(snapshot("SELECT id,status,generation,expires,url,secret,old_secret,bearer,rotation_until,callback_cursor,observation_checkpoint FROM event_subscriptions ORDER BY id"),subscriptions,"policy edit mutated subscription lifecycle");
+    for (id, expected) in [
+        ("pending", Some(3i64)),
+        ("dispatching", Some(3)),
+        ("older", Some(1)),
+        ("never", None),
+        ("foreign", Some(2)),
+    ] {
+        assert_eq!(
+            db.query_row(
+                "SELECT dispatch_revision FROM event_authorizations WHERE event_id=?1",
+                [id],
+                |row| row.get::<_, Option<i64>>(0)
+            )
+            .unwrap(),
+            expected,
+            "policy promoted NULL, older or foreign authority: {id}"
+        );
+    }
+    for (id, expected) in [("current", 3i64), ("older", 1), ("foreign", 2)] {
+        assert_eq!(
+            db.query_row(
+                "SELECT grant_revision FROM event_subscriptions WHERE id=?1",
+                [id],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            expected,
+            "policy promoted stale or foreign subscription"
+        );
+    }
     assert_eq!(
-        db.query_row("SELECT MIN(grant_revision) FROM custody_items", [], |r| r
-            .get::<_, i64>(
-            0
-        ))
+        db.query_row("SELECT MIN(grant_revision) FROM custody_items", [], |row| {
+            row.get::<_, i64>(0)
+        })
         .unwrap(),
         2
     );

@@ -17,6 +17,10 @@ pub(crate) enum Behavior {
     Response(u16, Option<String>),
     TimeoutAfterAccept,
     GenerationChange(std::path::PathBuf),
+    Pause {
+        entered: tokio::sync::oneshot::Sender<()>,
+        resume: tokio::sync::oneshot::Receiver<()>,
+    },
 }
 pub(crate) struct Callback {
     pub(crate) events: Mutex<Vec<(reqwest::header::HeaderMap, Vec<u8>)>>,
@@ -54,13 +58,23 @@ impl Transport for Callback {
             }
             assert_eq!(headers["webhook-id"], value["eventId"].as_str().unwrap());
             self.events.lock().unwrap().push((headers, body));
-            match self.behaviors.lock().unwrap().pop_front() {
+            let behavior = self.behaviors.lock().unwrap().pop_front();
+            match behavior {
                 Some(Behavior::Response(status, retry_after)) => Ok(webhook::Response {
                     status,
                     body: vec![],
                     retry_after,
                 }),
                 Some(Behavior::TimeoutAfterAccept) => Err(webhook::Error::Timeout),
+                Some(Behavior::Pause { entered, resume }) => {
+                    entered.send(()).unwrap();
+                    resume.await.unwrap();
+                    Ok(webhook::Response {
+                        status: 200,
+                        body: vec![],
+                        retry_after: None,
+                    })
+                }
                 Some(Behavior::GenerationChange(file)) => {
                     rusqlite::Connection::open(file)
                         .unwrap()

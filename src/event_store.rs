@@ -243,6 +243,20 @@ pub(crate) fn enabled_transition(
     Ok(())
 }
 
+pub(crate) fn policy_changed(
+    tx: &Transaction<'_>,
+    id: &str,
+    previous: i64,
+    next: i64,
+) -> Result<(), rusqlite::Error> {
+    tx.execute("UPDATE event_authorizations SET dispatch_revision=?3 WHERE dispatch_revision=?2 AND event_id IN (SELECT event_id FROM custody_items WHERE grant_id=?1)", params![id,previous,next])?;
+    tx.execute(
+        "UPDATE event_subscriptions SET grant_revision=?3 WHERE grant_id=?1 AND grant_revision=?2",
+        params![id, previous, next],
+    )?;
+    Ok(())
+}
+
 pub(crate) fn revision_changed(tx: &Transaction<'_>, id: &str) -> Result<(), rusqlite::Error> {
     tx.execute("UPDATE custody_outbox SET state='held' WHERE state IN ('pending','dispatching') AND event_id IN (SELECT event_id FROM custody_items WHERE grant_id=?1)", [id])?;
     tx.execute("UPDATE event_subscriptions SET status='disabled',generation=generation+1 WHERE grant_id=?1", [id])?;
