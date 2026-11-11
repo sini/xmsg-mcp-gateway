@@ -16,6 +16,14 @@ from transport_compat import invocation_evidence
 ROOT = Path(__file__).resolve().parents[1]
 CASES = [
     (
+        "pending-shared-predicate",
+        "src/grants.rs",
+        "if !self.migration_applied(migration)? {",
+        "if self.migration_applied(migration)? {",
+        "migrations",
+        "migrations_pending_matches_shared_predicates_without_writes",
+    ),
+    (
         "apply-policy-validation",
         "src/outbound.rs",
         "    policy.validate()?;",

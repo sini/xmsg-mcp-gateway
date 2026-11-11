@@ -141,10 +141,10 @@
       "id": "grant",
       "script": "scripts/grant_mutants.py",
       "args": [],
-      "count": 14,
+      "count": 15,
       "fixture": false,
       "python": false,
-      "completion": "14/14 grant mutants killed",
+      "completion": "15/15 grant mutants killed",
       "dependencies": [
         "scripts/grant_mutants.py",
         "src/grants.rs",
@@ -156,6 +156,7 @@
         "tests/migrations.rs"
       ],
       "labels": [
+        "pending-shared-predicate",
         "apply-policy-validation",
         "cli-input-redaction",
         "empty-binding",
@@ -172,6 +173,7 @@
         "cli-exit"
       ],
       "required_output": [
+        "^pending\\-shared\\-predicate: GREEN baseline, RED intended test$",
         "^apply\\-policy\\-validation: GREEN baseline, RED intended test$",
         "^cli\\-input\\-redaction: GREEN baseline, RED intended test$",
         "^empty\\-binding: GREEN baseline, RED intended test$",
@@ -187,7 +189,7 @@
         "^audience\\-array: GREEN baseline, RED intended test$",
         "^cli\\-exit: GREEN baseline, RED intended test$"
       ],
-      "script_sha256": "8340bd316e6eeeeac84f32560ae2f3f0592252c09ee86905002a9f115183460b"
+      "script_sha256": "455cdb99095f7d5cbe56a66cad55c759e7c9c5ab607f35be7a06658845d83cb6"
     },
     {
       "id": "identity",

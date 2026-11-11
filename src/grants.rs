@@ -124,6 +124,24 @@ impl Store {
     fn open_with_wait(file: &Path, wait: Duration) -> Result<Self, Error> {
         tracing::debug!(target: "gateway_policy_store", "open");
         let connection = Self::connect(file, wait)?;
+        Self::from_connection(file, connection)
+    }
+
+    pub fn open_readonly(file: &Path) -> Result<Self, Error> {
+        let connection = Connection::open_with_flags(file, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        connection.busy_timeout(Duration::from_secs(30))?;
+        Self::from_connection(file, connection)
+    }
+
+    fn from_connection(file: &Path, connection: Connection) -> Result<Self, Error> {
+        Self::validate_connection(&connection)?;
+        Ok(Self {
+            connection,
+            file: file.canonicalize()?,
+        })
+    }
+
+    fn validate_connection(connection: &Connection) -> Result<(), Error> {
         let application: i64 =
             connection.pragma_query_value(None, "application_id", |r| r.get(0))?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -136,18 +154,15 @@ impl Store {
         }
         connection.prepare("SELECT id, service, issuer, resource, subject, hosted_client, revision, enabled FROM grants LIMIT 0")?;
         if version >= CUSTODY_SCHEMA_VERSION {
-            crate::custody::validate_schema(&connection)?;
+            crate::custody::validate_schema(connection)?;
         }
         if version >= OUTBOUND_SCHEMA_VERSION {
-            crate::outbound::validate_schema(&connection)?;
+            crate::outbound::validate_schema(connection)?;
         }
         if version >= EVENTS_SCHEMA_VERSION {
-            crate::event_store::validate_schema(&connection)?;
+            crate::event_store::validate_schema(connection)?;
         }
-        Ok(Self {
-            connection,
-            file: file.canonicalize()?,
-        })
+        Ok(())
     }
 
     fn connect(file: &Path, wait: Duration) -> Result<Connection, Error> {
@@ -210,6 +225,25 @@ impl Store {
             Migration::Retirement => retirement,
             Migration::Events => version == EVENTS_SCHEMA_VERSION,
         })
+    }
+
+    pub fn pending_migrations(&self) -> Result<Vec<&'static str>, crate::outbound::Error> {
+        let _snapshot = self.connection.unchecked_transaction()?;
+        Self::validate_connection(&self.connection)?;
+        tracing::debug!(target:"gateway_migrations_snapshot", "read-only migration snapshot pinned");
+        let mut pending = Vec::new();
+        for (migration, command) in [
+            (Migration::Custody, "migrate-custody"),
+            (Migration::Outbound, "migrate-outbound"),
+            (Migration::Retirement, "migrate-retirement"),
+            (Migration::CustodySummaries, "migrate-custody-summaries"),
+            (Migration::Events, "migrate-events"),
+        ] {
+            if !self.migration_applied(migration)? {
+                pending.push(command);
+            }
+        }
+        Ok(pending)
     }
 
     pub fn enroll(&mut self, id: &str, binding: &Binding) -> Result<(), Error> {

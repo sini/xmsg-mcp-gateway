@@ -53,6 +53,7 @@ enum Command {
         reason: String,
     },
     Init,
+    MigrationsPending,
     MigrateCustody {
         #[arg(long)]
         if_needed: bool,
@@ -202,6 +203,15 @@ async fn run(cli: Cli) -> Result<(), CommandError> {
                 events.replay(&id, generation, cursor.as_deref(), &operator, &reason)?
             };
             println!("{result}");
+        }
+        (Some(state), Command::MigrationsPending) => {
+            let pending = Store::open_readonly(&state)?.pending_migrations()?;
+            for command in &pending {
+                println!("{command}");
+            }
+            if !pending.is_empty() {
+                std::process::exit(10);
+            }
         }
         (Some(state), Command::Init) => {
             Store::initialize(&state)?;

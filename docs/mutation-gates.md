@@ -17,7 +17,7 @@ changed. Common helpers, build manifests, toolchains, workflows and mutation scr
 select the full inventory. Unknown file classification also selects everything;
 this deliberately prefers unnecessary work to an omitted gate. Documentation-only
 and ordinary-census changes can select no mutation suite. Every main push, manual
-workflow dispatch, and pull request carrying the `full-gates` label selects all 248
+workflow dispatch, and pull request carrying the `full-gates` label selects all 249
 named mutants. Label changes trigger a new run; later commits retain full selection
 while the label remains present. Manual dispatch uses the workflow available on the
 default branch, so a new workflow must land before it can be dispatched. See
@@ -36,4 +36,4 @@ and script digest together. The digest records the reviewed inventory; it is not
 binary cache key. Keep mutation execution modes together with their existing
 controls. Timeout diagnostic mutants and profile missing-fixture, wrong-revision,
 cached-artifact, early-return and missing-case controls remain ordinary checks,
-outside the 248 named-mutant count.
+outside the 249 named-mutant count.

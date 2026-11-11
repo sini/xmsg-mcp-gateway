@@ -486,3 +486,15 @@ validation: normal Events startup still verifies the configured key. Marker
 lineage is recognized explicitly, not by numeric ordering. A summarized store
 with valid retirement metadata already satisfies retirement; fresh custody
 summaries alone, before outbound retirement is installed, do not.
+
+### Inspect pending migrations
+
+Run `xmsg-mcp-gateway --state /state/grants.db migrations-pending` before
+maintenance. It reads one consistent snapshot without loading an Events key or
+changing the database. Exit 0 with empty stdout means complete; exit 10 prints
+pending `migrate-*` commands, one per line in prerequisite order. Missing, corrupt
+or unsupported stores return the normal error exit 1.
+
+If exit 10 reports work, stop every gateway process, back up the database, then
+run the existing shellless init chain above. Restart only after migration succeeds;
+rollback requires the pre-migration backup. Inspection itself needs no backup.

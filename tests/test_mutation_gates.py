@@ -173,7 +173,7 @@ class MutationGatesTests(unittest.TestCase):
 
     def test_complete_inventory_and_execution_modes(self):
         self.assertEqual(len(self.suites), 19)
-        self.assertEqual(sum(s["count"] for s in self.suites), 248)
+        self.assertEqual(sum(s["count"] for s in self.suites), 249)
         modes = {(s["script"], tuple(s["args"])) for s in self.suites}
         self.assertIn(("scripts/reservation_lifetime_mutants.py", ("--live",)), modes)
 
