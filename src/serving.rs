@@ -23,7 +23,7 @@ use serde_json::{json, Map, Value};
 use crate::auth::{
     self, ProfileConfig, VerifiedContext, VerifiedIdentity, Verifier, VerifierConfig,
 };
-use crate::grants::{Authorization, Error as GrantError, Store};
+use crate::grants::{Authorization, Binding, Error as GrantError, Store};
 use crate::outbound::{self, Outcome, Policy};
 use crate::xmsg_config::{DeploymentManifest, ManifestError, XmsgConfig};
 use crate::{event_dispatch, events, reads, recovery, session};
@@ -114,6 +114,53 @@ struct Messaging {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct LocalConfiguration {
+    local: bool,
+    opaque_default: bool,
+    #[serde(flatten)]
+    binding: Binding,
+    required_scopes: Vec<String>,
+}
+struct ProfileDefinition {
+    remote: Option<ProfileConfig>,
+    local: Option<LocalConfiguration>,
+    advertised: bool,
+}
+impl<'de> Deserialize<'de> for ProfileDefinition {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut value = Value::deserialize(deserializer)?;
+        let fields = value
+            .as_object_mut()
+            .ok_or_else(|| serde::de::Error::custom("profile must be an object"))?;
+        let advertised = match fields.remove("advertised") {
+            None => true,
+            Some(Value::Bool(v)) => v,
+            _ => return Err(serde::de::Error::custom("invalid advertised flag")),
+        };
+        let local = match fields.get("local") {
+            None => false,
+            Some(Value::Bool(v)) => *v,
+            _ => return Err(serde::de::Error::custom("invalid local flag")),
+        };
+        if local {
+            Ok(Self {
+                local: Some(serde_json::from_value(value).map_err(serde::de::Error::custom)?),
+                remote: None,
+                advertised,
+            })
+        } else {
+            value.as_object_mut().unwrap().remove("local");
+            Ok(Self {
+                remote: Some(serde_json::from_value(value).map_err(serde::de::Error::custom)?),
+                local: None,
+                advertised,
+            })
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Configuration {
     #[serde(default = "default_header_read_timeout_ms")]
     header_read_timeout_ms: u64,
@@ -129,7 +176,8 @@ struct Configuration {
     allowed_hosts: Vec<String>,
     allowed_origins: Vec<String>,
     verifier: Option<VerifierConfig>,
-    verifier_profiles: Option<Vec<ProfileConfig>>,
+    verifier_profiles: Option<Vec<ProfileDefinition>>,
+    authorization_server: Option<crate::authorization_server::Config>,
     events: Option<EventsConfiguration>,
     #[serde(default, deserialize_with = "present_messaging")]
     messaging: Option<MessagingConfiguration>,
@@ -141,8 +189,62 @@ fn configured_verifier(
     store: &Store,
 ) -> Result<Arc<Verifier>, StartupError> {
     let (verifier, collection) = match (config.verifier.take(), config.verifier_profiles.take()) {
-        (Some(single), None) => (Verifier::from_config(single), false),
-        (None, Some(profiles)) => (Verifier::from_profile_configs(profiles), true),
+        (Some(single), None) if config.authorization_server.is_none() => {
+            (Verifier::from_config(single), false)
+        }
+        (None, Some(profiles)) => {
+            if profiles.is_empty() || profiles.len() > crate::auth::MAX_PROFILES {
+                return Err(ConfigurationError.into());
+            }
+            let mut remotes = Vec::new();
+            let mut advertised = Vec::new();
+            let mut local = None;
+            for definition in profiles {
+                if let Some(profile) = definition.remote {
+                    remotes.push(profile);
+                    advertised.push(definition.advertised);
+                }
+                if let Some(profile) = definition.local {
+                    if local.replace((profile, definition.advertised)).is_some() {
+                        return Err(ConfigurationError.into());
+                    }
+                }
+            }
+            let result = if let Some((local, local_advertised)) = local {
+                if !local.local || !local.opaque_default {
+                    return Err(ConfigurationError.into());
+                }
+                let authorization = config
+                    .authorization_server
+                    .take()
+                    .ok_or(ConfigurationError)?;
+                let server = crate::authorization_server::Server::from_config(
+                    authorization,
+                    config.grant_store.clone(),
+                    local.binding,
+                    local.required_scopes,
+                    Arc::new(crate::authorization_server::SystemClock),
+                )
+                .map_err(|_| ConfigurationError)?;
+                if remotes.is_empty() {
+                    Ok(Verifier::local_only(server, local_advertised))
+                } else {
+                    let mut verifier =
+                        Verifier::from_profile_configs(remotes).map_err(|_| ConfigurationError)?;
+                    verifier.set_advertised(advertised);
+                    verifier.with_local(server, local_advertised)
+                }
+            } else {
+                if config.authorization_server.is_some() {
+                    return Err(ConfigurationError.into());
+                }
+                Verifier::from_profile_configs(remotes).map(|mut verifier| {
+                    verifier.set_advertised(advertised);
+                    verifier
+                })
+            };
+            (result, true)
+        }
         _ => return Err(ConfigurationError.into()),
     };
     let verifier = verifier.map_err(|_| ConfigurationError)?;
@@ -167,6 +269,13 @@ fn validate_events_profile(
     verifier: &Verifier,
     grant_id: &str,
 ) -> Result<(), ConfigurationError> {
+    if store
+        .selected_cutover_grant()
+        .map_err(|_| ConfigurationError)?
+        .is_some_and(|id| id != grant_id)
+    {
+        return Err(ConfigurationError);
+    }
     let mut matches = 0;
     for binding in verifier.bindings() {
         let found: bool = store.connection.query_row(
@@ -298,6 +407,14 @@ impl Serving {
             }
         }
         let store = Store::open(&config.grant_store).map_err(|_| ConfigurationError)?;
+        store
+            .validate_cutover_selection(
+                config
+                    .events
+                    .as_ref()
+                    .map(|events| events.grant_id.as_str()),
+            )
+            .map_err(|_| ConfigurationError)?;
         let verifier = configured_verifier(&mut config, &store)?;
         let resource = verifier.resource().to_owned();
         let issuers = verifier.issuers();
@@ -460,6 +577,17 @@ impl Serving {
             broker: config.broker,
         });
         let mut router = Router::new().route("/mcp", any(mcp));
+        if state.verifier.local_server().is_some() {
+            for route in [
+                "/.well-known/oauth-authorization-server",
+                "/oauth/authorize",
+                "/oauth/callback",
+                "/oauth/token",
+                "/oauth/revoke",
+            ] {
+                router = router.route(route, any(oauth_endpoint));
+            }
+        }
         for path in BTreeSet::from([
             "/.well-known/oauth-protected-resource".to_owned(),
             format!("/.well-known/oauth-protected-resource{resource_path}"),
@@ -622,11 +750,15 @@ fn unavailable() -> Response {
 
 fn auth_response(error: auth::Error, challenge: &HeaderValue) -> Response {
     match error {
-        auth::Error::InvalidToken => (
-            StatusCode::UNAUTHORIZED,
-            [(header::WWW_AUTHENTICATE, challenge.clone())],
-        )
-            .into_response(),
+        auth::Error::Denied => StatusCode::FORBIDDEN.into_response(),
+        auth::Error::InvalidToken => {
+            tracing::info!(target: "gateway_oauth_authentication", class = "invalid_token", "OAuth authentication refused");
+            (
+                StatusCode::UNAUTHORIZED,
+                [(header::WWW_AUTHENTICATE, challenge.clone())],
+            )
+                .into_response()
+        }
         _ => unavailable(),
     }
 }
@@ -654,9 +786,15 @@ async fn authorize_current(
     tokio::task::spawn_blocking(move || {
         tracing::dispatcher::with_default(&subscriber, || {
             let store = Store::open(&store_file)?;
-            let grant = store.authorize(&identity)?;
+            let grant = match identity.admitted_authority() {
+                Some(grant) => grant.clone(),
+                None => store.authorize(&identity)?,
+            };
             let policy = if messaging {
-                store.outbound_policy(&grant.grant_id)?
+                match identity.admitted_policy() {
+                    Some(policy) => policy.clone(),
+                    None => store.outbound_policy(&grant.grant_id)?,
+                }
             } else {
                 Policy::default()
             };
@@ -670,6 +808,91 @@ async fn authorize_current(
     .await
     .map_err(|_| unavailable())?
     .map_err(policy_response)
+}
+
+fn oauth_no_store(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+async fn oauth_endpoint(State(app): State<Arc<App>>, request: Request) -> Response {
+    if !permitted_request(&app, &request) {
+        return oauth_no_store(StatusCode::FORBIDDEN.into_response());
+    }
+    let Some(server) = app.verifier.local_server().cloned() else {
+        return oauth_no_store(StatusCode::NOT_FOUND.into_response());
+    };
+    let route = request.uri().path().to_owned();
+    let query = request.uri().query().unwrap_or("").to_owned();
+    let method = request.method().as_str().to_owned();
+    tracing::trace!(target:"gateway_oauth_http",route=route.as_str(),method=method.as_str(),"OAuth request");
+    let authorization = if request
+        .headers()
+        .get_all(header::AUTHORIZATION)
+        .iter()
+        .count()
+        == 1
+    {
+        request
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    } else {
+        None
+    };
+    if method == "POST"
+        && request
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_none_or(|v| v.split(';').next() != Some("application/x-www-form-urlencoded"))
+    {
+        return oauth_no_store(StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response());
+    }
+    let work = async {
+        let body = to_bytes(request.into_body(), app.max_request_body_bytes)
+            .await
+            .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
+        let body = std::str::from_utf8(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+        let reply = server
+            .handle(&route, &method, &query, authorization.as_deref(), body)
+            .await;
+        let mut response = (
+            StatusCode::from_u16(reply.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            Json(reply.body),
+        )
+            .into_response();
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        if let Some(location) = reply.location {
+            response.headers_mut().insert(
+                header::LOCATION,
+                HeaderValue::from_str(&location).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+            );
+        }
+        if reply.retry {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+        }
+        if reply.basic {
+            response
+                .headers_mut()
+                .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Basic"));
+        }
+        Ok::<_, StatusCode>(response)
+    };
+    oauth_no_store(
+        match tokio::time::timeout(Duration::from_millis(app.request_timeout_ms), work).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(status)) => status.into_response(),
+            Err(_) => unavailable(),
+        },
+    )
 }
 
 async fn protected_resource(State(app): State<Arc<App>>, request: Request) -> Response {
@@ -947,7 +1170,10 @@ async fn lookup_broker(
         outbound::require_current(&context, &store)?;
         let identity = context.identity();
         let authority = context.authority();
-        let policy = store.outbound_policy(&authority.grant_id)?;
+        let policy = match identity.admitted_policy() {
+            Some(policy) => policy.clone(),
+            None => store.outbound_policy(&authority.grant_id)?,
+        };
         if !config.permitted(
             &policy,
             authority,
@@ -1342,7 +1568,7 @@ async fn mcp_request(
         Ok(now) => now.as_secs(),
         Err(_) => return unavailable(),
     };
-    if now >= identity.expires_at() {
+    if identity.admitted_authority().is_none() && now >= identity.expires_at() {
         return auth_response(auth::Error::InvalidToken, &app.challenge);
     }
     let CurrentAuthority {
@@ -1497,7 +1723,10 @@ async fn mcp_request(
                 let result = tokio::task::spawn_blocking(move || {
                     tracing::dispatcher::with_default(&subscriber, || {
                     let mut recovery_store = Store::open_for_dispatch(&status_store_file).map_err(recovery::Error::Authority)?;
-                    let authority = recovery_store.authorize(&identity).map_err(recovery::Error::Authority)?;
+                    let authority=match &request {
+                        recovery::Request::Ack(_)=>identity.custody_authority(&recovery_store),
+                        recovery::Request::Status(_)=>identity.admitted_authority().map(Ok).unwrap_or_else(||recovery_store.authorize(&identity)),
+                    }.map_err(recovery::Error::Authority)?;
                     if authority.grant_id != selected_grant {
                         return Err(recovery::Error::Authority(GrantError::Denied));
                     }
@@ -1909,15 +2138,29 @@ fn load_configuration(config_file: &Path) -> Result<Configuration, StartupError>
     let absolute = std::path::absolute(config_file).map_err(|_| ConfigurationError)?;
     let directory = absolute.parent().ok_or(ConfigurationError)?;
     resolve_profile_path(directory, &mut config.grant_store);
-    for verifier in config.verifier.iter_mut().chain(
-        config
-            .verifier_profiles
-            .iter_mut()
-            .flat_map(|profiles| profiles.iter_mut().map(|profile| &mut profile.config)),
-    ) {
+    for verifier in config
+        .verifier
+        .iter_mut()
+        .chain(config.verifier_profiles.iter_mut().flat_map(|profiles| {
+            profiles
+                .iter_mut()
+                .filter_map(|profile| profile.remote.as_mut().map(|remote| &mut remote.config))
+        }))
+    {
         resolve_profile_path(directory, &mut verifier.client_secret_file);
         if let Some(file) = &mut verifier.root_certificate_file {
             resolve_profile_path(directory, file);
+        }
+    }
+    if let Some(authorization) = &mut config.authorization_server {
+        resolve_profile_path(directory, &mut authorization.client.secret_file);
+        resolve_profile_path(directory, &mut authorization.liveness.token_file);
+        resolve_profile_path(
+            directory,
+            &mut authorization.upstream.verify.client_secret_file,
+        );
+        if let Some(root) = &mut authorization.upstream.verify.root_certificate_file {
+            resolve_profile_path(directory, root);
         }
     }
     if let Some(events) = &mut config.events {
@@ -1948,6 +2191,25 @@ pub fn owner_events(config_file: &Path) -> Result<events::Events, StartupError> 
         .map_err(|_| ConfigurationError)?;
     events::Events::new(config.grant_store, key, verifier, events.grant_id)
         .with_allowed_hosts(events.webhook_allowed_hosts)
+        .map_err(|_| ConfigurationError.into())
+}
+
+pub fn cutover_events(
+    config_file: &Path,
+    from: &str,
+    to: &str,
+    operator: &str,
+    reason: &str,
+    abandon: bool,
+) -> Result<crate::authorization_server::Cutover, StartupError> {
+    let config = load_configuration(config_file)?;
+    let mut store = Store::open(&config.grant_store).map_err(|_| ConfigurationError)?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| ConfigurationError)?
+        .as_secs() as i64;
+    store
+        .cutover_events(from, to, operator, reason, abandon, now)
         .map_err(|_| ConfigurationError.into())
 }
 

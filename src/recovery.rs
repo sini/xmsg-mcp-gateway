@@ -65,7 +65,13 @@ pub(crate) fn dispatch(
 ) -> Result<Value, Error> {
     store.require_events_ready(key)?;
     let tx = store.connection.unchecked_transaction()?;
-    let authority = store.authorize(identity)?;
+    let authority = match &request {
+        Request::Ack(_) => identity.custody_authority(&store)?,
+        Request::Status(_) => match identity.admitted_authority() {
+            Some(authority) => authority,
+            None => store.authorize(identity)?,
+        },
+    };
     if authority.grant_id != selected_grant {
         return Err(crate::grants::Error::Denied.into());
     }

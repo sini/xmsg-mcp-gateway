@@ -14,7 +14,7 @@ standardwebhooks = "=1.0.1"
 chacha20poly1305 = "0.10"
 getrandom = "0.3"
 httpdate = "1"
-time = { version = "0.3", features = ["formatting"] }
+time = { version = "0.3", features = ["formatting", "parsing"] }
 xmsg = { git = "https://github.com/sini/xmsg", rev = "173f1527d4407a4f0abfd73bae9dc243c5708758", default-features = false, features = ["client"] }
 clap = { version = "4.5", features = ["derive"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }

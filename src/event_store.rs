@@ -101,7 +101,8 @@ impl Store {
         let version: i64 = self
             .connection
             .pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version != EVENTS_SCHEMA_VERSION {
+        if !(EVENTS_SCHEMA_VERSION..=crate::grants::MAX_SUPPORTED_SCHEMA_VERSION).contains(&version)
+        {
             return Err(Error::MigrationRequired);
         }
         validate_schema(&self.connection)?;

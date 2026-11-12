@@ -1,13 +1,18 @@
-error[E0451]: fields `service`, `issuer`, `resource`, `subject`, `hosted_client`, `expires_at` and `audience` of struct `auth::VerifiedIdentity` are private
-  --> tests/ui/handler_mint.rs:10:13
+error[E0451]: fields `service`, `issuer`, `resource`, `subject`, `hosted_client`, `expires_at`, `audience`, `token_family`, `admission` and `admission_policy` of struct `identity::VerifiedIdentity` are private
+  --> tests/ui/handler_mint.rs:14:13
    |
- 9 |         let _ = super::auth::VerifiedIdentity {
+13 |         let _ = super::auth::VerifiedIdentity {
    |                 ----------------------------- in this type
-10 |             service: "gateway".into(), issuer: "https://issuer.example/".into(),
+14 |             service: "gateway".into(), issuer: "https://issuer.example/".into(),
    |             ^^^^^^^ private field      ^^^^^^ private field
-11 |             resource: "https://gateway.example/mcp".into(), subject: "owner".into(),
+15 |             resource: "https://gateway.example/mcp".into(), subject: "owner".into(),
    |             ^^^^^^^^ private field                          ^^^^^^^ private field
-12 |             hosted_client: "hosted-client".into(), expires_at: u64::MAX,
+16 |             hosted_client: "hosted-client".into(), expires_at: u64::MAX,
    |             ^^^^^^^^^^^^^ private field            ^^^^^^^^^^ private field
-13 |         audience: "https://gateway.example/mcp".into(),
+17 |         audience: "https://gateway.example/mcp".into(),
    |         ^^^^^^^^ private field
+18 |         token_family:None,admission:None,admission_policy:None,
+   |         ^^^^^^^^^^^^      ^^^^^^^^^      ^^^^^^^^^^^^^^^^ private field
+   |         |                 |
+   |         |                 private field
+   |         private field

@@ -285,7 +285,7 @@ CASES = [
         "serving_profiles",
         "collection_requires_migration_and_exactly_one_configuration_form",
         "tests/serving_profiles.rs",
-        (Edit("src/serving.rs", "(Some(single), None) =>", "(Some(single), _) =>"),),
+        (Edit("src/serving.rs", "(Some(single), None) if config.authorization_server.is_none() =>", "(Some(single), _) if config.authorization_server.is_none() =>"),),
     ),
     Case(
         "custody-catalog",

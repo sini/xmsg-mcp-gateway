@@ -68,3 +68,11 @@ python3 scripts/identity_mutants.py
 ```
 
 Compile-driven trybuild mutation cases have a bounded 120-second execution budget for their nested cold Cargo build; ordinary runtime cases retain 30 seconds. Baseline timing is logged. A timeout or compilation failure still fails the driver and never counts as a kill. CI runs both operating systems with matrix fail-fast disabled.
+
+## Planned local identity and admission
+
+The [gateway AS](authorization-server.md) adds a private optional `token_family` with an accessor on `VerifiedIdentity`; local identities remain constructed only inside `auth.rs`. `LocalProfile::local_identity` accepts a verified upstream login only for the configured owner subject, returning the local binding for callback authorization without a family. `LocalProfile::verify_family` validates family lifetime/revocation and returns the local identity with its delivery bound; it does not depend on a live upstream login session.
+
+Local access admission returns its identity and grant authorization from one validated transaction. The outbound policy is captured alongside that context in memory: later policy edits do not change an admitted send, and no durable policy snapshot is added. Normal local sends, broker calls and stored reply receipt/reservation recovery keep the captured context through bounded completion. Custody read/ACK and reply-target ownership lookup with its pre-effect recheck keep the effect-point grant/revision fence. Disable before target lookup refuses a new reply with no reservation or effect, and Events subscribe/renew freshly verifies before creating durable wake authority. Remote verification still introspects once at entry and checks captured expiry/current grant at effects. These distinctions do not expose an identity constructor to handlers or request metadata.
+
+Kanidm 1.11.2 was measured to return the same active introspection result with a wrong lookup Basic secret. Its configured header is compatibility rather than proof of caller authentication. Exact introspected issuer, subject, audience, hosted client, scope and lifetime checks still apply. Keycloak's own lookup authentication and the gateway AS's mandatory downstream `client_secret_basic` remain real controls.

@@ -2,7 +2,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 use xmsg_mcp_gateway::grants::Store;
 
-const COMMANDS: [&str; 7] = [
+const COMMANDS: [&str; 8] = [
     "migrate-custody",
     "migrate-custody-summaries",
     "migrate-outbound",
@@ -10,6 +10,7 @@ const COMMANDS: [&str; 7] = [
     "migrate-events",
     "migrate-profiles",
     "migrate-attachments",
+    "migrate-authorization-server",
 ];
 fn run(file: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_xmsg-mcp-gateway"))
@@ -54,6 +55,9 @@ fn complete(file: &Path, key: &Path) {
         .status
         .success());
     assert!(run(file, &["migrate-attachments", "--if-needed"])
+        .status
+        .success());
+    assert!(run(file, &["migrate-authorization-server", "--if-needed"])
         .status
         .success());
 }
@@ -111,6 +115,9 @@ fn if_needed_chain_migrates_and_all_completed_commands_are_byte_identical_noops(
         .status
         .success());
     assert!(run(&file, &["migrate-attachments", "--if-needed"])
+        .status
+        .success());
+    assert!(run(&file, &["migrate-authorization-server", "--if-needed"])
         .status
         .success());
     for command in COMMANDS {
@@ -243,7 +250,7 @@ fn migrations_pending_matches_shared_predicates_without_writes() {
             "inspection wrote state"
         );
     };
-    inspect(b"migrate-custody\nmigrate-outbound\nmigrate-retirement\nmigrate-custody-summaries\nmigrate-events\nmigrate-profiles\nmigrate-attachments\n", 10);
+    inspect(b"migrate-custody\nmigrate-outbound\nmigrate-retirement\nmigrate-custody-summaries\nmigrate-events\nmigrate-profiles\nmigrate-attachments\nmigrate-authorization-server\n", 10);
     std::fs::remove_file(&file).unwrap();
     complete(&file, &key(dir.path()));
     inspect(b"", 0);
@@ -330,7 +337,7 @@ fn migrations_pending_keeps_one_readonly_snapshot_during_migration() {
     release_tx.send(()).unwrap();
     assert_eq!(
         inspector.join().unwrap().len(),
-        7,
+        8,
         "mixed migration snapshots"
     );
     assert_eq!(
@@ -343,7 +350,8 @@ fn migrations_pending_keeps_one_readonly_snapshot_during_migration() {
             "migrate-retirement",
             "migrate-events",
             "migrate-profiles",
-            "migrate-attachments"
+            "migrate-attachments",
+            "migrate-authorization-server"
         ]
     );
 }

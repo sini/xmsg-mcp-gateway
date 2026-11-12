@@ -21,6 +21,17 @@ use super::provider;
 
 pub const HAPPY_DISPATCH_TIMEOUT_MS: u64 = 5000;
 
+static TRACING_BASELINE: std::sync::Once = std::sync::Once::new();
+pub fn initialize_tracing_baseline() {
+    TRACING_BASELINE.call_once(|| {
+        let _ =
+            tracing::subscriber::set_global_default(tracing::subscriber::NoSubscriber::default());
+    });
+}
+pub fn tracing_baseline_initialized() -> bool {
+    TRACING_BASELINE.is_completed()
+}
+
 pub struct Fixture {
     pub started: Instant,
     pub keys: provider::TlsFixture,
@@ -52,13 +63,7 @@ pub fn private_file(file: &Path, bytes: &[u8]) {
 impl Fixture {
     pub fn new() -> Self {
         let started = Instant::now();
-        // A registered default prevents Interest::never when a lone inactive probe hits a callsite.
-        static TRACING: std::sync::Once = std::sync::Once::new();
-        TRACING.call_once(|| {
-            let _ = tracing::subscriber::set_global_default(
-                tracing::subscriber::NoSubscriber::default(),
-            );
-        });
+        initialize_tracing_baseline();
         let keys = provider::TlsFixture::new();
         let binding = Binding {
             service: "gateway".into(),
@@ -254,6 +259,7 @@ fn join_provider(worker: thread::JoinHandle<()>, phase: &Mutex<&'static str>) {
 
 #[derive(Clone, Default)]
 pub struct Probe {
+    pub grant_queries: Arc<AtomicUsize>,
     pub response: Arc<Mutex<Option<(u16, String, u128)>>>,
     pub opens: Arc<AtomicUsize>,
     pub dispatches: Arc<AtomicUsize>,
@@ -266,6 +272,7 @@ impl Subscriber for Probe {
         matches!(
             metadata.target(),
             "gateway_policy_store"
+                | "gateway_grant_authorize"
                 | "gateway_dispatch"
                 | "gateway_registration"
                 | "gateway_bus_health"
@@ -281,6 +288,9 @@ impl Subscriber for Probe {
     fn exit(&self, _: &Id) {}
     fn event(&self, event: &Event<'_>) {
         match event.metadata().target() {
+            "gateway_grant_authorize" => {
+                self.grant_queries.fetch_add(1, Ordering::SeqCst);
+            }
             "gateway_policy_store" => {
                 self.opens.fetch_add(1, Ordering::SeqCst);
             }

@@ -323,7 +323,7 @@ CASES.append(
     (
         "scoped-trace-observation",
         "tests/common/serving_fixture.rs",
-        "tracing::subscriber::set_global_default(\n                tracing::subscriber::NoSubscriber::default(),\n            )",
+        "tracing::subscriber::set_global_default(tracing::subscriber::NoSubscriber::default())",
         "Ok::<(), ()>(())",
         "messaging",
         "ordered_store_open_without_a_dispatcher_preserves_scoped_request_counts",

@@ -74,8 +74,8 @@ CASES = [
     ),
     (
         "grant-recheck",
-        "let grant = store.authorize(&identity)?;",
-        'let grant = Ok::<Authorization, GrantError>(Authorization { grant_id: "cached".into(), revision: 2 })?;',
+        "None => store.authorize(&identity)?,",
+        'None => Authorization { grant_id: "cached".into(), revision: 2 },',
         "grant_is_rechecked_after_discovery",
         "disabled grant was accepted",
     ),
@@ -90,7 +90,7 @@ authority = SOURCE[authority_start:authority_end]
 CASES += [
     (
         "post-policy-expiry",
-        "if now >= identity.expires_at()",
+        "if identity.admitted_authority().is_none() && now >= identity.expires_at()",
         "if false",
         "token_expiry_during_policy_wait_prevents_dispatch",
         "expired token reached dispatch",
@@ -111,8 +111,8 @@ CASES += [
     ),
     (
         "body-bound",
-        "to_bytes(request.into_body(), app.max_request_body_bytes)",
-        "to_bytes(request.into_body(), usize::MAX)",
+        "match to_bytes(request.into_body(), app.max_request_body_bytes).await {",
+        "match to_bytes(request.into_body(), usize::MAX).await {",
         "http_host_origin_body_and_method_guards_hold",
         "oversized MCP request was accepted",
     ),

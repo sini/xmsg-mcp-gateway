@@ -16,6 +16,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    CutoverEvents {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        from: String,
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        operator: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        abandon_unread: bool,
+    },
     Serve {
         #[arg(long)]
         config: PathBuf,
@@ -55,6 +69,10 @@ enum Command {
     Init,
     MigrationsPending,
     MigrateAttachments {
+        #[arg(long)]
+        if_needed: bool,
+    },
+    MigrateAuthorizationServer {
         #[arg(long)]
         if_needed: bool,
     },
@@ -115,6 +133,8 @@ enum Command {
 
 #[derive(Debug, thiserror::Error)]
 enum CommandError {
+    #[error(transparent)]
+    AuthorizationServer(#[from] xmsg_mcp_gateway::authorization_server::Error),
     #[error("--state is required for owner grant commands")]
     MissingState,
     #[error("--key-file is required when Events migration is needed")]
@@ -149,6 +169,39 @@ enum CommandError {
 
 async fn run(cli: Cli) -> Result<(), CommandError> {
     match (cli.state, cli.command) {
+        (
+            None,
+            Command::CutoverEvents {
+                config,
+                from,
+                to,
+                operator,
+                reason,
+                abandon_unread,
+            },
+        ) => {
+            match xmsg_mcp_gateway::serving::cutover_events(
+                &config,
+                &from,
+                &to,
+                &operator,
+                &reason,
+                abandon_unread,
+            )? {
+                xmsg_mcp_gateway::authorization_server::Cutover::Complete => {
+                    println!("Events cutover recorded")
+                }
+                xmsg_mcp_gateway::authorization_server::Cutover::Busy => {
+                    println!("service operation busy");
+                    std::process::exit(4)
+                }
+                xmsg_mcp_gateway::authorization_server::Cutover::Unread { from, to } => {
+                    println!("unread from={from} to={to}");
+                    std::process::exit(3)
+                }
+            }
+        }
+
         (state, Command::Serve { config }) => {
             if state.is_some() {
                 return Err(CommandError::UnexpectedState);
@@ -235,6 +288,18 @@ async fn run(cli: Cli) -> Result<(), CommandError> {
             }
             store.migrate_attachments()?;
             println!("attachment reference metadata migrated");
+        }
+        (Some(state), Command::MigrateAuthorizationServer { if_needed }) => {
+            let mut store = Store::open(&state)?;
+            if if_needed
+                && store
+                    .migration_applied(xmsg_mcp_gateway::grants::Migration::AuthorizationServer)?
+            {
+                println!("already migrated");
+                return Ok(());
+            }
+            store.migrate_authorization_server()?;
+            println!("authorization server schema migrated");
         }
         (Some(state), Command::MigrateProfiles { if_needed }) => {
             let mut store = Store::open(&state)?;
@@ -359,6 +424,7 @@ async fn run(cli: Cli) -> Result<(), CommandError> {
             let next = Store::open(&state)?.set_enabled(&id, revision, false)?;
             println!("grant disabled at revision {next}");
         }
+        (Some(_), Command::CutoverEvents { .. }) => return Err(CommandError::UnexpectedState),
         (None, _) => return Err(CommandError::MissingState),
     }
     Ok(())
@@ -387,7 +453,7 @@ where
 {
     use tracing_subscriber::prelude::*;
     let filter: tracing_subscriber::filter::Targets = explicit
-        .unwrap_or("warn,gateway_dispatch=info,gateway_events=info")
+        .unwrap_or("warn,gateway_dispatch=info,gateway_events=info,gateway_oauth_refresh=info,gateway_oauth_authentication=info")
         .parse()
         .map_err(|_| LoggingConfigurationError)?;
     Ok(tracing_subscriber::registry().with(
@@ -471,6 +537,8 @@ mod logging_tests {
                 || {
                     tracing::info!(target:"gateway_dispatch",operation="xmsg_send",class="pre_effect_unavailable",kind="not_found","dispatch outcome");
                     tracing::info!(target:"gateway_events",class="subscription",reason="enabled","Events default control");
+                    tracing::info!(target:"gateway_oauth_refresh",class="rotate","OAuth refresh default control");
+                    tracing::info!(target:"gateway_oauth_authentication",class="invalid_client","OAuth authentication default control");
                     tracing::info!(target:"gateway_registration",address="CANARY_ADDRESS_34","CANARY_REGISTRATION_34");
                     tracing::warn!(target:"default_warning_control","existing warning retained");
                 },
@@ -482,6 +550,11 @@ mod logging_tests {
                 "actual subscriber ignored default/explicit filter: {text}"
             );
             assert_eq!(text.contains("Events default control"), visible);
+            assert_eq!(text.contains("OAuth refresh default control"), visible);
+            assert_eq!(
+                text.contains("OAuth authentication default control"),
+                visible
+            );
             assert!(
                 !text.contains("CANARY_"),
                 "default subscriber exposed other INFO data: {text}"

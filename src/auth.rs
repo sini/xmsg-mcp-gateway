@@ -15,8 +15,9 @@ use crate::grants::exact_audience;
 
 const MAX_RESPONSE: u64 = 65_536;
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(serde::Serialize))]
 pub struct VerifierConfig {
     pub service: String,
     pub issuer: String,
@@ -41,52 +42,15 @@ pub enum Error {
     Configuration,
     #[error("invalid bearer credential")]
     InvalidToken,
+    #[error("authorization grant disabled")]
+    Denied,
     #[error("identity provider unavailable")]
     Unavailable,
 }
 
-#[derive(Debug)]
-pub struct VerifiedIdentity {
-    service: String,
-    issuer: String,
-    resource: String,
-    subject: String,
-    hosted_client: String,
-    expires_at: u64,
-    audience: String,
-}
-
-impl VerifiedIdentity {
-    pub fn service(&self) -> &str {
-        &self.service
-    }
-    pub fn issuer(&self) -> &str {
-        &self.issuer
-    }
-    pub fn resource(&self) -> &str {
-        &self.resource
-    }
-    pub fn subject(&self) -> &str {
-        &self.subject
-    }
-    pub fn hosted_client(&self) -> &str {
-        &self.hosted_client
-    }
-    pub fn same_profile(&self, other: &Self) -> bool {
-        self.service == other.service
-            && self.issuer == other.issuer
-            && self.resource == other.resource
-            && self.subject == other.subject
-            && self.hosted_client == other.hosted_client
-            && self.audience == other.audience
-    }
-    pub fn audience(&self) -> &str {
-        &self.audience
-    }
-    pub fn expires_at(&self) -> u64 {
-        self.expires_at
-    }
-}
+#[path = "auth/identity.rs"]
+mod identity;
+pub use identity::VerifiedIdentity;
 
 #[derive(Clone, Debug)]
 pub(crate) struct VerifiedContext {
@@ -120,6 +84,9 @@ pub struct Verifier {
     profiles: Vec<ProfileVerifier>,
     route_claims: bool,
     opaque_default: Option<usize>,
+    local: Option<Arc<LocalProfile>>,
+    advertised: Vec<bool>,
+    local_advertised: bool,
 }
 
 #[derive(Deserialize)]
@@ -163,6 +130,9 @@ impl Verifier {
             profiles: vec![ProfileVerifier::from_config(config)?],
             route_claims: false,
             opaque_default: None,
+            local: None,
+            advertised: vec![true],
+            local_advertised: true,
         })
     }
 
@@ -207,6 +177,7 @@ impl Verifier {
                 return Err(Error::Configuration);
             }
         }
+        let configs_len = configs.len();
         Ok(Self {
             profiles: configs
                 .into_iter()
@@ -214,6 +185,9 @@ impl Verifier {
                 .collect::<Result<_, _>>()?,
             route_claims: true,
             opaque_default,
+            local: None,
+            advertised: vec![true; configs_len],
+            local_advertised: true,
         })
     }
 
@@ -227,18 +201,35 @@ impl Verifier {
                 subject: profile.config.subject.clone(),
                 hosted_client: profile.config.hosted_client.clone(),
             })
+            .chain(self.local.iter().map(|local| local.server.binding.clone()))
             .collect()
     }
 
     pub fn resource(&self) -> &str {
-        &self.profiles[0].config.resource
+        self.profiles
+            .first()
+            .map(|p| p.config.resource.as_str())
+            .unwrap_or_else(|| {
+                self.local
+                    .as_ref()
+                    .unwrap()
+                    .server
+                    .binding
+                    .resource
+                    .as_str()
+            })
     }
 
     pub fn issuers(&self) -> Vec<String> {
         let mut issuers = Vec::new();
-        for profile in &self.profiles {
-            if !issuers.contains(&profile.config.issuer) {
+        for (index, profile) in self.profiles.iter().enumerate() {
+            if self.advertised[index] && !issuers.contains(&profile.config.issuer) {
                 issuers.push(profile.config.issuer.clone());
+            }
+        }
+        if let Some(local) = &self.local {
+            if self.local_advertised && !issuers.contains(&local.server.binding.issuer) {
+                issuers.push(local.server.binding.issuer.clone());
             }
         }
         issuers
@@ -253,6 +244,13 @@ impl Verifier {
                 }
             }
         }
+        if let Some(local) = &self.local {
+            for scope in &local.server.scopes {
+                if !scopes.contains(scope) {
+                    scopes.push(scope.clone());
+                }
+            }
+        }
         scopes
     }
 
@@ -261,13 +259,17 @@ impl Verifier {
             .iter()
             .map(|profile| profile.config.timeout_ms)
             .max()
-            .unwrap()
+            .unwrap_or(0)
     }
 
     pub fn requires_scope(&self, scope: &str) -> bool {
         self.profiles
             .iter()
             .all(|profile| profile.requires_scope(scope))
+            && self
+                .local
+                .as_ref()
+                .is_none_or(|local| local.server.scopes.iter().any(|s| s == scope))
     }
 
     pub fn requires_scope_for_binding(
@@ -283,6 +285,8 @@ impl Verifier {
                 && config.subject == binding.subject
                 && config.hosted_client == binding.hosted_client
                 && profile.requires_scope(scope)
+        }) || self.local.as_ref().is_some_and(|local| {
+            &local.server.binding == binding && local.server.scopes.iter().any(|s| s == scope)
         })
     }
 
@@ -296,6 +300,8 @@ impl Verifier {
                 && config.hosted_client == identity.hosted_client
                 && config.audience.as_deref().unwrap_or(&config.resource) == identity.audience
                 && profile.requires_scope(scope)
+        }) || self.local.as_ref().is_some_and(|local| {
+            local.matches(identity) && local.server.scopes.iter().any(|s| s == scope)
         })
     }
 
@@ -341,6 +347,22 @@ impl Verifier {
                     })
                     .ok_or(Error::InvalidToken)?
             } else {
+                if let Some(local) = &self.local {
+                    if !crate::authorization_server::token_shape(token, "xgw_at_") {
+                        return Err(Error::InvalidToken);
+                    }
+                    let local = local.clone();
+                    let token = token.to_owned();
+                    let subscriber = tracing::dispatcher::get_default(Clone::clone);
+                    return tokio::task::spawn_blocking(move || {
+                        tracing::dispatcher::with_default(&subscriber, || {
+                            let store = local.server.store().map_err(local_error)?;
+                            local.admit(&store, &token).map(|(identity, _)| identity)
+                        })
+                    })
+                    .await
+                    .map_err(|_| Error::Unavailable)?;
+                }
                 &self.profiles[self.opaque_default.ok_or(Error::InvalidToken)?]
             }
         } else {
@@ -520,6 +542,154 @@ impl ProfileVerifier {
             hosted_client: self.config.hosted_client.clone(),
             expires_at: exp,
             audience: audience.to_owned(),
+            token_family: None,
+            admission: None,
+            admission_policy: None,
         })
+    }
+}
+
+pub(crate) struct LocalProfile {
+    pub(crate) server: Arc<crate::authorization_server::Server>,
+}
+fn local_error(error: crate::authorization_server::Error) -> Error {
+    match error {
+        crate::authorization_server::Error::InvalidGrant => Error::InvalidToken,
+        crate::authorization_server::Error::Denied => Error::Denied,
+        _ => Error::Unavailable,
+    }
+}
+impl LocalProfile {
+    pub(crate) fn new(server: Arc<crate::authorization_server::Server>) -> Self {
+        Self { server }
+    }
+    fn identity(
+        &self,
+        expires: i64,
+        family: Option<String>,
+        admission: Option<crate::grants::Authorization>,
+    ) -> VerifiedIdentity {
+        let binding = &self.server.binding;
+        VerifiedIdentity {
+            service: binding.service.clone(),
+            issuer: binding.issuer.clone(),
+            resource: binding.resource.clone(),
+            subject: binding.subject.clone(),
+            hosted_client: binding.hosted_client.clone(),
+            audience: binding.resource.clone(),
+            expires_at: expires.max(0) as u64,
+            token_family: family,
+            admission: admission.map(|authority| (authority.grant_id, authority.revision)),
+            admission_policy: None,
+        }
+    }
+    fn matches(&self, identity: &VerifiedIdentity) -> bool {
+        let b = &self.server.binding;
+        b.service == identity.service
+            && b.issuer == identity.issuer
+            && b.resource == identity.resource
+            && b.subject == identity.subject
+            && b.hosted_client == identity.hosted_client
+            && identity.audience == b.resource
+    }
+    pub(crate) fn local_identity(
+        &self,
+        login: &VerifiedIdentity,
+    ) -> Result<VerifiedIdentity, Error> {
+        if login.subject() != self.server.binding.subject {
+            return Err(Error::InvalidToken);
+        }
+        Ok(self.identity(self.server.clock.wall() + 60, None, None))
+    }
+    pub(crate) fn admit(
+        &self,
+        store: &crate::grants::Store,
+        token: &str,
+    ) -> Result<(VerifiedIdentity, crate::grants::Authorization), Error> {
+        let admitted = self
+            .server
+            .admit_in_store(store, token)
+            .map_err(local_error)?;
+        let mut identity = self.identity(
+            admitted.expires,
+            Some(admitted.family),
+            Some(admitted.authority.clone()),
+        );
+        identity.admission_policy = Some(admitted.policy);
+        Ok((identity, admitted.authority))
+    }
+    pub(crate) fn verify_family(&self, id: &str) -> Result<VerifiedIdentity, Error> {
+        let (family, expires) = self.server.verify_family(id).map_err(local_error)?;
+        Ok(self.identity(expires, Some(family.id), None))
+    }
+}
+impl Verifier {
+    pub(crate) fn with_local(
+        mut self,
+        server: Arc<crate::authorization_server::Server>,
+        advertised: bool,
+    ) -> Result<Self, Error> {
+        if self.local.is_some()
+            || self.opaque_default.is_some()
+            || self
+                .bindings()
+                .iter()
+                .any(|binding| binding == &server.binding)
+            || self.profiles.iter().any(|p| {
+                p.config.service != server.binding.service
+                    || p.config.resource != server.binding.resource
+                    || (p.config.issuer == server.binding.issuer
+                        && p.config.hosted_client == server.binding.hosted_client
+                        && p.config.audience.as_deref().unwrap_or(&p.config.resource)
+                            == server.binding.resource)
+            })
+        {
+            return Err(Error::Configuration);
+        }
+        self.local = Some(Arc::new(LocalProfile::new(server)));
+        self.local_advertised = advertised;
+        self.route_claims = true;
+        Ok(self)
+    }
+    pub(crate) fn local_only(
+        server: Arc<crate::authorization_server::Server>,
+        advertised: bool,
+    ) -> Self {
+        Self {
+            profiles: vec![],
+            route_claims: true,
+            opaque_default: None,
+            local: Some(Arc::new(LocalProfile::new(server))),
+            advertised: vec![],
+            local_advertised: advertised,
+        }
+    }
+    pub(crate) fn set_advertised(&mut self, advertised: Vec<bool>) {
+        self.advertised = advertised;
+    }
+    pub(crate) fn local_server(&self) -> Option<&Arc<crate::authorization_server::Server>> {
+        self.local.as_ref().map(|l| &l.server)
+    }
+    pub(crate) fn verify_family(&self, id: &str) -> Result<VerifiedIdentity, Error> {
+        self.local
+            .as_ref()
+            .ok_or(Error::InvalidToken)?
+            .verify_family(id)
+    }
+}
+
+impl VerifiedIdentity {
+    pub(crate) fn custody_authority(
+        &self,
+        store: &crate::grants::Store,
+    ) -> Result<crate::grants::Authorization, crate::grants::Error> {
+        let current = store.authorize(self)?;
+        if self
+            .admitted_authority()
+            .is_some_and(|captured| captured != current)
+        {
+            return Err(crate::grants::Error::Denied);
+        }
+        Ok(current)
     }
 }

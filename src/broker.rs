@@ -261,14 +261,20 @@ pub(crate) fn lookup(
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| crate::outbound::Error::Configuration)?
         .as_secs();
-    if identity.expires_at() <= now {
+    if identity.admitted_authority().is_none() && identity.expires_at() <= now {
         return Err(crate::outbound::Error::Authentication(
             crate::auth::Error::InvalidToken,
         ));
     }
     let _transaction = store.connection.unchecked_transaction()?;
-    let authority = store.authorize(identity)?;
-    let policy = store.outbound_policy(&authority.grant_id)?;
+    let authority = match identity.admitted_authority() {
+        Some(authority) => authority,
+        None => store.authorize(identity)?,
+    };
+    let policy = match identity.admitted_policy() {
+        Some(policy) => policy.clone(),
+        None => store.outbound_policy(&authority.grant_id)?,
+    };
     let owner = crate::custody::fingerprint(&[
         identity.service(),
         identity.issuer(),
@@ -312,6 +318,7 @@ pub(crate) fn lookup(
     let (service, node) = config
         .origin()
         .ok_or(crate::outbound::Error::Configuration)?;
+    identity.custody_authority(store)?;
     let (texts, unavailable) = crate::reads::correlated(
         store,
         identity,

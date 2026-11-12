@@ -87,7 +87,7 @@ pub(crate) fn dispatch(
         bus,
         mailbox,
         identity,
-        authority: store.authorize(identity)?,
+        authority: identity.custody_authority(&store)?,
     };
     let version: i64 = store
         .connection

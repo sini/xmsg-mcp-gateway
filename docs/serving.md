@@ -573,3 +573,15 @@ rollback requires the pre-migration backup. Inspection itself needs no backup.
 ## Multiple authentication profiles
 
 Planned, not yet released: [authentication profiles](auth-profiles.md) describes exact issuer/client/audience selection, the explicit grant migration, configuration compatibility and owner-run Events cutover. Use `verifier_profiles` instead of `verifier` when configuring more than one accepted binding.
+
+## Planned authorization-server configuration and commands
+
+The optional `authorization_server` object and exactly one local `verifier_profiles` entry enable the [gateway OAuth authority](authorization-server.md). That guide is the field reference, example, lifetime/cap reference and owner cutover runbook. Legacy `verifier` configurations without this object retain their existing behavior. Unknown fields and incomplete local/AS combinations refuse startup; relative upstream lookup-secret, root-certificate, downstream client-secret and liveness-token paths resolve against the owner file directory.
+
+The new explicit owner command `--state <store> migrate-authorization-server [--if-needed]` follows the required existing schema migrations, including `migrate-profiles`. Read `migrations-pending` afterwards; serving does not migrate implicitly. The migration adds hash-only OAuth authority/family state and changes Events to store exactly one of an encrypted legacy bearer or a local `token_family`.
+
+`cutover-events --config <owner-file> --from <grant> --to <grant> --operator <operator> --reason <reason> [--abandon-unread]` obtains state from the owner file, not `--state`. Run it offline in an owner maintenance window. Busy exits 4; unread exits 3; success exits 0. It guards unread content on both grants, writes a durable marker and audits explicit abandonment. Startup and custody acceptance enforce the latest marker's selected grant. Follow the [read-back and rollback procedure](authorization-server.md#owner-run-migration-cutover-and-rollback); this command does not move existing subscriptions or custody.
+
+Public HTTPS access to AS discovery and `/oauth/*` is required even for tunneled MCP. Omit query strings from ingress access logs for `/oauth/*`; never log callback code/state. The hosted flow remains planned until its owner-run acceptance; existing 2026-11-10 hosted observations concern the legacy path.
+
+For local AS calls, normal sends, broker calls and stored reply receipt/reservation recovery use captured admission identity/grant and in-memory outbound policy through the request budget; later policy edits do not alter an admitted send. Custody read/ACK and reply-target ownership lookup with its pre-effect recheck retain the effect-point grant/revision fence. Disable before reply-target lookup refuses a new reply without a reservation or effect. Events subscribe/renew separately freshly verifies future wake authority. No durable policy snapshot or eligibility history is added; remote-profile behavior is unchanged.

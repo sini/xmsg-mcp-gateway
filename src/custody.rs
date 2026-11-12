@@ -560,6 +560,18 @@ impl Store {
         if !(CUSTODY_SCHEMA_VERSION..=MAX_SUPPORTED_SCHEMA_VERSION).contains(&version) {
             return Err(Error::MigrationRequired);
         }
+        if version >= crate::authorization_server::SCHEMA_VERSION {
+            let selected: Option<String> = tx
+                .query_row(
+                    "SELECT to_grant FROM events_cutover ORDER BY seq DESC LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if selected.is_some_and(|id| id != scope.grant_id) {
+                return Ok(Acceptance::Deferred);
+            }
+        }
         let marker: i64 = tx.pragma_query_value(None, "application_id", |r| r.get(0))?;
         if marker != crate::grants::SUMMARY_APPLICATION_ID {
             return Err(Error::MigrationRequired);

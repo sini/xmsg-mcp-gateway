@@ -172,10 +172,36 @@ class MutationGatesTests(unittest.TestCase):
         )
 
     def test_complete_inventory_and_execution_modes(self):
-        self.assertEqual(len(self.suites), 21)
-        self.assertEqual(sum(s["count"] for s in self.suites), 316)
+        self.assertEqual(len(self.suites), 22)
+        self.assertEqual(sum(s["count"] for s in self.suites), 434)
         modes = {(s["script"], tuple(s["args"])) for s in self.suites}
         self.assertIn(("scripts/reservation_lifetime_mutants.py", ("--live",)), modes)
+
+    def test_authorization_server_inventory_and_all_shared_auth_sources_are_covered(
+        self,
+    ):
+        suite = next(s for s in self.suites if s["id"] == "authorization_server")
+        self.assertEqual(suite["count"], 118)
+        self.assertEqual(len(suite["required_output"]), 236)
+        self.assertEqual(
+            suite["completion"], "authorization-server-mutants-complete:118/118"
+        )
+        for filename in [
+            "src/auth/identity.rs",
+            "src/authorization_server/store.rs",
+            "src/authorization_server/property_tests.rs",
+        ]:
+            self.assertEqual(
+                gates.select(self.suites, [filename]), [s["id"] for s in self.suites]
+            )
+        for label in [
+            "reuse-family-update",
+            "mark-rowcount",
+            "log-oauth-uri",
+            "admission-split-check-mark",
+            "clock-partial-revoke",
+        ]:
+            self.assertIn(label, suite["labels"])
 
     def test_profiles_have_full_source_and_named_output_coverage(self):
         suite = next(s for s in self.suites if s["id"] == "profiles")
@@ -237,7 +263,7 @@ class MutationGatesTests(unittest.TestCase):
         self.assertIn("dispatch_logging", gates.select(self.suites, ["src/serving.rs"]))
         self.assertIn("broker", gates.select(self.suites, ["tests/broker_bridge.rs"]))
         self.assertEqual(
-            len(gates.select(self.suites, ["tests/common/provider.rs"])), 21
+            len(gates.select(self.suites, ["tests/common/provider.rs"])), 22
         )
         self.assertEqual(gates.select(self.suites, ["phase1/worker.py"]), ["python"])
 
