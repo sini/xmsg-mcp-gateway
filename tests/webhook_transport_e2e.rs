@@ -1,5 +1,5 @@
-//! Isolated callback-transport binary: libc shims never enter another test binary.
-#![cfg(unix)]
+//! Linux-only isolated binary; macOS does not pass the socket-shim control.
+#![cfg(target_os = "linux")]
 
 use std::ffi::{CStr, CString};
 use std::io::{Read, Write};
@@ -346,14 +346,16 @@ fn run_child(mode: &str) {
         .iter()
         .map(|count| count.load(Ordering::SeqCst))
         .collect();
-    println!(
-        "mode={mode} requests={counts:?}\n{}",
-        String::from_utf8_lossy(&output.stdout)
-    );
+    let diagnostics = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.starts_with("dns first="))
+        .collect::<Vec<_>>()
+        .join("\n");
+    println!("mode={mode} requests={counts:?}\n{diagnostics}");
     assert!(
         output.status.success(),
         "callback child failed: {}\n{}\nrequests={counts:?}",
-        String::from_utf8_lossy(&output.stdout),
+        diagnostics,
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
