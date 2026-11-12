@@ -164,6 +164,23 @@ fn retry_deadline(
     Ok(i64::try_from(base.saturating_add(delay.max(requested))).unwrap_or(i64::MAX))
 }
 
+fn park_credential(db: &rusqlite::Connection, item: &Candidate, at: i64) -> Result<Tick, Error> {
+    let parked: bool = db.query_row(
+        "SELECT COALESCE(last_error='credential_required',0) FROM custody_outbox WHERE event_id=?1",
+        [&item.id],
+        |r| r.get(0),
+    )?;
+    db.execute("UPDATE custody_outbox SET last_error='credential_required',next_attempt=?2 WHERE event_id=?1",params![item.id,at.saturating_add(5)])?;
+    if !parked {
+        crate::event_diagnostic::delivery(
+            "token_parked",
+            Some("credential_required"),
+            item.attempts,
+        );
+    }
+    Ok(Tick::CredentialRequired)
+}
+
 pub(crate) async fn tick(events: &Events, bus: &str, mailbox: &str) -> Result<Tick, Error> {
     let store = Store::open_for_dispatch(&events.file)?;
     store.require_events_ready(&events.key)?;
@@ -202,16 +219,7 @@ pub(crate) async fn tick(events: &Events, bus: &str, mailbox: &str) -> Result<Ti
     let identity = match events.verifier.verify(&bearer).await {
         Ok(identity) => identity,
         Err(_) => {
-            let parked:bool=store.connection.query_row("SELECT COALESCE(last_error='credential_required',0) FROM custody_outbox WHERE event_id=?1",[&item.id],|r|r.get(0))?;
-            store.connection.execute("UPDATE custody_outbox SET last_error='credential_required',next_attempt=?2 WHERE event_id=?1",params![item.id,at.saturating_add(5)])?;
-            if !parked {
-                crate::event_diagnostic::delivery(
-                    "token_parked",
-                    Some("credential_required"),
-                    item.attempts,
-                );
-            }
-            return Ok(Tick::CredentialRequired);
+            return park_credential(&store.connection, &item, at);
         }
     };
     if identity.service() != sub.service
@@ -223,7 +231,7 @@ pub(crate) async fn tick(events: &Events, bus: &str, mailbox: &str) -> Result<Ti
             .verifier
             .requires_scope_for(&identity, "events:subscribe")
     {
-        return Ok(Tick::CredentialRequired);
+        return park_credential(&store.connection, &item, at);
     }
     let authority = store.authorize(&identity)?;
     if authority.grant_id != sub.grant || authority.revision != sub.revision {

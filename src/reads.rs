@@ -206,7 +206,9 @@ pub(crate) fn dispatch(
     if version >= crate::grants::EVENTS_SCHEMA_VERSION {
         let owner = crate::events::owner_key(identity, bus, mailbox, &scope.authority.grant_id);
         let state = crate::event_status::subscription_state(&store.connection, &owner, now)?;
-        value["events_status"] = json!({"subscription":{"state":state}});
+        let mut subscription = json!({"state":state});
+        crate::event_status::add_renewal_reason(&mut subscription, state);
+        value["events_status"] = json!({"subscription":subscription});
     }
     Ok(value)
 }

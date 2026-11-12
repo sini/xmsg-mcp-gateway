@@ -356,6 +356,7 @@ impl Events {
         let expires = stamp
             .checked_add(ttl.div_ceil(1000) as i64)
             .ok_or(Error::Arguments)?;
+        let refresh_before = formatted(expires)?;
         let mut old_secret = None;
         let mut rotation_until = 0;
         let mut cached = false;
@@ -365,7 +366,7 @@ impl Events {
                 return Err(Error::Conflict);
             }
             let previous_secret = text(&self.key, &owner, "secret", old.generation, &old.secret)?;
-            // A failed provisional refresh must not erase the existing dual-sign window.
+            // Keep the existing dual-sign window until a verified replacement commits.
             if previous_secret != request.delivery.secret
                 && old.old_secret.is_some()
                 && old.rotation_until > stamp
@@ -431,15 +432,6 @@ impl Events {
                     .seal(&aad(&owner, "old_secret", generation), secret.as_bytes())
             })
             .transpose()?;
-        let changed = if let Some(old) = &old {
-            store.connection.execute("UPDATE event_subscriptions SET id=?1,grant_revision=?2,generation=?3,expires=?4,url=?5,secret=?6,old_secret=?7,bearer=?8,rotation_until=?9,status='verifying',verified_at=NULL WHERE owner_key=?10 AND generation=?11",params![id,authority.revision,generation,expires,sealed_url,sealed_secret,sealed_old,sealed_bearer,rotation_until,owner,old.generation])?
-        } else {
-            store.connection.execute("INSERT INTO event_subscriptions(id,owner_key,service,issuer,resource,subject,hosted_client,bus,mailbox,grant_id,grant_revision,generation,expires,url,secret,old_secret,bearer,rotation_until,status,callback_cursor,observation_checkpoint) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,'verifying',?19,?20)",params![id,owner,identity.service(),identity.issuer(),identity.resource(),identity.subject(),identity.hosted_client(),bus,mailbox,authority.grant_id,authority.revision,generation,expires,sealed_url,sealed_secret,sealed_old,sealed_bearer,rotation_until,callback_cursor,checkpoint])?
-        };
-        if changed != 1 {
-            return Err(Error::Conflict);
-        }
-        crate::event_diagnostic::transition("verifying", 1, 0, 0);
         // The OS lease orders verification with disable/rebind. No SQLite transaction spans this I/O.
         let verified_at = if cached {
             old.as_ref()
@@ -452,7 +444,15 @@ impl Events {
         };
         self.fresh(identity, token, &authority).await?;
         let tx = store.connection.unchecked_transaction()?;
-        if tx.execute("UPDATE event_subscriptions SET status='active',verified_at=?1 WHERE owner_key=?2 AND generation=?3 AND status='verifying' AND grant_revision=?4",params![verified_at,owner,generation,authority.revision])?!=1 {return Err(Error::Conflict)}
+        let changed = if let Some(old) = &old {
+            tx.execute("UPDATE event_subscriptions SET id=?1,grant_revision=?2,generation=?3,expires=?4,url=?5,secret=?6,old_secret=?7,bearer=?8,rotation_until=?9,status='active',verified_at=?12 WHERE owner_key=?10 AND generation=?11",params![id,authority.revision,generation,expires,sealed_url,sealed_secret,sealed_old,sealed_bearer,rotation_until,owner,old.generation,verified_at])?
+        } else {
+            tx.execute("INSERT INTO event_subscriptions(id,owner_key,service,issuer,resource,subject,hosted_client,bus,mailbox,grant_id,grant_revision,generation,expires,url,secret,old_secret,bearer,rotation_until,status,callback_cursor,observation_checkpoint,verified_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,'active',?19,?20,?21)",params![id,owner,identity.service(),identity.issuer(),identity.resource(),identity.subject(),identity.hosted_client(),bus,mailbox,authority.grant_id,authority.revision,generation,expires,sealed_url,sealed_secret,sealed_old,sealed_bearer,rotation_until,callback_cursor,checkpoint,verified_at])?
+        };
+        if changed != 1 {
+            return Err(Error::Conflict);
+        }
+        tx.execute("UPDATE custody_outbox SET last_error=NULL,next_attempt=0 WHERE state='pending' AND last_error='credential_required' AND event_id IN (SELECT c.event_id FROM custody_items c JOIN event_authorizations a ON a.event_id=c.event_id WHERE c.bus=?1 AND c.mailbox=?2 AND c.owner=?3 AND c.grant_id=?4 AND a.dispatch_revision=?5 AND c.text IS NOT NULL AND c.expires_at>?6)",params![bus,mailbox,identity.subject(),authority.grant_id,authority.revision,stamp])?;
         let mut released = tx.execute("UPDATE custody_outbox SET state='pending' WHERE state='held' AND event_id IN (SELECT c.event_id FROM custody_items c JOIN event_authorizations a ON a.event_id=c.event_id WHERE c.bus=?1 AND c.mailbox=?2 AND c.owner=?3 AND c.grant_id=?4 AND a.dispatch_revision=?5 AND c.text IS NOT NULL AND c.expires_at>?6)",params![bus,mailbox,identity.subject(),authority.grant_id,authority.revision,stamp])?;
         if request.cursor.is_some() && after < callback_cursor {
             released += tx.execute("UPDATE custody_outbox SET state='pending',attempts=0,next_attempt=0,last_error=NULL WHERE state='accepted' AND event_id IN (SELECT c.event_id FROM custody_items c JOIN event_authorizations a ON a.event_id=c.event_id JOIN event_occurrences o ON o.event_id=c.event_id LEFT JOIN event_observations seen ON seen.event_id=c.event_id WHERE c.bus=?1 AND c.mailbox=?2 AND c.owner=?3 AND c.grant_id=?4 AND a.dispatch_revision=?5 AND c.text IS NOT NULL AND c.expires_at>?6 AND o.seq>?7 AND seen.event_id IS NULL)",params![bus,mailbox,identity.subject(),authority.grant_id,authority.revision,stamp,after])?;
@@ -470,7 +470,7 @@ impl Events {
             released,
         );
         Ok(
-            json!({"id":id,"refreshBefore":formatted(expires)?,"cursor":crate::event_cursor::encode(&self.key,&owner,after)?,"truncated":truncated}),
+            json!({"id":id,"refreshBefore":refresh_before,"cursor":crate::event_cursor::encode(&self.key,&owner,after)?,"truncated":truncated}),
         )
     }
     pub async fn unsubscribe(

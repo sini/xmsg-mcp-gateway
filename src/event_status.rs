@@ -32,8 +32,10 @@ impl Events {
             .unwrap_or(0);
         let observation_checkpoint = crate::event_cursor::encode(&self.key, &owner, observed)?;
         let subscription=subscription.map(|(_state,generation,expires,callback,observed)| ->Result<Value,Error> {
-            Ok(json!({"state":effective_state,"generation":generation,"refresh_before_unix":expires,
-                "callback_cursor":crate::event_cursor::encode(&self.key,&owner,callback)?,"observation_checkpoint":crate::event_cursor::encode(&self.key,&owner,observed)?}))
+            let mut value = json!({"state":effective_state,"generation":generation,"refresh_before_unix":expires,
+                "callback_cursor":crate::event_cursor::encode(&self.key,&owner,callback)?,"observation_checkpoint":crate::event_cursor::encode(&self.key,&owner,observed)?});
+            add_renewal_reason(&mut value, effective_state);
+            Ok(value)
         }).transpose()?.unwrap_or(json!({"state":"not_subscribed"}));
         let mut states = Map::new();
         let mut statement=store.connection.prepare("SELECT b.state,COUNT(*) FROM custody_outbox b JOIN custody_items c ON c.event_id=b.event_id WHERE c.bus=?1 AND c.mailbox=?2 AND c.owner=?3 AND c.grant_id=?4 GROUP BY b.state")?;
@@ -83,10 +85,23 @@ pub(crate) fn subscription_state(
         .optional()?;
     Ok(match row {
         Some((state, expires)) if state == "active" && expires <= now => "expired",
-        Some((state, _)) if state == "active" => "active",
+        Some((state, _)) if state == "active" => {
+            let parked: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM custody_outbox b JOIN custody_items c ON c.event_id=b.event_id JOIN event_authorizations a ON a.event_id=c.event_id JOIN event_subscriptions s ON s.owner_key=?1 WHERE b.state='pending' AND b.last_error='credential_required' AND c.bus=s.bus AND c.mailbox=s.mailbox AND c.owner=s.subject AND c.grant_id=s.grant_id AND a.dispatch_revision=s.grant_revision AND c.text IS NOT NULL AND c.expires_at>?2)", params![owner, now], |row| row.get(0))?;
+            if parked {
+                "renewal_required"
+            } else {
+                "active"
+            }
+        }
         Some((state, _)) if state == "verifying" => "verifying",
         Some((state, _)) if state == "disabled" => "disabled",
         Some(_) => "unrecognized",
         None => "not_subscribed",
     })
+}
+
+pub(crate) fn add_renewal_reason(value: &mut Value, state: &str) {
+    if state == "renewal_required" {
+        value["reason"] = json!("credential_required");
+    }
 }

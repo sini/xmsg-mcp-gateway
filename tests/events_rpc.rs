@@ -17,6 +17,7 @@ use xmsg_mcp_gateway::webhook::{self, Transport};
 
 struct Callback {
     calls: AtomicUsize,
+    status: AtomicUsize,
     action: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 impl Transport for Callback {
@@ -41,7 +42,7 @@ impl Transport for Callback {
                 action()
             }
             Ok(webhook::Response {
-                status: 200,
+                status: self.status.load(Ordering::SeqCst) as u16,
                 body: serde_json::to_vec(&json!({"challenge":value["challenge"]})).unwrap(),
                 retry_after: None,
             })
@@ -88,6 +89,7 @@ impl Setup {
         store.migrate_events(&key).unwrap();
         let callback = Arc::new(Callback {
             calls: AtomicUsize::new(0),
+            status: AtomicUsize::new(200),
             action: Mutex::new(None),
         });
         Self {
@@ -157,11 +159,10 @@ async fn revoked_credential_during_challenge_never_activates() {
         .subscribe(&identity, "good-token", "bus", "dot@bus", request(4))
         .await
         .is_err());
-    let status: String = rusqlite::Connection::open(&setup.provider.store_file)
-        .unwrap()
-        .query_row("SELECT status FROM event_subscriptions", [], |r| r.get(0))
-        .unwrap();
-    assert_ne!(status, "active");
+    assert!(
+        subscription_rows(&setup).is_empty(),
+        "failed first subscribe must not persist provisional credentials"
+    );
 }
 #[tokio::test]
 async fn third_secret_rotation_conflicts_inside_the_dual_sign_window() {
@@ -188,6 +189,11 @@ async fn third_secret_rotation_conflicts_inside_the_dual_sign_window() {
 async fn generation_race_and_foreign_identity_do_not_activate() {
     let setup = Setup::new();
     let identity = setup.verifier.verify("good-token").await.unwrap();
+    setup
+        .runtime()
+        .subscribe(&identity, "good-token", "bus", "dot@bus", request(4))
+        .await
+        .unwrap();
     let file = setup.provider.store_file.clone();
     *setup.callback.action.lock().unwrap() = Some(Box::new(move || {
         rusqlite::Connection::open(file)
@@ -197,14 +203,17 @@ async fn generation_race_and_foreign_identity_do_not_activate() {
     }));
     assert!(setup
         .runtime()
-        .subscribe(&identity, "good-token", "bus", "dot@bus", request(4))
+        .subscribe(&identity, "good-token", "bus", "dot@bus", request(5))
         .await
         .is_err());
     let status: String = rusqlite::Connection::open(&setup.provider.store_file)
         .unwrap()
         .query_row("SELECT status FROM event_subscriptions", [], |r| r.get(0))
         .unwrap();
-    assert_ne!(status, "active");
+    assert_eq!(
+        status, "active",
+        "a lost generation race must preserve the old active binding"
+    );
     let mut other = setup.provider.binding.clone();
     other.subject = "another-owner".into();
     let foreign = tokio::task::spawn_blocking(move || {
@@ -752,6 +761,16 @@ async fn failed_rotation_refresh_cannot_discard_a_still_valid_previous_key() {
         .subscribe(&identity, "good-token", "bus", "dot@bus", request(4))
         .await
         .unwrap();
+    setup
+        .runtime()
+        .subscribe(&identity, "good-token", "bus", "dot@bus", request(5))
+        .await
+        .unwrap();
+    rusqlite::Connection::open(&setup.provider.store_file)
+        .unwrap()
+        .execute("UPDATE event_subscriptions SET verified_at=0", [])
+        .unwrap();
+    let before = subscription_rows(&setup);
     let tokens = setup.provider.tokens.clone();
     *setup.callback.action.lock().unwrap() = Some(Box::new(move || {
         tokens.lock().unwrap().get_mut("good-token").unwrap()["active"] = json!(false)
@@ -761,6 +780,11 @@ async fn failed_rotation_refresh_cannot_discard_a_still_valid_previous_key() {
         .subscribe(&identity, "good-token", "bus", "dot@bus", request(5))
         .await
         .is_err());
+    assert_eq!(
+        subscription_rows(&setup),
+        before,
+        "failed cached-key refresh changed the active rotation window"
+    );
     setup
         .provider
         .tokens
@@ -950,4 +974,136 @@ async fn callback_host_log_excludes_path_query_port_and_signing_secret() {
             assert!(!log.contains(canary), "callback log leaked {canary}: {log}");
         }
     }
+}
+
+fn subscription_rows(setup: &Setup) -> Vec<Vec<rusqlite::types::Value>> {
+    let connection = rusqlite::Connection::open(&setup.provider.store_file).unwrap();
+    let mut statement = connection
+        .prepare("SELECT * FROM event_subscriptions ORDER BY owner_key")
+        .unwrap();
+    let columns = statement.column_count();
+    statement
+        .query_map([], |row| (0..columns).map(|index| row.get(index)).collect())
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn atomic_renewal_callback_failure_preserves_every_active_row_column() {
+    let setup = Setup::new();
+    let identity = setup.verifier.verify("good-token").await.unwrap();
+    setup
+        .runtime()
+        .subscribe(&identity, "good-token", "bus", "dot@bus", request(4))
+        .await
+        .unwrap();
+    let before = subscription_rows(&setup);
+    setup.callback.status.store(503, Ordering::SeqCst);
+    let mut renewal = request(5);
+    renewal.ttl_ms = Some(60_000);
+    assert!(matches!(
+        setup
+            .runtime()
+            .subscribe(&identity, "good-token", "bus", "dot@bus", renewal)
+            .await,
+        Err(xmsg_mcp_gateway::events::Error::Callback(
+            webhook::Error::Challenge
+        ))
+    ));
+    assert_eq!(
+        subscription_rows(&setup),
+        before,
+        "failed callback renewal overwrote the active binding"
+    );
+    assert_eq!(setup.callback.calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn atomic_renewal_credential_failure_preserves_every_active_row_column() {
+    let setup = Setup::new();
+    let identity = setup.verifier.verify("good-token").await.unwrap();
+    setup
+        .runtime()
+        .subscribe(&identity, "good-token", "bus", "dot@bus", request(4))
+        .await
+        .unwrap();
+    let before = subscription_rows(&setup);
+    let tokens = setup.provider.tokens.clone();
+    let claims = tokens.lock().unwrap()["good-token"].clone();
+    tokens
+        .lock()
+        .unwrap()
+        .insert("renewal-token".into(), claims);
+    let renewal_identity = setup.verifier.verify("renewal-token").await.unwrap();
+    *setup.callback.action.lock().unwrap() = Some(Box::new(move || {
+        tokens.lock().unwrap().get_mut("renewal-token").unwrap()["active"] = json!(false);
+    }));
+    assert!(setup
+        .runtime()
+        .subscribe(
+            &renewal_identity,
+            "renewal-token",
+            "bus",
+            "dot@bus",
+            request(5)
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        subscription_rows(&setup),
+        before,
+        "failed credential renewal overwrote the active binding"
+    );
+    assert!(
+        setup.verifier.verify("good-token").await.is_ok(),
+        "the old stored bearer must remain valid"
+    );
+}
+
+#[tokio::test]
+async fn atomic_first_subscribe_failure_leaves_no_provisional_row() {
+    for credential_failure in [false, true] {
+        let setup = Setup::new();
+        let identity = setup.verifier.verify("good-token").await.unwrap();
+        if credential_failure {
+            let tokens = setup.provider.tokens.clone();
+            *setup.callback.action.lock().unwrap() = Some(Box::new(move || {
+                tokens.lock().unwrap().get_mut("good-token").unwrap()["active"] = json!(false);
+            }));
+        } else {
+            setup.callback.status.store(503, Ordering::SeqCst);
+        }
+        assert!(setup
+            .runtime()
+            .subscribe(&identity, "good-token", "bus", "dot@bus", request(4))
+            .await
+            .is_err());
+        assert!(subscription_rows(&setup).is_empty(),"failed first subscribe persisted provisional credentials (credential_failure={credential_failure})");
+    }
+}
+
+#[tokio::test]
+async fn atomic_renewal_transaction_failure_preserves_every_active_row_column() {
+    let setup = Setup::new();
+    let identity = setup.verifier.verify("good-token").await.unwrap();
+    setup
+        .runtime()
+        .subscribe(&identity, "good-token", "bus", "dot@bus", request(4))
+        .await
+        .unwrap();
+    let before = subscription_rows(&setup);
+    rusqlite::Connection::open(&setup.provider.store_file).unwrap().execute_batch(
+        "CREATE TRIGGER abort_subscription_activation BEFORE UPDATE OF status ON event_subscriptions WHEN NEW.status='active' BEGIN SELECT RAISE(ABORT,'forced activation failure'); END;"
+    ).unwrap();
+    assert!(setup
+        .runtime()
+        .subscribe(&identity, "good-token", "bus", "dot@bus", request(5))
+        .await
+        .is_err());
+    assert_eq!(
+        subscription_rows(&setup),
+        before,
+        "failed transaction left a partial subscription replacement"
+    );
 }

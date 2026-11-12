@@ -5,10 +5,10 @@
       "id": "events",
       "script": "scripts/events_mutants.py",
       "args": [],
-      "count": 29,
+      "count": 33,
       "fixture": false,
       "python": false,
-      "completion": "g5-events-mutants-complete:29/29",
+      "completion": "g5-events-mutants-complete:33/33",
       "dependencies": [
         "scripts/events_mutants.py",
         "src/custody.rs",
@@ -31,7 +31,8 @@
         "tests/events_rpc.rs",
         "tests/events_store.rs",
         "tests/list.rs",
-        "tests/webhook.rs"
+        "tests/webhook.rs",
+        "src/event_renewal_status_tests.rs"
       ],
       "labels": [
         "candidate-mailbox",
@@ -62,7 +63,11 @@
         "callback-host-allowlist-bypassed",
         "callback-host-log-omitted",
         "callback-host-suffix-match",
-        "callback-host-prefix-match"
+        "callback-host-prefix-match",
+        "renewal-write-before-verification",
+        "renewal-required-status-omitted",
+        "renewal-credential-park-not-cleared",
+        "renewal-transaction-omitted"
       ],
       "required_output": [
         "^g5-events RED 01-candidate\\-mailbox-red:",
@@ -122,9 +127,17 @@
         "^g5-events RED 28-callback-host-suffix-match-red:",
         "^g5-events GREEN 28-callback-host-suffix-match-restored$",
         "^g5-events RED 29-callback-host-prefix-match-red:",
-        "^g5-events GREEN 29-callback-host-prefix-match-restored$"
+        "^g5-events GREEN 29-callback-host-prefix-match-restored$",
+        "^g5-events RED 30-renewal-write-before-verification-red:",
+        "^g5-events GREEN 30-renewal-write-before-verification-restored$",
+        "^g5-events RED 31-renewal-required-status-omitted-red:",
+        "^g5-events GREEN 31-renewal-required-status-omitted-restored$",
+        "^g5-events RED 32-renewal-credential-park-not-cleared-red:",
+        "^g5-events GREEN 32-renewal-credential-park-not-cleared-restored$",
+        "^g5-events RED 33-renewal-transaction-omitted-red:",
+        "^g5-events GREEN 33-renewal-transaction-omitted-restored$"
       ],
-      "script_sha256": "c43daa4b70409fc860b420351daedf58a8ac10bfca2a9c8b321820c1047d1239"
+      "script_sha256": "c1896a3f4c7378030a65d2145983b2707d40b51292a38fa2fefa9c5cbaffcb70"
     },
     {
       "id": "retirement",

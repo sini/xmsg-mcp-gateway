@@ -179,6 +179,15 @@ Before activating a callback, the gateway sends a signed, short-lived random
 challenge and requires a successful response echoing it. Successful verification
 is cached for 300 seconds for the same binding and key. Cache hits preserve the
 actual verification time; repeated renewal cannot extend that window indefinitely.
+
+**Planned, not yet released:** failed subscribe/renew requests leave an existing
+subscription byte-for-byte unchanged, including its encrypted credential, keys,
+expiry, generation and cursors. Callback verification (or its bounded cache) and
+the final credential/grant check happen before a single transaction replaces the
+subscription and releases eligible custody. No database transaction spans network
+I/O. A failed first subscribe creates no provisional row. An old binding can keep
+delivering after a refused renewal if its own credential and grant remain valid.
+
 A replacement signing key is verified again. For 300 seconds the gateway signs
 with both old and new keys; a third rotation during that window conflicts.
 Subscription state, rotation and encrypted credentials survive gateway restart.
@@ -191,6 +200,18 @@ logical owner renews through `events/subscribe` with a valid credential. It does
 not delete the subscription or revoke the local grant. The gateway implements no
 OAuth refresh flow on behalf of the hosted client. Subscription expiry itself
 stops delivery until renewed.
+
+**Planned, not yet released:** once a delivery parks for a credential, the
+subscription in `events_status` reports `state: "renewal_required"` and
+`reason: "credential_required"` immediately, including in `xmsg_inbox` and
+`xmsg_read_message`. Expired and disabled states take precedence. A failed renewal
+does not clear this signal. A successful renewal atomically clears the scoped
+credential park and makes the delivery due again; existing attempt counts, event
+IDs, saved payloads and consumer observations remain intact. Status reads do not
+introspect credentials or mutate the subscription. Recovery requires a successful
+`events/subscribe` renewal; an ordinary tool call does not replace the stored
+credential.
+
 
 Each request contains one event object with a stable event ID, first durable
 observation timestamp, mailbox-bound cursor, and `data` containing message ID,
@@ -301,8 +322,9 @@ At session start and on every wake, call `xmsg_inbox` and inspect
 small, owned subscription state in the same read-only transaction as the content.
 `xmsg_identity` remains available for the fuller Events status. If the state is
 `disabled`, `expired` or `not_subscribed`, subscribe again through the existing
-Events method. If it is `verifying`, check state again before creating another
-subscription. A ChatGPT subscribe/task-service error can still complete later;
+Events method. The planned `renewal_required` state specifically requires a
+successful renewal with a valid credential; reading the inbox does not supply one.
+If it is `verifying`, check state again before creating another subscription. A ChatGPT subscribe/task-service error can still complete later;
 check for `active` before deleting the automation or replacing it.
 
 Drain the current inbox view to its end, following `next` pagination and reading

@@ -406,6 +406,24 @@ CASES.extend([
     )),
 ])
 
+CASES.extend([
+    Case('renewal-write-before-verification', 'events_rpc', 'atomic_renewal_callback_failure_preserves_every_active_row_column', 'tests/events_rpc.rs', (
+        Edit('src/events.rs', '        let verified_at = if cached {\n            old.as_ref()\n                .and_then(|previous| previous.verified_at)\n                .ok_or(Error::Conflict)?\n        } else {\n            webhook::verify_callback(self.transport.as_ref(), &url, &id, &request.delivery.secret)\n                .await?;\n            now()?\n        };\n        self.fresh(identity, token, &authority).await?;\n', '        let verified_at = stamp;\n', start="pub async fn subscribe(", end="pub async fn unsubscribe("),
+        Edit('src/events.rs', 'tx.commit()?;', 'tx.commit()?;\n            released\n        };\n        if !cached {\n            webhook::verify_callback(self.transport.as_ref(), &url, &id, &request.delivery.secret).await?;\n        }\n        self.fresh(identity, token, &authority).await?;', start="pub async fn subscribe(", end="pub async fn unsubscribe("),
+        Edit('src/events.rs', 'let tx = store.connection.unchecked_transaction()?;', 'let released = {\n        let tx = store.connection.unchecked_transaction()?;', start="pub async fn subscribe(", end="pub async fn unsubscribe("),
+    )),
+    Case('renewal-required-status-omitted', 'lib', 'event_renewal_status_tests::credential_park_requires_renewal_in_inbox_and_read_then_success_resumes', 'src/event_renewal_status_tests.rs', (
+        Edit('src/event_status.rs', 'if parked {', 'if false && parked {'),
+    )),
+    Case('renewal-credential-park-not-cleared', 'lib', 'event_renewal_status_tests::credential_park_requires_renewal_in_inbox_and_read_then_success_resumes', 'src/event_renewal_status_tests.rs', (
+        Edit('src/events.rs', "SET last_error=NULL,next_attempt=0 WHERE state='pending'", "SET last_error=last_error,next_attempt=0 WHERE state='pending'", start="pub async fn subscribe(", end="pub async fn unsubscribe("),
+    )),
+    Case('renewal-transaction-omitted', 'lib', 'event_renewal_status_tests::late_custody_failure_rolls_back_the_verified_subscription_replacement', 'src/event_renewal_status_tests.rs', (
+        Edit('src/events.rs', 'let tx = store.connection.unchecked_transaction()?;', 'let tx = &store.connection;', start="pub async fn subscribe(", end="pub async fn unsubscribe("),
+        Edit('src/events.rs', 'tx.commit()?;', '', start="pub async fn subscribe(", end="pub async fn unsubscribe("),
+    )),
+])
+
 def sha(file):
     return hashlib.sha256(file.read_bytes()).hexdigest()
 
