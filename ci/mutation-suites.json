@@ -137,7 +137,7 @@
         "^g5-events RED 33-renewal-transaction-omitted-red:",
         "^g5-events GREEN 33-renewal-transaction-omitted-restored$"
       ],
-      "script_sha256": "c1896a3f4c7378030a65d2145983b2707d40b51292a38fa2fefa9c5cbaffcb70"
+      "script_sha256": "42d28ee2530eb1d36c8f069333e6f12021ed8d227eee8b81f543d614ad7f1c2c"
     },
     {
       "id": "retirement",

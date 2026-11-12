@@ -416,7 +416,7 @@ CASES.extend([
         Edit('src/event_status.rs', 'if parked {', 'if false && parked {'),
     )),
     Case('renewal-credential-park-not-cleared', 'lib', 'event_renewal_status_tests::credential_park_requires_renewal_in_inbox_and_read_then_success_resumes', 'src/event_renewal_status_tests.rs', (
-        Edit('src/events.rs', "SET last_error=NULL,next_attempt=0 WHERE state='pending'", "SET last_error=last_error,next_attempt=0 WHERE state='pending'", start="pub async fn subscribe(", end="pub async fn unsubscribe("),
+        Edit('src/events.rs', "SET last_error=NULL,next_attempt=0 WHERE state IN ('pending','dispatching')", "SET last_error=last_error,next_attempt=0 WHERE state IN ('pending','dispatching')", start="pub async fn subscribe(", end="pub async fn unsubscribe("),
     )),
     Case('renewal-transaction-omitted', 'lib', 'event_renewal_status_tests::late_custody_failure_rolls_back_the_verified_subscription_replacement', 'src/event_renewal_status_tests.rs', (
         Edit('src/events.rs', 'let tx = store.connection.unchecked_transaction()?;', 'let tx = &store.connection;', start="pub async fn subscribe(", end="pub async fn unsubscribe("),

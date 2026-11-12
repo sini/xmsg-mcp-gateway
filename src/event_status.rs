@@ -86,7 +86,7 @@ pub(crate) fn subscription_state(
     Ok(match row {
         Some((state, expires)) if state == "active" && expires <= now => "expired",
         Some((state, _)) if state == "active" => {
-            let parked: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM custody_outbox b JOIN custody_items c ON c.event_id=b.event_id JOIN event_authorizations a ON a.event_id=c.event_id JOIN event_subscriptions s ON s.owner_key=?1 WHERE b.state='pending' AND b.last_error='credential_required' AND c.bus=s.bus AND c.mailbox=s.mailbox AND c.owner=s.subject AND c.grant_id=s.grant_id AND a.dispatch_revision=s.grant_revision AND c.text IS NOT NULL AND c.expires_at>?2)", params![owner, now], |row| row.get(0))?;
+            let parked: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM custody_outbox b JOIN custody_items c ON c.event_id=b.event_id JOIN event_authorizations a ON a.event_id=c.event_id JOIN event_subscriptions s ON s.owner_key=?1 WHERE b.state IN ('pending','dispatching') AND b.last_error='credential_required' AND c.bus=s.bus AND c.mailbox=s.mailbox AND c.owner=s.subject AND c.grant_id=s.grant_id AND a.dispatch_revision=s.grant_revision AND c.text IS NOT NULL AND c.expires_at>?2)", params![owner, now], |row| row.get(0))?;
             if parked {
                 "renewal_required"
             } else {

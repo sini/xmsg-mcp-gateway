@@ -56,104 +56,119 @@ fn subscription_row(setup: &Setup) -> Vec<rusqlite::types::Value> {
 
 #[tokio::test]
 async fn credential_park_requires_renewal_in_inbox_and_read_then_success_resumes() {
-    let setup = Setup::new();
-    let identity = setup.subscribe().await;
-    setup.seed("parked-owned", "dot@bus", 2, i64::MAX);
-    setup
-        .callback
-        .behaviors
-        .lock()
-        .unwrap()
-        .push_back(Behavior::Response(503, None));
-    assert_eq!(
-        event_dispatch::tick(&setup.runtime(), "bus", "dot@bus")
-            .await
-            .unwrap(),
-        Tick::Retry
-    );
-    let retained = outbox(&setup, "parked-owned");
-    assert_eq!(retained.1, 1);
-    assert!(retained.2.is_some());
-    setup
-        .db()
-        .execute("UPDATE custody_outbox SET next_attempt=0", [])
-        .unwrap();
-    {
-        let mut tokens = setup.provider.tokens.lock().unwrap();
-        let mut fresh = tokens["good-token"].clone();
-        fresh["active"] = json!(true);
-        tokens.insert("fresh-token".into(), fresh);
-        tokens.get_mut("good-token").unwrap()["active"] = json!(false);
-    }
-    assert_eq!(
-        event_dispatch::tick(&setup.runtime(), "bus", "dot@bus")
-            .await
-            .unwrap(),
-        Tick::CredentialRequired
-    );
-    assert_eq!(
-        outbox(&setup, "parked-owned"),
-        retained,
-        "credential park changed attempt/body/id"
-    );
-    for status in statuses(&setup, &identity, "parked-owned") {
+    for (initial_state, hold_before_renewal) in [
+        ("pending", false),
+        ("dispatching", false),
+        ("pending", true),
+    ] {
+        let setup = Setup::new();
+        let identity = setup.subscribe().await;
+        setup.seed("parked-owned", "dot@bus", 2, i64::MAX);
+        setup
+            .callback
+            .behaviors
+            .lock()
+            .unwrap()
+            .push_back(Behavior::Response(503, None));
         assert_eq!(
-            status["state"], "renewal_required",
-            "credential park still advertised active"
+            event_dispatch::tick(&setup.runtime(), "bus", "dot@bus")
+                .await
+                .unwrap(),
+            Tick::Retry
         );
-        assert_eq!(status["reason"], "credential_required");
-    }
-    let fresh = setup.verifier.verify("fresh-token").await.unwrap();
-    assert!(setup
-        .runtime()
-        .with_allowed_hosts(Some(vec![]))
-        .unwrap()
-        .subscribe(&fresh, "fresh-token", "bus", "dot@bus", request())
-        .await
-        .is_err());
-    for status in statuses(&setup, &fresh, "parked-owned") {
+        let retained = outbox(&setup, "parked-owned");
+        assert_eq!(retained.1, 1);
+        assert!(retained.2.is_some());
+        setup
+            .db()
+            .execute(
+                "UPDATE custody_outbox SET next_attempt=0,state=?1",
+                [initial_state],
+            )
+            .unwrap();
+        {
+            let mut tokens = setup.provider.tokens.lock().unwrap();
+            let mut fresh = tokens["good-token"].clone();
+            fresh["active"] = json!(true);
+            tokens.insert("fresh-token".into(), fresh);
+            tokens.get_mut("good-token").unwrap()["active"] = json!(false);
+        }
         assert_eq!(
-            status["state"], "renewal_required",
-            "failed renewal cleared the credential park"
+            event_dispatch::tick(&setup.runtime(), "bus", "dot@bus")
+                .await
+                .unwrap(),
+            Tick::CredentialRequired
         );
-        assert_eq!(status["reason"], "credential_required");
-    }
-    setup
-        .runtime()
-        .subscribe(&fresh, "fresh-token", "bus", "dot@bus", request())
-        .await
-        .unwrap();
-    for status in statuses(&setup, &fresh, "parked-owned") {
         assert_eq!(
-            status["state"], "active",
-            "successful renewal did not clear credential park"
+            outbox(&setup, "parked-owned"),
+            retained,
+            "credential park changed attempt/body/id"
         );
-        assert!(status.get("reason").is_none() || status["reason"].is_null());
-    }
-    assert_eq!(
-        outbox(&setup, "parked-owned"),
-        retained,
-        "renewal reset delivery state"
-    );
-    let observed: i64 = setup
-        .db()
-        .query_row("SELECT count(*) FROM event_observations", [], |row| {
-            row.get(0)
-        })
-        .unwrap();
-    assert_eq!(observed, 0, "renewal fabricated consumer observation");
-    assert_eq!(
-        event_dispatch::tick(&setup.runtime(), "bus", "dot@bus")
+        for status in statuses(&setup, &identity, "parked-owned") {
+            assert_eq!(
+                status["state"], "renewal_required",
+                "credential park still advertised active from {initial_state}"
+            );
+            assert_eq!(status["reason"], "credential_required");
+        }
+        let fresh = setup.verifier.verify("fresh-token").await.unwrap();
+        assert!(setup
+            .runtime()
+            .with_allowed_hosts(Some(vec![]))
+            .unwrap()
+            .subscribe(&fresh, "fresh-token", "bus", "dot@bus", request())
             .await
-            .unwrap(),
-        Tick::Accepted
-    );
-    let callbacks = setup.callback.events.lock().unwrap();
-    assert_eq!(callbacks.len(), 2);
-    assert_eq!(
-        callbacks[0].1, callbacks[1].1,
-        "resumed delivery changed immutable event bytes"
-    );
+            .is_err());
+        for status in statuses(&setup, &fresh, "parked-owned") {
+            assert_eq!(
+                status["state"], "renewal_required",
+                "failed renewal cleared the credential park"
+            );
+            assert_eq!(status["reason"], "credential_required");
+        }
+        if hold_before_renewal {
+            setup
+                .db()
+                .execute("UPDATE custody_outbox SET state='held'", [])
+                .unwrap();
+        }
+        setup
+            .runtime()
+            .subscribe(&fresh, "fresh-token", "bus", "dot@bus", request())
+            .await
+            .unwrap();
+        for status in statuses(&setup, &fresh, "parked-owned") {
+            assert_eq!(
+                status["state"], "active",
+                "successful renewal did not clear credential park"
+            );
+            assert!(status.get("reason").is_none() || status["reason"].is_null());
+        }
+        assert_eq!(
+            outbox(&setup, "parked-owned"),
+            retained,
+            "renewal reset delivery state"
+        );
+        let observed: i64 = setup
+            .db()
+            .query_row("SELECT count(*) FROM event_observations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(observed, 0, "renewal fabricated consumer observation");
+        assert_eq!(
+            event_dispatch::tick(&setup.runtime(), "bus", "dot@bus")
+                .await
+                .unwrap(),
+            Tick::Accepted
+        );
+        let callbacks = setup.callback.events.lock().unwrap();
+        assert_eq!(callbacks.len(), 2);
+        assert_eq!(
+            callbacks[0].1, callbacks[1].1,
+            "resumed delivery changed immutable event bytes"
+        );
+    }
 }
 
 #[tokio::test]
