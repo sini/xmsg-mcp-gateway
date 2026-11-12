@@ -54,6 +54,10 @@ enum Command {
     },
     Init,
     MigrationsPending,
+    MigrateProfiles {
+        #[arg(long)]
+        if_needed: bool,
+    },
     MigrateCustody {
         #[arg(long)]
         if_needed: bool,
@@ -216,6 +220,17 @@ async fn run(cli: Cli) -> Result<(), CommandError> {
         (Some(state), Command::Init) => {
             Store::initialize(&state)?;
             println!("authority store initialized");
+        }
+        (Some(state), Command::MigrateProfiles { if_needed }) => {
+            let mut store = Store::open(&state)?;
+            if if_needed
+                && store.migration_applied(xmsg_mcp_gateway::grants::Migration::Profiles)?
+            {
+                println!("already migrated");
+                return Ok(());
+            }
+            store.migrate_profiles()?;
+            println!("exact grant binding uniqueness migrated");
         }
         (Some(state), Command::MigrateCustodySummaries { if_needed }) => {
             let mut store = Store::open(&state)?;

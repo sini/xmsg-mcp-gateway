@@ -773,7 +773,7 @@ pub(crate) async fn list_verified(
         list_store.outbound_policy(&authority.grant_id)?
     };
     let permission = policy.send.as_ref().ok_or(Error::Denied)?;
-    if !verifier.requires_scope(&permission.required_scope) {
+    if !verifier.requires_scope_for(context.identity(), &permission.required_scope) {
         return Err(Error::Denied);
     }
     let remaining = limits.timeout.saturating_sub(started.elapsed());
@@ -931,7 +931,7 @@ async fn dispatch_on_connection(
     }
     let initial_policy = store.outbound_policy(&initial_grant.grant_id)?;
     let initial_permission = initial_policy.permission(request)?;
-    if !verifier.requires_scope(&initial_permission.required_scope) {
+    if !verifier.requires_scope_for(identity, &initial_permission.required_scope) {
         return Err(Error::Denied);
     }
     let owner = crate::custody::fingerprint(&[
@@ -973,6 +973,11 @@ async fn dispatch_on_connection(
             if !initial_permission.admits_target(target) {
                 return Err(Error::Denied);
             }
+            if reservation.grant_id != initial_grant.grant_id
+                || reservation.sender != service.sender()
+            {
+                return Err(Error::Denied);
+            }
             if let Some(receipt) = reservation.receipt {
                 require_current(context, store)?;
                 return Ok(Outcome::Confirmed(serde_json::from_str(&receipt)?));
@@ -990,6 +995,12 @@ async fn dispatch_on_connection(
         return Err(Error::Conflict);
     }
     let (op, id, _) = request.parts();
+    if store
+        .reservation(&owner, op, id)?
+        .is_some_and(|row| row.grant_id != initial_grant.grant_id || row.sender != service.sender())
+    {
+        return Err(Error::Denied);
+    }
     let may_have_submitted = AtomicBool::new(
         store
             .reservation(&owner, op, id)?
@@ -1056,7 +1067,7 @@ async fn submit(
     let policy = store.outbound_policy(&authority.grant_id)?;
     let (op, id, text) = request.parts();
     let permission = policy.permission(request)?;
-    if !verifier.requires_scope(&permission.required_scope) {
+    if !verifier.requires_scope_for(identity, &permission.required_scope) {
         return Err(Error::Denied);
     }
     let sender = service.sender.as_str();
@@ -1087,6 +1098,9 @@ async fn submit(
         return Err(Error::Denied);
     }
     if let Some(reservation) = &existing {
+        if reservation.grant_id != authority.grant_id || reservation.sender != sender {
+            return Err(Error::Denied);
+        }
         if let Some(receipt) = &reservation.receipt {
             require_current(context, store)?;
             return Ok(Outcome::Confirmed(serde_json::from_str(receipt)?));

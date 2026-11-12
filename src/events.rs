@@ -129,6 +129,7 @@ fn same_identity(a: &VerifiedIdentity, b: &VerifiedIdentity) -> bool {
         && a.resource() == b.resource()
         && a.subject() == b.subject()
         && a.hosted_client() == b.hosted_client()
+        && a.audience() == b.audience()
 }
 fn now() -> Result<i64, Error> {
     Ok(webhook::signing_time()?)
@@ -229,7 +230,9 @@ impl Events {
     ) -> Result<Authorization, Error> {
         store.require_events_ready(&self.key)?;
         if identity.expires_at() <= now()? as u64
-            || !self.verifier.requires_scope("events:subscribe")
+            || !self
+                .verifier
+                .requires_scope_for(identity, "events:subscribe")
         {
             return Err(crate::grants::Error::Denied.into());
         }

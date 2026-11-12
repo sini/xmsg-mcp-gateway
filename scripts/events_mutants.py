@@ -111,6 +111,7 @@ CASES = [
                 "// Selection precedes introspection",
                 "    let Some(item) = candidate(",
             ),
+            Edit(DISPATCH, "AND s.grant_id=?4", "AND (?4 IS NOT NULL)"),
         ),
     ),
     Case(

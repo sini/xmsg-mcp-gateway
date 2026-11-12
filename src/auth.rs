@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use base64::Engine;
 use reqwest::Client;
 use reqwest::{Certificate, Url};
 use serde::Deserialize;
@@ -52,6 +53,7 @@ pub struct VerifiedIdentity {
     subject: String,
     hosted_client: String,
     expires_at: u64,
+    audience: String,
 }
 
 impl VerifiedIdentity {
@@ -69,6 +71,17 @@ impl VerifiedIdentity {
     }
     pub fn hosted_client(&self) -> &str {
         &self.hosted_client
+    }
+    pub fn same_profile(&self, other: &Self) -> bool {
+        self.service == other.service
+            && self.issuer == other.issuer
+            && self.resource == other.resource
+            && self.subject == other.subject
+            && self.hosted_client == other.hosted_client
+            && self.audience == other.audience
+    }
+    pub fn audience(&self) -> &str {
+        &self.audience
     }
     pub fn expires_at(&self) -> u64 {
         self.expires_at
@@ -101,7 +114,243 @@ impl VerifiedContext {
     }
 }
 
+pub const MAX_PROFILES: usize = 16;
+
 pub struct Verifier {
+    profiles: Vec<ProfileVerifier>,
+    route_claims: bool,
+    opaque_default: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileConfig {
+    #[serde(flatten)]
+    pub config: VerifierConfig,
+    #[serde(default)]
+    pub opaque_default: bool,
+}
+
+#[derive(Deserialize)]
+struct RoutingClaims {
+    iss: String,
+    #[serde(default, deserialize_with = "present_string")]
+    client_id: Option<String>,
+    #[serde(default, deserialize_with = "present_string")]
+    azp: Option<String>,
+    aud: Value,
+}
+
+fn present_string<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    String::deserialize(deserializer).map(Some)
+}
+
+impl RoutingClaims {
+    fn client(&self) -> Result<&str, Error> {
+        match (self.client_id.as_deref(), self.azp.as_deref()) {
+            (Some(client), Some(azp)) if client == azp => Ok(client),
+            (Some(client), None) | (None, Some(client)) => Ok(client),
+            _ => Err(Error::InvalidToken),
+        }
+    }
+}
+
+impl Verifier {
+    pub fn from_config(config: VerifierConfig) -> Result<Self, Error> {
+        Ok(Self {
+            profiles: vec![ProfileVerifier::from_config(config)?],
+            route_claims: false,
+            opaque_default: None,
+        })
+    }
+
+    pub fn from_profiles(configs: Vec<VerifierConfig>) -> Result<Self, Error> {
+        Self::from_profile_configs(
+            configs
+                .into_iter()
+                .map(|config| ProfileConfig {
+                    config,
+                    opaque_default: false,
+                })
+                .collect(),
+        )
+    }
+
+    pub fn from_profile_configs(configs: Vec<ProfileConfig>) -> Result<Self, Error> {
+        let defaults: Vec<_> = configs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, profile)| profile.opaque_default.then_some(index))
+            .collect();
+        if defaults.len() > 1 {
+            return Err(Error::Configuration);
+        }
+        let opaque_default = defaults.first().copied();
+        let configs: Vec<_> = configs.into_iter().map(|profile| profile.config).collect();
+        if configs.is_empty() || configs.len() > MAX_PROFILES {
+            return Err(Error::Configuration);
+        }
+        let first = &configs[0];
+        for (index, config) in configs.iter().enumerate() {
+            if config.service != first.service
+                || config.resource != first.resource
+                || configs[..index].iter().any(|prior| {
+                    prior.issuer == config.issuer
+                        && prior.hosted_client == config.hosted_client
+                        && (prior.audience.as_deref().unwrap_or(&prior.resource)
+                            == config.audience.as_deref().unwrap_or(&config.resource)
+                            || prior.subject == config.subject)
+                })
+            {
+                return Err(Error::Configuration);
+            }
+        }
+        Ok(Self {
+            profiles: configs
+                .into_iter()
+                .map(ProfileVerifier::from_config)
+                .collect::<Result<_, _>>()?,
+            route_claims: true,
+            opaque_default,
+        })
+    }
+
+    pub fn bindings(&self) -> Vec<crate::grants::Binding> {
+        self.profiles
+            .iter()
+            .map(|profile| crate::grants::Binding {
+                service: profile.config.service.clone(),
+                issuer: profile.config.issuer.clone(),
+                resource: profile.config.resource.clone(),
+                subject: profile.config.subject.clone(),
+                hosted_client: profile.config.hosted_client.clone(),
+            })
+            .collect()
+    }
+
+    pub fn resource(&self) -> &str {
+        &self.profiles[0].config.resource
+    }
+
+    pub fn issuers(&self) -> Vec<String> {
+        let mut issuers = Vec::new();
+        for profile in &self.profiles {
+            if !issuers.contains(&profile.config.issuer) {
+                issuers.push(profile.config.issuer.clone());
+            }
+        }
+        issuers
+    }
+
+    pub fn scopes(&self) -> Vec<String> {
+        let mut scopes = Vec::new();
+        for profile in &self.profiles {
+            for scope in &profile.config.required_scopes {
+                if !scopes.contains(scope) {
+                    scopes.push(scope.clone());
+                }
+            }
+        }
+        scopes
+    }
+
+    pub fn max_timeout_ms(&self) -> u64 {
+        self.profiles
+            .iter()
+            .map(|profile| profile.config.timeout_ms)
+            .max()
+            .unwrap()
+    }
+
+    pub fn requires_scope(&self, scope: &str) -> bool {
+        self.profiles
+            .iter()
+            .all(|profile| profile.requires_scope(scope))
+    }
+
+    pub fn requires_scope_for_binding(
+        &self,
+        binding: &crate::grants::Binding,
+        scope: &str,
+    ) -> bool {
+        self.profiles.iter().any(|profile| {
+            let config = &profile.config;
+            config.service == binding.service
+                && config.issuer == binding.issuer
+                && config.resource == binding.resource
+                && config.subject == binding.subject
+                && config.hosted_client == binding.hosted_client
+                && profile.requires_scope(scope)
+        })
+    }
+
+    pub fn requires_scope_for(&self, identity: &VerifiedIdentity, scope: &str) -> bool {
+        self.profiles.iter().any(|profile| {
+            let config = &profile.config;
+            config.service == identity.service
+                && config.issuer == identity.issuer
+                && config.resource == identity.resource
+                && config.subject == identity.subject
+                && config.hosted_client == identity.hosted_client
+                && config.audience.as_deref().unwrap_or(&config.resource) == identity.audience
+                && profile.requires_scope(scope)
+        })
+    }
+
+    pub async fn verify(&self, token: &str) -> Result<VerifiedIdentity, Error> {
+        if token.is_empty() || token.len() > 16_384 || token.chars().any(char::is_whitespace) {
+            return Err(Error::InvalidToken);
+        }
+        let profile = if self.route_claims {
+            let segments: Vec<_> = token.split('.').collect();
+            let payload = if segments.len() == 3 {
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(segments[1])
+                    .ok()
+            } else {
+                None
+            };
+            let has_issuer = payload
+                .as_deref()
+                .and_then(|payload| serde_json::from_slice::<Value>(payload).ok())
+                .is_some_and(|claims| claims.get("iss").is_some());
+            if has_issuer {
+                if segments.iter().any(|segment| segment.is_empty()) {
+                    return Err(Error::InvalidToken);
+                }
+                let claims: RoutingClaims =
+                    serde_json::from_slice(payload.as_deref().ok_or(Error::InvalidToken)?)
+                        .map_err(|_| Error::InvalidToken)?;
+                let client = claims.client()?;
+                // Claims only select a configured provider; introspection establishes authority.
+                self.profiles
+                    .iter()
+                    .find(|profile| {
+                        claims.iss == profile.config.issuer
+                            && client == profile.config.hosted_client
+                            && exact_audience(
+                                &claims.aud,
+                                profile
+                                    .config
+                                    .audience
+                                    .as_deref()
+                                    .unwrap_or(&profile.config.resource),
+                            )
+                    })
+                    .ok_or(Error::InvalidToken)?
+            } else {
+                &self.profiles[self.opaque_default.ok_or(Error::InvalidToken)?]
+            }
+        } else {
+            &self.profiles[0]
+        };
+        profile.verify(token).await
+    }
+}
+
+struct ProfileVerifier {
     config: VerifierConfig,
     client: Client,
     secret: String,
@@ -120,7 +369,7 @@ fn secure_url(raw: &str) -> Result<Url, Error> {
     Ok(url)
 }
 
-impl Verifier {
+impl ProfileVerifier {
     pub fn from_config(config: VerifierConfig) -> Result<Self, Error> {
         let endpoint = secure_url(&config.introspection_url)?;
         secure_url(&config.issuer)?;
@@ -236,6 +485,13 @@ impl Verifier {
             None => 0,
         };
         let scope = claims["scope"].as_str().ok_or(Error::InvalidToken)?;
+        let client = match (claims.get("client_id"), claims.get("azp")) {
+            (Some(client), Some(azp)) if client.as_str().is_some() && client == azp => {
+                client.as_str()
+            }
+            (Some(client), None) | (None, Some(client)) => client.as_str(),
+            _ => None,
+        };
         let audience = self
             .config
             .audience
@@ -245,7 +501,7 @@ impl Verifier {
             || claims["iss"].as_str() != Some(&self.config.issuer)
             || !exact_audience(&claims["aud"], audience)
             || claims["sub"].as_str() != Some(&self.config.subject)
-            || claims["client_id"].as_str() != Some(&self.config.hosted_client)
+            || client != Some(self.config.hosted_client.as_str())
             || exp <= now
             || nbf > now
             || !self.config.required_scopes.iter().all(|required| {
@@ -263,6 +519,7 @@ impl Verifier {
             subject: self.config.subject.clone(),
             hosted_client: self.config.hosted_client.clone(),
             expires_at: exp,
+            audience: audience.to_owned(),
         })
     }
 }

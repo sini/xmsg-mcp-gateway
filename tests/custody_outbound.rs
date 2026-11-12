@@ -506,7 +506,7 @@ async fn crash_at(phase: &str, recovery: Recovery) {
         store.try_operation_lease("gateway").unwrap().is_none(),
         "live child did not hold the service lease"
     );
-    let pending = dispatch(
+    let foreign = dispatch(
         &mut store,
         &Endpoint::from_registered(&receiver).unwrap(),
         &verifier,
@@ -515,13 +515,19 @@ async fn crash_at(phase: &str, recovery: Recovery) {
         &request("crash-request", &target, "crash-preserved bytes"),
         &limits(),
     )
-    .await
-    .unwrap();
-    assert_eq!(
-        pending,
-        Outcome::Pending,
-        "live holder permitted a second submission"
+    .await;
+    assert!(
+        matches!(foreign, Err(Error::Denied)),
+        "receiver endpoint recovered the gateway's reservation: {foreign:?}"
     );
+    let unchanged: (String, String, Option<String>) = inspect
+        .query_row(
+            "SELECT idempotency_key,state,receipt FROM outbound_reservations",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(unchanged, (key.clone(), state, receipt));
     let original_id = if phase == "after" {
         let delivered = receiver.poll(1).await.unwrap().unwrap();
         let id = delivered.message_id().to_owned();

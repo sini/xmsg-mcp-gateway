@@ -40,7 +40,7 @@ pub enum Error {
     Denied,
     #[error("no grant changed: unknown id, stale revision or unchanged state")]
     NoChange,
-    #[error("another binding is already enabled for this service")]
+    #[error("another binding is already enabled for this exact profile")]
     Conflict,
     #[error("invalid empty grant binding")]
     InvalidBinding,
@@ -71,6 +71,7 @@ pub enum Migration {
     Outbound,
     Retirement,
     Events,
+    Profiles,
 }
 
 pub struct Store {
@@ -224,6 +225,7 @@ impl Store {
             Migration::Outbound => version >= OUTBOUND_SCHEMA_VERSION,
             Migration::Retirement => retirement,
             Migration::Events => version == EVENTS_SCHEMA_VERSION,
+            Migration::Profiles => self.profiles_migrated()?,
         })
     }
 
@@ -238,12 +240,105 @@ impl Store {
             (Migration::Retirement, "migrate-retirement"),
             (Migration::CustodySummaries, "migrate-custody-summaries"),
             (Migration::Events, "migrate-events"),
+            (Migration::Profiles, "migrate-profiles"),
         ] {
             if !self.migration_applied(migration)? {
                 pending.push(command);
             }
         }
         Ok(pending)
+    }
+
+    fn profiles_migrated(&self) -> Result<bool, Error> {
+        let marker: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='grant_profiles_schema')",
+            [], |row| row.get(0),
+        )?;
+        let new_index: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='one_enabled_per_binding')",
+            [], |row| row.get(0),
+        )?;
+        let legacy_index: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='one_enabled_per_service')",
+            [], |row| row.get(0),
+        )?;
+        if !marker && !new_index && legacy_index {
+            return Ok(false);
+        }
+        if !marker || !new_index || legacy_index {
+            return Err(Error::InvalidStore);
+        }
+        let schema: Vec<i64> = self
+            .connection
+            .prepare("SELECT version FROM grant_profiles_schema")?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        let sql: String = self.connection.query_row(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='one_enabled_per_binding'",
+            [],
+            |row| row.get(0),
+        )?;
+        if schema != [1] || sql != "CREATE UNIQUE INDEX one_enabled_per_binding ON grants(service,issuer,resource,subject,hosted_client) WHERE enabled = 1" {
+            return Err(Error::InvalidStore);
+        }
+        Ok(true)
+    }
+
+    pub fn require_profiles_ready(&self) -> Result<(), Error> {
+        if !self.profiles_migrated()? {
+            return Err(Error::InvalidStore);
+        }
+        Ok(())
+    }
+
+    pub fn migrate_profiles(&mut self) -> Result<(), Error> {
+        let tx = self.connection.transaction()?;
+        Self::validate_connection(&tx)?;
+        let old_index: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='one_enabled_per_service'",
+            [], |row| row.get(0),
+        )?;
+        if old_index != 1 {
+            return Err(Error::InvalidStore);
+        }
+        tx.execute_batch(
+            "CREATE TABLE grant_profiles_schema(version INTEGER PRIMARY KEY CHECK(version=1));
+             INSERT INTO grant_profiles_schema VALUES(1);
+             DROP INDEX one_enabled_per_service;
+             CREATE UNIQUE INDEX one_enabled_per_binding ON grants(service,issuer,resource,subject,hosted_client) WHERE enabled = 1;",
+        )?;
+        tx.commit()?;
+        self.require_profiles_ready()
+    }
+
+    pub fn validate_profiles(&self, bindings: &[Binding]) -> Result<(), Error> {
+        self.require_profiles_ready()?;
+        if bindings.is_empty() {
+            return Err(Error::ProfileMismatch);
+        }
+        let mut statement = self
+            .connection
+            .prepare("SELECT service,issuer,resource,subject,hosted_client FROM grants")?;
+        let rows = statement.query_map([], |row| {
+            Ok(Binding {
+                service: row.get(0)?,
+                issuer: row.get(1)?,
+                resource: row.get(2)?,
+                subject: row.get(3)?,
+                hosted_client: row.get(4)?,
+            })
+        })?;
+        let mut total = 0;
+        for row in rows {
+            if !bindings.contains(&row?) {
+                return Err(Error::ProfileMismatch);
+            }
+            total += 1;
+        }
+        if total == 0 {
+            return Err(Error::ProfileMismatch);
+        }
+        Ok(())
     }
 
     pub fn enroll(&mut self, id: &str, binding: &Binding) -> Result<(), Error> {

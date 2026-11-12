@@ -143,11 +143,23 @@ message preamble names that actual sender and the stable gateway correlation.
 The entire UTF-8 text, including this preamble, must fit both the supplied bound
 and 65536 bytes, the pinned daemon's default ceiling. Nothing is truncated.
 
-The durable operation guard is an OS file lease per logical service profile,
+Reservation recovery also requires the original grant and registered sender.
+This intentionally narrows the earlier contention behavior: a different sender
+probing another sender's live reservation now receives `Denied`, rather than its
+pending state or receipt. For example, `receiver@node` cannot probe a reservation
+owned by `gateway@node`, even with the same bearer. The owning gateway still gets
+`Pending` while its service lease is held, without changing the stored reservation.
+The positive control is
+`foreign_pending_and_confirmed_reservations_are_denied_before_reverification`
+in `tests/profile_outbound.rs`; the private-node crash controls also retain the
+owning gateway's recovery with its original key and message ID.
+
+The durable operation guard is an OS file lease per xmsg service,
 independent of SQLite. Submitters acquire it nonblocking; contention returns
 pending without a second submission. The private 0600 regular file is opened
 with O_NOFOLLOW, checked for owner and single-link custody, and never removed.
-Different profiles have different leases. Kernel release permits recovery after
+Authentication profiles for one service share its lease; distinct services have
+distinct leases. Kernel release permits recovery after
 process death. Disable and owner policy changes acquire the same lease before
 committing, so no later authorized submission begins after disable commits.
 An in-flight accepted submission cannot be recalled by disabling the grant.

@@ -76,7 +76,7 @@ CASES = [
     (
         "default-empty-policy",
         "src/serving.rs",
-        "if !permission_enabled(&app, permission) {",
+        "if !permission_enabled(&app, context.identity(), permission) {",
         "if false {",
         "messaging",
         MCP,
@@ -211,7 +211,7 @@ CASES.extend(
         (
             "discovery-policy",
             "src/serving.rs",
-            "if !permission_enabled(app, permission)",
+            "if !permission_enabled(app, identity, permission)",
             "if false",
             "messaging",
             "fresh_policy_is_empty_and_cannot_be_changed_by_mcp",
@@ -229,7 +229,7 @@ CASES.extend(
         (
             "scope-ceiling",
             "src/serving.rs",
-            "app.verifier.requires_scope(&permission.required_scope)",
+            "app.verifier\n            .requires_scope_for(identity, &permission.required_scope)",
             "true",
             "messaging",
             "unconfigured_scopes_do_not_advertise_or_dispatch_messaging",
