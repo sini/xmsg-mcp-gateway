@@ -434,13 +434,13 @@ CASES += [
 def schema_floor_control(root):
     file = root / "src/grants.rs"
     original = file.read_text()
-    site = "pub const MAX_SUPPORTED_SCHEMA_VERSION: i64 = EVENTS_SCHEMA_VERSION;"
+    site = "pub const MAX_SUPPORTED_SCHEMA_VERSION: i64 = crate::authorization_server::SCHEMA_VERSION;"
     assert original.count(site) == 1, "schema ceiling control needs updating"
     try:
         file.write_text(
             original.replace(
                 site,
-                "pub const MAX_SUPPORTED_SCHEMA_VERSION: i64 = EVENTS_SCHEMA_VERSION + 1;",
+                "pub const MAX_SUPPORTED_SCHEMA_VERSION: i64 = crate::authorization_server::SCHEMA_VERSION + 1;",
                 1,
             )
         )
@@ -461,6 +461,17 @@ def schema_floor_control(root):
     finally:
         file.write_text(original)
     print("outbound-schema-floor-control:passed", flush=True)
+    ceiling = run(
+        root,
+        "grant_core",
+        "foreign_store_metadata_is_refused_without_reinitialization",
+        "src/grants.rs",
+    )
+    assert (
+        ceiling.returncode == 0
+        and "1 passed; 0 failed; 0 ignored" in ceiling.stdout
+    ), ("unsupported schema version was not refused", ceiling.stdout, ceiling.stderr)
+    print("outbound-schema-ceiling-control:passed", flush=True)
 
 
 def main():

@@ -854,7 +854,7 @@
         "^pending\\-row\\-is\\-uncertain: GREEN baseline / RED intended$",
         "^submission\\-flag\\-before\\-send: GREEN baseline / RED intended$"
       ],
-      "script_sha256": "49062569e63135805a071ee349159d5a468e6cc522c79118ee378755e77b77f8"
+      "script_sha256": "101d084906ff1d7f8d048e703ca465bfb8448f403a5a142eed73ea76d834d5d3"
     },
     {
       "id": "wiring",
