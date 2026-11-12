@@ -5,10 +5,10 @@
       "id": "events",
       "script": "scripts/events_mutants.py",
       "args": [],
-      "count": 27,
+      "count": 29,
       "fixture": false,
       "python": false,
-      "completion": "g5-events-mutants-complete:27/27",
+      "completion": "g5-events-mutants-complete:29/29",
       "dependencies": [
         "scripts/events_mutants.py",
         "src/custody.rs",
@@ -60,7 +60,9 @@
         "policy-promotes-unapproved-history",
         "events-callback-url-log",
         "callback-host-allowlist-bypassed",
-        "callback-host-log-omitted"
+        "callback-host-log-omitted",
+        "callback-host-suffix-match",
+        "callback-host-prefix-match"
       ],
       "required_output": [
         "^g5-events RED 01-candidate\\-mailbox-red:",
@@ -116,9 +118,13 @@
         "^g5-events RED 26-callback-host-allowlist-bypassed-red:",
         "^g5-events GREEN 26-callback-host-allowlist-bypassed-restored$",
         "^g5-events RED 27-callback-host-log-omitted-red:",
-        "^g5-events GREEN 27-callback-host-log-omitted-restored$"
+        "^g5-events GREEN 27-callback-host-log-omitted-restored$",
+        "^g5-events RED 28-callback-host-suffix-match-red:",
+        "^g5-events GREEN 28-callback-host-suffix-match-restored$",
+        "^g5-events RED 29-callback-host-prefix-match-red:",
+        "^g5-events GREEN 29-callback-host-prefix-match-restored$"
       ],
-      "script_sha256": "36559ddc7c992b14f0bd0bb7e2c61573c0f5be2646e2fbf931cdf7cfea184355"
+      "script_sha256": "c43daa4b70409fc860b420351daedf58a8ac10bfca2a9c8b321820c1047d1239"
     },
     {
       "id": "retirement",

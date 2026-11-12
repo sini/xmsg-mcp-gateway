@@ -787,34 +787,47 @@ async fn failed_rotation_refresh_cannot_discard_a_still_valid_previous_key() {
 
 #[tokio::test]
 async fn callback_host_allowlist_refuses_before_any_outbound_request() {
-    let setup = Setup::new();
-    let identity = setup.verifier.verify("good-token").await.unwrap();
-    let events = setup
-        .runtime()
-        .with_allowed_hosts(Some(vec!["receiver.example.com".into()]))
-        .unwrap();
-    for host in ["off-list.example", "receiver.example.com.attacker.example"] {
+    let mut violations = Vec::new();
+    for host in [
+        "off-list.example",
+        "receiver.example.com.attacker.example",
+        "evilreceiver.example.com",
+        "sub.receiver.example.com",
+    ] {
+        let setup = Setup::new();
+        let identity = setup.verifier.verify("good-token").await.unwrap();
+        let events = setup
+            .runtime()
+            .with_allowed_hosts(Some(vec!["receiver.example.com".into()]))
+            .unwrap();
         let mut input = request(4);
         input.delivery.url = format!("https://{host}/events");
-        let error = events
+        let result = events
             .subscribe(&identity, "good-token", "bus", "dot@bus", input)
-            .await
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            xmsg_mcp_gateway::events::Error::Callback(webhook::Error::HostNotAllowed)
-        ));
-        assert_eq!(setup.callback.calls.load(Ordering::SeqCst), 0);
+            .await;
+        let calls = setup.callback.calls.load(Ordering::SeqCst);
+        let rows: i64 = rusqlite::Connection::open(&setup.provider.store_file)
+            .unwrap()
+            .query_row("SELECT count(*) FROM event_subscriptions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        if !matches!(
+            result,
+            Err(xmsg_mcp_gateway::events::Error::Callback(
+                webhook::Error::HostNotAllowed
+            ))
+        ) || calls != 0
+            || rows != 0
+        {
+            violations.push(format!(
+                "{host}: not refused before I/O (calls={calls}, rows={rows})"
+            ));
+        }
     }
-    let rows: i64 = rusqlite::Connection::open(&setup.provider.store_file)
-        .unwrap()
-        .query_row("SELECT count(*) FROM event_subscriptions", [], |row| {
-            row.get(0)
-        })
-        .unwrap();
-    assert_eq!(
-        rows, 0,
-        "host refusal must not create a provisional subscription"
+    assert!(
+        violations.is_empty(),
+        "callback host boundary violations: {violations:?}"
     );
 }
 

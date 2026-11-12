@@ -397,6 +397,15 @@ CASES.extend([
     )),
 ])
 
+CASES.extend([
+    Case("callback-host-suffix-match", "events_rpc", "callback_host_allowlist_refuses_before_any_outbound_request", "tests/events_rpc.rs", (
+        Edit("src/events.rs", "allowed == host", "host.ends_with(allowed.as_str())"),
+    )),
+    Case("callback-host-prefix-match", "events_rpc", "callback_host_allowlist_refuses_before_any_outbound_request", "tests/events_rpc.rs", (
+        Edit("src/events.rs", "allowed == host", "host.starts_with(allowed.as_str())"),
+    )),
+])
+
 def sha(file):
     return hashlib.sha256(file.read_bytes()).hexdigest()
 

@@ -88,8 +88,13 @@ connection-pinning and no-redirect checks still apply independently.
 
 A host refusal returns `CallbackEndpointError` with reason
 `callback_host_not_allowed` before callback verification or network I/O, and leaves
-the prior subscription unchanged. This setting does not retroactively fence an
-already active subscription; use the existing owner controls for that operation.
+the prior subscription unchanged. The allowlist applies at subscribe and renew.
+An already-active subscription to an off-list host can keep delivering until it
+expires, subject to existing authorization and delivery checks. A
+refused renewal leaves that old subscription active and does not extend its expiry.
+The default TTL is 1 hour; a requested TTL is capped at 24 hours.
+Setting the list does not cut delivery immediately. Use the existing owner
+controls when an immediate stop is required.
 At subscribe/renew the `gateway_events` info diagnostic records only the normalized
 `callback_host` and a static reason, never the URL's scheme, port, path, query or
 signing secret. Operators can initially omit the list, observe the host, then set
