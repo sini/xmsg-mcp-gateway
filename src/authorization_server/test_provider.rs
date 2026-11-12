@@ -133,6 +133,8 @@ impl Fake {
         arrival: Arrival,
         delays: Arc<Mutex<HashMap<String, Duration>>>,
     ) {
+        // Accepted sockets inherit the listener's nonblocking flag on macOS.
+        socket.set_nonblocking(false).unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
@@ -224,4 +226,45 @@ impl Drop for Fake {
         self.stop.store(true, Ordering::SeqCst);
         self.worker.take().unwrap().join().unwrap();
     }
+}
+
+#[tokio::test]
+async fn nonblocking_socket_is_reset_before_tls_request() {
+    let fake = Fake::new();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let tls = fake.keys.tls.clone();
+    let routes = fake.routes.clone();
+    let requests = fake.requests.clone();
+    let forms = fake.forms.clone();
+    let arrival = fake.arrival.clone();
+    let delays = fake.delays.clone();
+    let worker = thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        socket.set_nonblocking(true).unwrap();
+        Fake::serve(socket, tls, routes, requests, forms, arrival, delays);
+    });
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(3))
+        .add_root_certificate(
+            reqwest::Certificate::from_pem(&std::fs::read(&fake.keys.roots).unwrap()).unwrap(),
+        )
+        .build()
+        .unwrap();
+    let response = client
+        .get(format!("https://{address}/v1/person/owner/_attr/memberof"))
+        .send()
+        .await;
+    worker.join().unwrap();
+    let body = response
+        .expect("forced nonblocking socket did not serve HTTPS")
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap(),
+        json!(["login.access@test"])
+    );
+    assert_eq!(fake.requests.lock().unwrap().len(), 1);
 }
