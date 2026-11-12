@@ -44,7 +44,14 @@ fn privacy(capture: &Capture, canaries: &[&str]) {
     }
     assert!(
         rows.iter().flat_map(|row| row.keys()).all(|key| [
-            "message", "class", "reason", "changed", "held", "released", "attempt"
+            "message",
+            "class",
+            "reason",
+            "changed",
+            "held",
+            "released",
+            "attempt",
+            "callback_host"
         ]
         .contains(&key.as_str())),
         "Events diagnostics leaked an unapproved field: {output}"
@@ -57,7 +64,7 @@ async fn committed_fence_dead_letter_and_consumer_state_are_private_and_read_onl
     let subscriber = capture.clone();
     async {
         let setup=Setup::new();
-        let mut request=request();request.delivery.url="https://url-canary-45.example/wake".into();
+        let mut request=request();request.delivery.url="https://receiver.example.com/url-canary-45".into();
         let secret=request.delivery.secret.clone();
         let identity=setup.verifier.verify("good-token").await.unwrap();
         setup.runtime().subscribe(&identity,"good-token","bus","dot@bus",request).await.unwrap();

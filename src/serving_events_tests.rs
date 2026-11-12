@@ -502,3 +502,59 @@ async fn summarized_gap_history_keeps_live_session_ready() {
             .unwrap();
     }
 }
+
+#[tokio::test]
+async fn callback_host_configuration_reaches_rpc_and_owner_runtime() {
+    let mut setup = Setup::new();
+    let _bus = start_bus(&mut setup).await;
+    setup.provider.config["events"]["webhook_allowed_hosts"] = json!([]);
+    fixture::private_file(
+        &setup.provider.config_file,
+        &serde_json::to_vec(&setup.provider.config).unwrap(),
+    );
+    let serving = Serving::from_owner_file_with_transport(
+        &setup.provider.config_file,
+        setup.callback.clone(),
+    )
+    .await
+    .unwrap();
+    let (status, value, _) = fixture::request(&serving, "good-token", rpc("events/subscribe", json!({"name":events::EVENT_NAME,"arguments":{},"delivery":{"mode":"webhook","url":"https://receiver.example.com/wake","secret":crate::events_test_support::secret(4)},"cursor":null}))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(value["error"]["code"], -32015);
+    assert_eq!(
+        value["error"]["data"]["reason"],
+        "callback_host_not_allowed"
+    );
+    let identity = setup.verifier.verify("good-token").await.unwrap();
+    assert!(matches!(
+        owner_events(&setup.provider.config_file)
+            .unwrap()
+            .subscribe(
+                &identity,
+                "good-token",
+                "bus",
+                "dot@bus",
+                crate::events_test_support::request()
+            )
+            .await,
+        Err(events::Error::Callback(
+            crate::webhook::Error::HostNotAllowed
+        ))
+    ));
+    serving
+        .state
+        .event_worker
+        .as_ref()
+        .unwrap()
+        .shutdown()
+        .await;
+    serving
+        .state
+        .messaging
+        .as_ref()
+        .unwrap()
+        .session
+        .shutdown()
+        .await
+        .unwrap();
+}

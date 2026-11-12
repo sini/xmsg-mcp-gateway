@@ -384,9 +384,18 @@ CASES.append(Case(
     "events-callback-url-log", "lib",
     "event_observability_tests::committed_fence_dead_letter_and_consumer_state_are_private_and_read_only",
     "src/event_observability_tests.rs", (
-        Edit("src/events.rs", "let url = webhook::callback_url(&request.delivery.url)?.to_string();", "let url = webhook::callback_url(&request.delivery.url)?.to_string();\n        tracing::info!(target: \"gateway_events\", url = %url, \"callback URL\");", start="pub async fn subscribe(", end="pub async fn unsubscribe("),
+        Edit("src/events.rs", "let url = callback.to_string();", "let url = callback.to_string();\n        tracing::info!(target: \"gateway_events\", url = %url, \"callback URL\");", start="pub async fn subscribe(", end="pub async fn unsubscribe("),
     ),
 ))
+
+CASES.extend([
+    Case("callback-host-allowlist-bypassed", "events_rpc", "callback_host_allowlist_refuses_before_any_outbound_request", "tests/events_rpc.rs", (
+        Edit("src/events.rs", "if !allowed {", "if false && !allowed {"),
+    )),
+    Case("callback-host-log-omitted", "events_rpc", "callback_host_log_excludes_path_query_port_and_signing_secret", "tests/events_rpc.rs", (
+        Edit("src/events.rs", 'tracing::info!(target:"gateway_events",class="subscription",reason,callback_host=host,"Events callback host");', 'let _ = reason;'),
+    )),
+])
 
 def sha(file):
     return hashlib.sha256(file.read_bytes()).hexdigest()

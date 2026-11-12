@@ -72,10 +72,29 @@ listener profile:
   "events": {
     "key_file": "events.key",
     "grant_id": "grant-id",
-    "dispatch_timeout_ms": 16000
+    "dispatch_timeout_ms": 16000,
+    "webhook_allowed_hosts": ["receiver.example.com"]
   }
 }
 ```
+
+**Planned, not yet released:** `events.webhook_allowed_hosts` optionally limits
+subscribe/renew callbacks to exact DNS hostnames (ASCII or punycode, matched
+case-insensitively). Wildcards, URLs, IP literals, ports and trailing dots are
+invalid entries. An empty list denies every callback; an absent or `null` list is
+**permissive**, preserving today's callback-host behavior and emitting a startup
+warning. An unset list is not SSRF protection. Existing HTTPS, public-address,
+connection-pinning and no-redirect checks still apply independently.
+
+A host refusal returns `CallbackEndpointError` with reason
+`callback_host_not_allowed` before callback verification or network I/O, and leaves
+the prior subscription unchanged. This setting does not retroactively fence an
+already active subscription; use the existing owner controls for that operation.
+At subscribe/renew the `gateway_events` info diagnostic records only the normalized
+`callback_host` and a static reason, never the URL's scheme, port, path, query or
+signing secret. Operators can initially omit the list, observe the host, then set
+an exact list. No ChatGPT hostname pattern is assumed or published by this gateway.
+For example, replace `receiver.example.com` above with the observed approved host.
 
 Set `verifier.required_scopes` to include `identity:read` and `events:subscribe`.
 Send/reply policies may require additional scopes. With `verifier.timeout_ms: 5000`,

@@ -14,6 +14,8 @@ pub const MAX_EVENT_BYTES: usize = 262_144;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
+    #[error("callback_host_not_allowed")]
+    HostNotAllowed,
     #[error("invalid_callback_destination")]
     Destination,
     #[error("callback_timeout")]
@@ -113,6 +115,24 @@ pub fn callback_url(raw: &str) -> Result<Url, Error> {
         return Err(Error::Destination);
     }
     Ok(url)
+}
+
+pub(crate) fn callback_host(host: &str) -> Result<String, Error> {
+    if host.len() > 253
+        || host.parse::<IpAddr>().is_ok()
+        || host.split('.').any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+    {
+        return Err(Error::Destination);
+    }
+    Ok(host.to_ascii_lowercase())
 }
 
 fn v4_prefix(ip: Ipv4Addr, network: [u8; 4], bits: u32) -> bool {
@@ -381,6 +401,30 @@ pub async fn verify_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn callback_allowlist_requires_exact_dns_names() {
+        assert_eq!(
+            callback_host("Receiver.Example.com").unwrap(),
+            "receiver.example.com"
+        );
+        for invalid in [
+            "",
+            "*.example.com",
+            "example.com.",
+            "https://example.com",
+            "example.com:443",
+            "127.0.0.1",
+            "::1",
+            "a..com",
+            "-a.com",
+            "a-.com",
+            " space.com",
+            "a/com",
+            "a@com",
+        ] {
+            assert!(callback_host(invalid).is_err(), "{invalid}");
+        }
+    }
     #[test]
     fn all_dns_answers_must_be_public() {
         let public = "8.8.8.8:443".parse().unwrap();

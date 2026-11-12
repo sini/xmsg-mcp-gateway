@@ -784,3 +784,157 @@ async fn failed_rotation_refresh_cannot_discard_a_still_valid_previous_key() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn callback_host_allowlist_refuses_before_any_outbound_request() {
+    let setup = Setup::new();
+    let identity = setup.verifier.verify("good-token").await.unwrap();
+    let events = setup
+        .runtime()
+        .with_allowed_hosts(Some(vec!["receiver.example.com".into()]))
+        .unwrap();
+    for host in ["off-list.example", "receiver.example.com.attacker.example"] {
+        let mut input = request(4);
+        input.delivery.url = format!("https://{host}/events");
+        let error = events
+            .subscribe(&identity, "good-token", "bus", "dot@bus", input)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            xmsg_mcp_gateway::events::Error::Callback(webhook::Error::HostNotAllowed)
+        ));
+        assert_eq!(setup.callback.calls.load(Ordering::SeqCst), 0);
+    }
+    let rows: i64 = rusqlite::Connection::open(&setup.provider.store_file)
+        .unwrap()
+        .query_row("SELECT count(*) FROM event_subscriptions", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        rows, 0,
+        "host refusal must not create a provisional subscription"
+    );
+}
+
+#[tokio::test]
+async fn callback_host_allowlist_renew_refusal_preserves_active_subscription() {
+    let setup = Setup::new();
+    let identity = setup.verifier.verify("good-token").await.unwrap();
+    let mut input = request(4);
+    input.delivery.url = "https://receiver.example.com/events".into();
+    setup
+        .runtime()
+        .with_allowed_hosts(Some(vec!["receiver.example.com".into()]))
+        .unwrap()
+        .subscribe(&identity, "good-token", "bus", "dot@bus", input)
+        .await
+        .unwrap();
+    assert_eq!(setup.callback.calls.load(Ordering::SeqCst), 1);
+    let connection = rusqlite::Connection::open(&setup.provider.store_file).unwrap();
+    let snapshot = || {
+        let mut statement = connection
+            .prepare("SELECT * FROM event_subscriptions")
+            .unwrap();
+        let columns = statement.column_count();
+        statement
+            .query_row([], |row| {
+                (0..columns)
+                    .map(|index| row.get::<_, rusqlite::types::Value>(index))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap()
+    };
+    let before = snapshot();
+    let mut renewal = request(5);
+    renewal.delivery.url = "https://receiver.example.com/events".into();
+    renewal.ttl_ms = Some(60_000);
+    let error = setup
+        .runtime()
+        .with_allowed_hosts(Some(vec!["replacement.example.com".into()]))
+        .unwrap()
+        .subscribe(&identity, "good-token", "bus", "dot@bus", renewal)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        xmsg_mcp_gateway::events::Error::Callback(webhook::Error::HostNotAllowed)
+    ));
+    assert_eq!(setup.callback.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(snapshot(), before, "refused renew changed the active row");
+    let status: String = connection
+        .query_row("SELECT status FROM event_subscriptions", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(status, "active");
+}
+
+#[derive(Clone)]
+struct CallbackLog(Arc<Mutex<Vec<u8>>>);
+impl std::io::Write for CallbackLog {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn callback_host_log_excludes_path_query_port_and_signing_secret() {
+    use tracing::instrument::WithSubscriber;
+    for hosts in [
+        None,
+        Some(vec!["receiver.example.com".into()]),
+        Some(vec!["different.example.com".into()]),
+        Some(Vec::new()),
+    ] {
+        let setup = Setup::new();
+        let identity = setup.verifier.verify("good-token").await.unwrap();
+        let denied = hosts
+            .as_ref()
+            .is_some_and(|hosts| !hosts.iter().any(|host| host == "receiver.example.com"));
+        let events = setup.runtime().with_allowed_hosts(hosts).unwrap();
+        let captured = CallbackLog(Arc::new(Mutex::new(Vec::new())));
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || writer.clone())
+            .finish();
+        let mut input = request(7);
+        let secret = input.delivery.secret.clone();
+        input.delivery.url =
+            "https://RECEIVER.example.com:443/PATH_CANARY?query=QUERY_CANARY".into();
+        let result = events
+            .subscribe(&identity, "good-token", "bus", "dot@bus", input)
+            .with_subscriber(subscriber)
+            .await;
+        assert_eq!(result.is_err(), denied);
+        assert_eq!(
+            setup.callback.calls.load(Ordering::SeqCst),
+            usize::from(!denied)
+        );
+        let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        let lines: Vec<_> = log
+            .lines()
+            .filter(|line| line.contains("gateway_events") && line.contains("callback_host="))
+            .collect();
+        assert_eq!(lines.len(), 1, "one Events host log is required: {log}");
+        assert!(lines[0].contains("receiver.example.com"), "{log}");
+        assert_eq!(lines[0].contains("callback_host_not_allowed"), denied);
+        for canary in [
+            "PATH_CANARY",
+            "QUERY_CANARY",
+            secret.as_str(),
+            ":443",
+            "https://",
+        ] {
+            assert!(!log.contains(canary), "callback log leaked {canary}: {log}");
+        }
+    }
+}

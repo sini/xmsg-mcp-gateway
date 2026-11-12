@@ -72,6 +72,8 @@ impl From<session::Error> for StartupError {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EventsConfiguration {
+    #[serde(default)]
+    webhook_allowed_hosts: Option<Vec<String>>,
     key_file: PathBuf,
     grant_id: String,
     #[serde(default)]
@@ -333,13 +335,20 @@ impl Serving {
             store
                 .require_events_ready(&key)
                 .map_err(|_| ConfigurationError)?;
-            Some(Arc::new(events::Events::with_transport(
-                config.grant_store.clone(),
-                key,
-                verifier.clone(),
-                configuration.grant_id.clone(),
-                transport,
-            )))
+            if configuration.webhook_allowed_hosts.is_none() {
+                tracing::warn!(target:"gateway_events",class="configuration",reason="callback_hosts_unrestricted","Events webhook host allowlist is unset; callback hosts are unrestricted");
+            }
+            Some(Arc::new(
+                events::Events::with_transport(
+                    config.grant_store.clone(),
+                    key,
+                    verifier.clone(),
+                    configuration.grant_id.clone(),
+                    transport,
+                )
+                .with_allowed_hosts(configuration.webhook_allowed_hosts.clone())
+                .map_err(|_| ConfigurationError)?,
+            ))
         } else {
             None
         };
@@ -1761,6 +1770,7 @@ fn event_error(id: &Value, error: events::Error) -> Response {
                 crate::webhook::Error::Timeout => "timeout",
                 crate::webhook::Error::Challenge => "challenge_failed",
                 crate::webhook::Error::Destination => "invalid_url",
+                crate::webhook::Error::HostNotAllowed => "callback_host_not_allowed",
                 crate::webhook::Error::Transport => "unreachable",
                 _ => "invalid_response",
             };
@@ -1836,12 +1846,9 @@ pub fn owner_events(config_file: &Path) -> Result<events::Events, StartupError> 
     store
         .require_events_ready(&key)
         .map_err(|_| ConfigurationError)?;
-    Ok(events::Events::new(
-        config.grant_store,
-        key,
-        verifier,
-        events.grant_id,
-    ))
+    events::Events::new(config.grant_store, key, verifier, events.grant_id)
+        .with_allowed_hosts(events.webhook_allowed_hosts)
+        .map_err(|_| ConfigurationError.into())
 }
 
 #[cfg(test)]

@@ -101,6 +101,7 @@ pub struct Events {
     pub(crate) key: EventKey,
     pub(crate) verifier: Arc<Verifier>,
     pub(crate) transport: Arc<dyn Transport>,
+    webhook_allowed_hosts: Option<Vec<String>>,
 }
 
 pub(crate) fn owner_key(
@@ -221,7 +222,22 @@ impl Events {
             key,
             verifier,
             transport,
+            webhook_allowed_hosts: None,
         }
+    }
+    pub fn with_allowed_hosts(
+        mut self,
+        hosts: Option<Vec<String>>,
+    ) -> Result<Self, webhook::Error> {
+        self.webhook_allowed_hosts = hosts
+            .map(|hosts| {
+                hosts
+                    .into_iter()
+                    .map(|host| webhook::callback_host(&host))
+                    .collect()
+            })
+            .transpose()?;
+        Ok(self)
     }
     fn authorized(
         &self,
@@ -309,7 +325,22 @@ impl Events {
             return Err(Error::Arguments);
         }
         webhook::validate_secret(&request.delivery.secret)?;
-        let url = webhook::callback_url(&request.delivery.url)?.to_string();
+        let callback = webhook::callback_url(&request.delivery.url)?;
+        let host = callback.host_str().ok_or(webhook::Error::Destination)?;
+        let allowed = self
+            .webhook_allowed_hosts
+            .as_ref()
+            .is_none_or(|hosts| hosts.iter().any(|allowed| allowed == host));
+        let reason = if allowed {
+            "callback_host_allowed"
+        } else {
+            "callback_host_not_allowed"
+        };
+        tracing::info!(target:"gateway_events",class="subscription",reason,callback_host=host,"Events callback host");
+        if !allowed {
+            return Err(webhook::Error::HostNotAllowed.into());
+        }
+        let url = callback.to_string();
         let store = Store::open_for_dispatch(&self.file)?;
         let _lease = store
             .try_operation_lease(identity.service())?

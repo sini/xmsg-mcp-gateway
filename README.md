@@ -77,6 +77,18 @@ service grant, and `client_id` must still match the approved `hosted_client`.
 1.11.2 with a dedicated one-to-one client audience; do not reuse that registration
 for another resource or application.
 
+### Events callback host configuration
+
+**Planned, not yet released.** In the Rust serving configuration, set
+`"events": {"key_file": "events.key", "grant_id": "grant-id", "dispatch_timeout_ms": 16000,
+"webhook_allowed_hosts": ["receiver.example.com"]}` within a complete Events profile.
+Use exact DNS hostnames, with no wildcard, URL or port. `[]` refuses all new
+subscribe/renew callbacks. Omitting the list (or `null`) is permissive and warns at
+startup; it is not SSRF protection. Existing public HTTPS transport restrictions
+remain in force. Subscribe/renew logs expose the normalized host only, so an
+operator can observe an approved receiver before configuring the list. See
+[Events setup](docs/events.md) for refusal and renewal behavior.
+
 ## Python reference setup
 
 Requires Linux, Python 3.12 or newer, and uv. This uses a fresh repository, not a
