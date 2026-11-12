@@ -25,6 +25,7 @@ fn verifier(error: &auth::Error) -> &'static str {
     match error {
         auth::Error::Configuration => "verifier_configuration",
         auth::Error::InvalidToken => "verifier_invalid_token",
+        auth::Error::Denied => "store_denied",
         auth::Error::Unavailable => "verifier_unavailable",
     }
 }

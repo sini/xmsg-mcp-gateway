@@ -16,7 +16,7 @@ const SCHEMA_VERSION: i64 = 1;
 pub const CUSTODY_SCHEMA_VERSION: i64 = 2;
 pub const OUTBOUND_SCHEMA_VERSION: i64 = 3;
 pub const EVENTS_SCHEMA_VERSION: i64 = 4;
-pub const MAX_SUPPORTED_SCHEMA_VERSION: i64 = EVENTS_SCHEMA_VERSION;
+pub const MAX_SUPPORTED_SCHEMA_VERSION: i64 = crate::authorization_server::SCHEMA_VERSION;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -72,6 +72,7 @@ pub enum Migration {
     Retirement,
     Events,
     Profiles,
+    AuthorizationServer,
 }
 
 pub struct Store {
@@ -163,6 +164,9 @@ impl Store {
         if version >= EVENTS_SCHEMA_VERSION {
             crate::event_store::validate_schema(connection)?;
         }
+        if version >= crate::authorization_server::SCHEMA_VERSION {
+            crate::authorization_server::validate_schema(connection)?;
+        }
         Ok(())
     }
 
@@ -209,7 +213,7 @@ impl Store {
         {
             return Err(Error::InvalidStore.into());
         }
-        if version == EVENTS_SCHEMA_VERSION {
+        if version >= EVENTS_SCHEMA_VERSION {
             let key_check: bool = self.connection.query_row(
                 "SELECT COUNT(*)=1 AND MAX(id)=1 AND MIN(length(value))>0 FROM event_key_check",
                 [],
@@ -224,8 +228,11 @@ impl Store {
             Migration::CustodySummaries => marker == SUMMARY_APPLICATION_ID,
             Migration::Outbound => version >= OUTBOUND_SCHEMA_VERSION,
             Migration::Retirement => retirement,
-            Migration::Events => version == EVENTS_SCHEMA_VERSION,
+            Migration::Events => version >= EVENTS_SCHEMA_VERSION,
             Migration::Profiles => self.profiles_migrated()?,
+            Migration::AuthorizationServer => {
+                version >= crate::authorization_server::SCHEMA_VERSION
+            }
         })
     }
 
@@ -241,6 +248,10 @@ impl Store {
             (Migration::CustodySummaries, "migrate-custody-summaries"),
             (Migration::Events, "migrate-events"),
             (Migration::Profiles, "migrate-profiles"),
+            (
+                Migration::AuthorizationServer,
+                "migrate-authorization-server",
+            ),
         ] {
             if !self.migration_applied(migration)? {
                 pending.push(command);
@@ -414,6 +425,9 @@ impl Store {
             r.get(0)
         })?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if !enabled && version >= crate::authorization_server::SCHEMA_VERSION {
+            tx.execute("UPDATE oauth_families SET revoked_at=COALESCE(revoked_at,unixepoch()),revoked_reason=COALESCE(revoked_reason,'grant_disabled') WHERE grant_id=?1",[id])?;
+        }
         let events_change = if version >= EVENTS_SCHEMA_VERSION {
             Some(crate::event_store::enabled_transition(
                 tx, id, next, enabled,
@@ -437,6 +451,7 @@ impl Store {
     }
 
     pub fn authorize(&self, binding: &VerifiedIdentity) -> Result<Authorization, Error> {
+        tracing::debug!(target:"gateway_grant_authorize",class="lookup");
         self.connection
             .query_row(
                 "SELECT id, revision FROM grants WHERE service = ?1 AND issuer = ?2

@@ -221,6 +221,9 @@ Responses are bounded to 64 KiB. Requests are capped at 64 KiB, event bodies at
 
 ## Owner steps: private tunnel
 
+Planned Rust AS path: [gateway authorization server](docs/authorization-server.md). Configure the gateway as OAuth issuer, register the new connector’s exact redirect, and provision its mandatory Basic client secret. Publish the AS discovery and `/oauth/*` routes over HTTPS even when `/mcp` stays private behind a tunnel. This cutover needs owner acceptance; the legacy hosted OAuth/Events result measured on 2026-11-10 remains separate.
+
+
 These hosted feasibility steps apply to the Python reference server. They do not
 activate the Rust listener or establish production Rust hosted compatibility. For
 Rust operation, use [Events setup](docs/events.md); for the synthetic probe and the
@@ -233,7 +236,7 @@ current connection form, use [hosted setup](docs/hosted-dots-setup.md).
 2. Ensure the browser can reach login/consent, and the hosted OAuth exchange can
    reach discovery and token endpoints. Tunnel transport does not automatically
    expose the authorization server. Provision the introspection secret directly
-   into the private file referenced by `.state/oauth.toml`.
+   into the private file referenced by `.state/oauth.toml`. For Kanidm 1.11.2 this configured Basic header is compatibility, not authenticated lookup access; Keycloak and the planned gateway AS retain their own client-authentication requirements.
 3. In Platform tunnel settings, obtain an authorized tunnel and associate it with
    the intended ChatGPT workspace and Platform organization. Tunnel management
    requires Read + Manage; the runtime and operator need Read + Use.
@@ -271,6 +274,9 @@ current connection form, use [hosted setup](docs/hosted-dots-setup.md).
 
 ## Owner steps: public HTTPS fallback
 
+For the planned Rust AS path, publish both MCP and the separate AS issuer’s routes with TLS. Drop query strings from `/oauth/*` ingress logs, preserve exact redirect URIs, and follow the [guarded cutover and rollback](docs/authorization-server.md#owner-run-migration-cutover-and-rollback) before moving Events. Never treat successful transport as authorization or Events acceptance.
+
+
 If the combined private-tunnel flow is unsupported, the owner may configure a
 stable HTTPS reverse proxy for this new MCP endpoint and its public discovery
 metadata. Keep the listener on loopback where possible. Set `exposure` to
@@ -292,3 +298,5 @@ Run the tests and mutation command from a fresh checkout to reproduce local chec
 fresh mutation output is written to the gitignored `.artifacts/mutations/` directory.
 
 Planned authentication extension: [multiple verifier profiles and issuer cutover](docs/auth-profiles.md).
+
+Planned: [gateway-owned OAuth authority](docs/authorization-server.md), including one-hour access, 30-day idle/90-day absolute families, liveness, explicit Events renewal and owner-run cutover. Existing legacy provider and synthetic instructions above remain applicable to their named paths.

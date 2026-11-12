@@ -11,7 +11,8 @@ from grant_mutants import ROOT, run
 
 AUTH = ROOT / "src/auth.rs"
 GRANTS = ROOT / "src/grants.rs"
-source = AUTH.read_text()
+IDENTITY = ROOT / "src/auth/identity.rs"
+source = IDENTITY.read_text()
 start = source.index("pub struct VerifiedIdentity {")
 end = source.index("\n}", start) + 2
 identity = source[start:end]
@@ -24,33 +25,33 @@ unsafe_authorize = """    pub fn authorize<T>(&self, _binding: &T) -> Result<Aut
 CASES = [
     (
         "deserialize",
-        "src/auth.rs",
+        "src/auth/identity.rs",
         "#[derive(Debug)]\npub struct VerifiedIdentity",
-        "#[derive(Debug, Deserialize)]\npub struct VerifiedIdentity",
+        "#[derive(Debug, serde::Deserialize)]\npub struct VerifiedIdentity",
         "identity_cannot_be_deserialized",
     ),
     (
         "default",
-        "src/auth.rs",
+        "src/auth/identity.rs",
         "#[derive(Debug)]\npub struct VerifiedIdentity",
         "#[derive(Debug, Default)]\npub struct VerifiedIdentity",
         "identity_has_no_default",
     ),
     (
         "public-fields",
-        "src/auth.rs",
+        "src/auth/identity.rs",
         identity,
-        identity.replace("    ", "    pub "),
+        identity.replace("pub(super)", "pub"),
         "identity_fields_are_private",
     ),
     (
         "from-binding",
-        "src/auth.rs",
+        "src/auth/identity.rs",
         "impl VerifiedIdentity {",
         """impl From<crate::grants::Binding> for VerifiedIdentity {
     fn from(binding: crate::grants::Binding) -> Self {
         Self { audience: binding.resource.clone(), service: binding.service, issuer: binding.issuer, resource: binding.resource,
-            subject: binding.subject, hosted_client: binding.hosted_client, expires_at: u64::MAX }
+            subject: binding.subject, hosted_client: binding.hosted_client, expires_at: u64::MAX,token_family:None,admission:None,admission_policy:None }
     }
 }
 impl VerifiedIdentity {""",

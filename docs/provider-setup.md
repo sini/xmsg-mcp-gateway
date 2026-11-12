@@ -51,7 +51,7 @@ The audience option is generic, not a Kanidm-specific authentication mode. A
 provider that already issues resource audiences needs no override. A broker can
 also remain in use as a fallback when an installation requires exact-resource
 access tokens (see the [Keycloak OAuth broker fallback recipe](oauth-keycloak.md)).
-The verifier's introspection credentials identify the lookup caller, not the
+Kanidm 1.11.2 does not authenticate introspection callers: a wrong Basic lookup secret produced the same active response in the measured installation. For that provider, the configured lookup header is compatibility, not an authentication control. Keep its configured file private, but do not claim that this secret protects introspection. Other providers such as Keycloak may require genuine lookup authentication. The verifier's introspection credentials are distinct from the
 hosted OAuth client; keep their roles distinct and continue to check the returned
 `client_id` against the approved `hosted_client`.
 
@@ -113,3 +113,9 @@ and has no xmsg behind it; see the [hosted probe commands](hosted-dots-setup.md#
 It is not the reference's `local-test` mode or a shipped authentication option.
 The Rust gateway remains OAuth-only. The synthetic reference supports one callback
 binding until an explicit owner reset; test client renewal within that constraint.
+
+## Planned gateway-owned authorization
+
+The [gateway AS](authorization-server.md) separates hosted credentials from upstream login. Provision a dedicated Kanidm login client with S256, `openid`, the exact gateway `/oauth/callback` URI and owner allowlisting. Its issuer, subject, client and audience must match `authorization_server.upstream.verify`. Hosted client authentication belongs to the gateway AS and remains mandatory even though Kanidm 1.11.2 ignores lookup Basic credentials.
+
+Provision a read-only API-token service account in builtin `idm_people_pii_read`, plus a permanent visibility-canary person with planted `account_valid_from` and `account_expire` dates. This builtin reads PII across persons; it is broader than the gateway's configured owner/canary queries. Do not modify the owner's validity dates or add a custom ACP. Prove owner validity/membership and canary-date visibility with that reader, plus a hidden-reader control, before deployment. Membership must include the configured exact SPN, not merely a matching UUID. Liveness performs three owner attribute GETs and two canary date GETs; consent data and canary membership do not participate. See the [outcome rules and bounds](authorization-server.md#lifetimes-and-liveness).

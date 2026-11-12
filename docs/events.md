@@ -30,7 +30,7 @@ chmod 600 .state/events.key
 
 The noclobber redirection refuses an existing key file. Replacing a key does not
 rotate the encrypted data: the wrong or missing key prevents Events activation.
-URLs, delivery secrets and retained access tokens are encrypted with authenticated
+URLs, delivery secrets and retained legacy access tokens are encrypted with authenticated
 owner/field binding. This keeps a copied database from exposing those values;
 the gateway account still needs access to its key. Do not reuse a node, tunnel or
 introspection credential as the encryption key.
@@ -149,7 +149,7 @@ example's no-authentication mode.
 
 ## Subscription and delivery contract
 
-`initialize` advertises Events when configured. The same authenticated `/mcp`
+`initialize` advertises Events for the configured Events grant. The same authenticated `/mcp`
 endpoint serves `events/list`, `events/subscribe` and `events/unsubscribe`.
 Discovery returns one event, empty subscription arguments and webhook delivery.
 The subscription request shape is:
@@ -192,7 +192,7 @@ A replacement signing key is verified again. For 300 seconds the gateway signs
 with both old and new keys; a third rotation during that window conflicts.
 Subscription state, rotation and encrypted credentials survive gateway restart.
 
-A due delivery introspects the stored access token and checks exact identity,
+For a legacy bearer subscription, a due delivery introspects the stored access token and checks exact identity,
 Events scope, current grant/revision, item eligibility and subscription generation
 under the operation lease. Empty, held, accepted, dead and backoff ticks do not
 introspect. An expired or revoked access token parks delivery until the same
@@ -439,3 +439,17 @@ outside-facing authority change without adding a second target policy or a
 conversation-specific identity.
 
 Protocol reference: [MCP Events](https://developers.openai.com/plugins/build/mcp-events).
+
+## Planned AS family subscriptions and renewal
+
+The [gateway authorization server](authorization-server.md) adds family-bound Events. A subscription authenticated by the local profile stores `token_family` instead of an encrypted bearer; exactly one credential form is retained. Callback URL/signing-secret encryption and the exact hostname allowlist still apply. Other accepted verifier profiles do not acquire custody/Events rights; `events.grant_id` remains the explicit selection.
+
+`ttlMs` still defaults to one hour and clamps to 60 seconds through 24 hours. The family subscription is further clamped to its absolute expiry and idle end, **not** to the current access-token expiry. Dispatcher liveness can extend delivery eligibility across access-token expiry without minting a token, but cannot extend the subscription's own requested TTL. Renew before `refreshBefore`; refresh of an OAuth token pair alone is insufficient.
+
+Subscribe and renew freshly verify the presented token and grant at the effect point before writing durable future wake authority. A revocation after initial admission but before that verification refuses the operation and leaves the prior subscription unchanged. Custody read/ACK and reply-target ownership lookup with its pre-effect recheck retain the current grant/revision fence. A disable after admission but before reply-target lookup refuses the new reply without a reservation or bus effect. There is no eligibility-history table restoring earlier custody rights. Normal local sends, broker calls and stored reply receipt/reservation recovery retain their admitted snapshot within budget. That snapshot includes the outbound policy in memory; a later policy edit does not alter the admitted send. No policy snapshot is stored durably.
+
+When a family becomes invalid, delivery stays pending and is retried later; the local family path does not write legacy `credential_required`. The client must renew/re-subscribe with a live token to bind its new family. A new authorization, successful MCP call, shared subject or another live family never automatically changes the existing subscription. Automatic follow-on could revive a revoked callback owned by a thief. In the legacy path a reconnect can restore MCP while Events remains `credential_required` on the old retained bearer until renewal.
+
+Local-family delivery uses the latest liveness outcome and the minimum of the delivery, family absolute and idle bounds. A due item triggers a read when that bound is within 600 seconds or past, at most once per family every 300 seconds, before taking the operation lease. Readable denials revoke; unavailable/indeterminate evidence permits only bounded grace. See [liveness, visibility and trusted-clock limits](authorization-server.md#lifetimes-and-liveness). Kanidm UI logout and consent removal alone do not disconnect local families.
+
+For an issuer/grant move, use the owner-run [offline cutover guard and rollback](authorization-server.md#owner-run-migration-cutover-and-rollback). Changing `events.grant_id` alone neither transfers old custody nor updates the connector's stored family. This AS capability is planned; the legacy hosted OAuth/Events observations from 2026-11-10 do not certify the new flow.

@@ -45,7 +45,8 @@ struct Subscription {
     url: Vec<u8>,
     secret: Vec<u8>,
     previous: Option<Vec<u8>>,
-    bearer: Vec<u8>,
+    bearer: Option<Vec<u8>>,
+    family: Option<String>,
     rotation: i64,
     cursor: i64,
 }
@@ -73,7 +74,17 @@ fn subscription(
     selected_grant: &str,
     at: i64,
 ) -> Result<Option<Subscription>, Error> {
-    Ok(store.connection.query_row("SELECT s.id,s.owner_key,s.service,s.issuer,s.resource,s.subject,s.hosted_client,s.grant_id,s.grant_revision,s.generation,s.expires,s.url,s.secret,s.old_secret,s.bearer,s.rotation_until,s.callback_cursor FROM event_subscriptions s JOIN grants g ON g.id=s.grant_id WHERE s.bus=?1 AND s.mailbox=?2 AND s.grant_id=?4 AND s.status='active' AND s.expires>?3 AND g.enabled=1 AND g.revision=s.grant_revision AND g.service=s.service AND g.issuer=s.issuer AND g.resource=s.resource AND g.subject=s.subject AND g.hosted_client=s.hosted_client",params![bus,mailbox,at,selected_grant], |r| Ok(Subscription {id:r.get(0)?,owner:r.get(1)?,service:r.get(2)?,issuer:r.get(3)?,resource:r.get(4)?,subject:r.get(5)?,client:r.get(6)?,grant:r.get(7)?,revision:r.get(8)?,generation:r.get(9)?,expires:r.get(10)?,url:r.get(11)?,secret:r.get(12)?,previous:r.get(13)?,bearer:r.get(14)?,rotation:r.get(15)?,cursor:r.get(16)?})).optional()?)
+    let mut selected=store.connection.query_row("SELECT s.id,s.owner_key,s.service,s.issuer,s.resource,s.subject,s.hosted_client,s.grant_id,s.grant_revision,s.generation,s.expires,s.url,s.secret,s.old_secret,s.bearer,s.rotation_until,s.callback_cursor FROM event_subscriptions s JOIN grants g ON g.id=s.grant_id WHERE s.bus=?1 AND s.mailbox=?2 AND s.grant_id=?4 AND s.status='active' AND s.expires>?3 AND g.enabled=1 AND g.revision=s.grant_revision AND g.service=s.service AND g.issuer=s.issuer AND g.resource=s.resource AND g.subject=s.subject AND g.hosted_client=s.hosted_client",params![bus,mailbox,at,selected_grant], |r| Ok(Subscription {id:r.get(0)?,owner:r.get(1)?,service:r.get(2)?,issuer:r.get(3)?,resource:r.get(4)?,subject:r.get(5)?,client:r.get(6)?,grant:r.get(7)?,revision:r.get(8)?,generation:r.get(9)?,expires:r.get(10)?,url:r.get(11)?,secret:r.get(12)?,previous:r.get(13)?,bearer:r.get(14)?,family:None,rotation:r.get(15)?,cursor:r.get(16)?})).optional()?;
+    if let Some(sub) = &mut selected {
+        if sub.bearer.is_none() {
+            sub.family = store.connection.query_row(
+                "SELECT token_family FROM event_subscriptions WHERE id=?1",
+                [&sub.id],
+                |r| r.get(0),
+            )?;
+        }
+    }
+    Ok(selected)
 }
 
 fn candidate(
@@ -180,11 +191,17 @@ fn park_credential(db: &rusqlite::Connection, item: &Candidate, at: i64) -> Resu
     }
     Ok(Tick::CredentialRequired)
 }
+fn event_now(events: &Events) -> Result<i64, Error> {
+    match events.verifier.local_server() {
+        Some(server) => server.effective_now().map_err(|_| Error::Clock),
+        None => now(),
+    }
+}
 
 pub(crate) async fn tick(events: &Events, bus: &str, mailbox: &str) -> Result<Tick, Error> {
     let store = Store::open_for_dispatch(&events.file)?;
     store.require_events_ready(&events.key)?;
-    let at = now()?;
+    let at = event_now(events)?;
     let Some(sub) = subscription(&store, bus, mailbox, &events.selected_grant, at)? else {
         return Ok(Tick::Idle);
     };
@@ -196,11 +213,26 @@ pub(crate) async fn tick(events: &Events, bus: &str, mailbox: &str) -> Result<Ti
         return Ok(Tick::Idle);
     };
     tracing::debug!(target:"gateway_events_selected", "due candidate selected");
+    if let Some(family) = &sub.family {
+        let Some(server) = events.verifier.local_server() else {
+            return Ok(Tick::Expired);
+        };
+        match server.delivery_read_due(family) {
+            Ok(true) => {
+                if server.check_liveness(family, true).await.is_err() {
+                    return Ok(Tick::Expired);
+                }
+            }
+            Ok(false) => {}
+            Err(_) => return Ok(Tick::Expired),
+        }
+    }
+
     let Some(_lease) = store.try_operation_lease(&sub.service)? else {
         return Ok(Tick::Contended);
     };
     // Selection precedes introspection, but due/state must be re-read inside the lease.
-    let at = now()?;
+    let at = event_now(events)?;
     let Some(sub) = subscription(&store, bus, mailbox, &events.selected_grant, at)? else {
         return Ok(Tick::Idle);
     };
@@ -215,11 +247,21 @@ pub(crate) async fn tick(events: &Events, bus: &str, mailbox: &str) -> Result<Ti
         crate::event_diagnostic::delivery("dead", Some("attempts_exhausted"), item.attempts);
         return Ok(Tick::Dead);
     }
-    let bearer = open_text(events, &sub, "bearer", &sub.bearer)?;
-    let identity = match events.verifier.verify(&bearer).await {
-        Ok(identity) => identity,
-        Err(_) => {
-            return park_credential(&store.connection, &item, at);
+    let identity = if let Some(family) = &sub.family {
+        match events.verifier.verify_family(family) {
+            Ok(identity) => identity,
+            Err(_) => return Ok(Tick::Expired),
+        }
+    } else {
+        let Some(sealed) = &sub.bearer else {
+            return Ok(Tick::Expired);
+        };
+        let bearer = open_text(events, &sub, "bearer", sealed)?;
+        match events.verifier.verify(&bearer).await {
+            Ok(identity) => identity,
+            Err(_) => {
+                return park_credential(&store.connection, &item, at);
+            }
         }
     };
     if identity.service() != sub.service
@@ -237,7 +279,7 @@ pub(crate) async fn tick(events: &Events, bus: &str, mailbox: &str) -> Result<Ti
     if authority.grant_id != sub.grant || authority.revision != sub.revision {
         return Ok(Tick::Idle);
     }
-    let at = now()?;
+    let at = event_now(events)?;
     if at >= sub.expires || at as u64 >= identity.expires_at() {
         return Ok(Tick::Expired);
     }
@@ -373,7 +415,7 @@ impl ExpiryObservation {
         mailbox: &str,
     ) -> Result<(), Error> {
         let store = Store::open_for_dispatch(&events.file)?;
-        let at = now()?;
+        let at = event_now(events)?;
         let expired: Option<(String,i64)> = store.connection.query_row(
             "SELECT s.id,s.generation FROM event_subscriptions s JOIN grants g ON g.id=s.grant_id
              WHERE s.bus=?1 AND s.mailbox=?2 AND s.grant_id=?3 AND s.status='active' AND s.expires<=?4

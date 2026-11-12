@@ -52,5 +52,6 @@ mod event_observer_fixture;
 #[cfg(test)]
 mod event_observability_tests;
 
+pub mod authorization_server;
 #[cfg(test)]
 mod event_renewal_status_tests;

@@ -189,5 +189,8 @@ fn profile_migration_preserves_the_remaining_migration_chain() {
         .migrate_events(&xmsg_mcp_gateway::event_store::EventKey::load(&key).unwrap())
         .unwrap();
     store.require_profiles_ready().unwrap();
-    assert!(store.pending_migrations().unwrap().is_empty());
+    assert_eq!(
+        store.pending_migrations().unwrap(),
+        ["migrate-authorization-server"]
+    );
 }

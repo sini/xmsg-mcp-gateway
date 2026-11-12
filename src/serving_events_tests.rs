@@ -21,6 +21,23 @@ impl Drop for Bus {
 fn rpc(method: &str, params: Value) -> Value {
     json!({"jsonrpc":"2.0","id":"event-request","method":method,"params":params})
 }
+async fn mock_write_reply(stream: &mut tokio::net::UnixStream, value: &Value) -> bool {
+    match stream.write_all(format!("{value}\n").as_bytes()).await {
+        Ok(()) => true,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+            ) =>
+        {
+            false
+        }
+        Err(error) => panic!("unexpected mock reply failure: {error}"),
+    }
+}
+
 async fn call(serving: &Serving, method: &str, params: Value) -> Value {
     let (status, value, _) = fixture::request(serving, "good-token", rpc(method, params)).await;
     assert_eq!(status, StatusCode::OK, "{value}");
@@ -56,7 +73,7 @@ async fn start_bus(setup: &mut Setup) -> Bus {
                         let mut stream=BufReader::new(stream);let mut line=String::new();stream.read_line(&mut line).await.unwrap();
                         let registration:Value=serde_json::from_str(&line).unwrap();assert_eq!(registration["harness"],"svc");assert_eq!(registration["name"],"gateway");
                         let ready=json!({"status":"ok","address":"gateway@bus","node":"bus","reply_ttl_secs":604800,"idempotency_ttl_secs":604800,"svc_queue_cap":1000,"max_body_bytes":65536});
-                        stream.get_mut().write_all(format!("{ready}\n").as_bytes()).await.unwrap();
+                        if !mock_write_reply(stream.get_mut(),&ready).await{return;}
                         loop {
                             line.clear();if stream.read_line(&mut line).await.unwrap()==0 {break;}
                             let frame:Value=serde_json::from_str(&line).unwrap();
@@ -70,7 +87,7 @@ async fn start_bus(setup: &mut Setup) -> Bus {
                                     acknowledgements.lock().unwrap().push(message.to_owned());queued.lock().unwrap().pop_front();json!({"status":"ok"})
                                 },other=>panic!("unexpected service frame {other}"),
                             };
-                            stream.get_mut().write_all(format!("{reply}\n").as_bytes()).await.unwrap();
+                            if !mock_write_reply(stream.get_mut(),&reply).await{break;}
                         }
                     });
                 },
@@ -557,4 +574,24 @@ async fn callback_host_configuration_reaches_rpc_and_owner_runtime() {
         .shutdown()
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn mock_reply_handles_forced_peer_close_and_preserves_live_control() {
+    let (mut server, client) = tokio::net::UnixStream::pair().unwrap();
+    drop(client);
+    assert!(
+        !mock_write_reply(&mut server, &json!({"status":"ok"})).await,
+        "closed peer remained writable"
+    );
+    let (mut server, client) = tokio::net::UnixStream::pair().unwrap();
+    assert!(mock_write_reply(&mut server, &json!({"status":"ok"})).await);
+    let mut client = BufReader::new(client);
+    let mut line = String::new();
+    client.read_line(&mut line).await.unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&line).unwrap()["status"],
+        "ok",
+        "live mock reply positive control failed"
+    );
 }

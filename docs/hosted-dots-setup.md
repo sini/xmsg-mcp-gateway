@@ -25,6 +25,12 @@ Events encryption key, a webhook signing secret or a callback URL into chat, an
 issue or a shared log. Record only references to them (a file path or secret
 resource name).
 
+## Planned gateway-owned OAuth cutover
+
+The [gateway authorization server](authorization-server.md) uses upstream Kanidm login and gateway-owned one-hour access/30-day idle/90-day absolute families. Its public HTTPS discovery, authorize/callback/token/revoke routes remain reachable independently of the private MCP tunnel. Start a new connector to obtain its exact redirect URI; use the owner-run migration, offline custody guard and rollback procedure before selecting the new Events grant. A reconnect alone does not move an Events subscription: renew/re-subscribe explicitly with the new token. The default subscription TTL remains one hour, maximum 24 hours.
+
+This is a planned path with pending hosted acceptance, including actual refresh retry/concurrency, logout independence and a soak beyond 25 hours. It does not replace or expand the measured legacy results below.
+
 ## Verification status (measured vs. cutover)
 
 | Surface | Status | Evidence / scope |
@@ -63,7 +69,7 @@ All hostnames, tunnel IDs, node names and UUIDs below (`https://auth.example`,
     redirect URI `https://chatgpt.com/connector_platform_oauth_redirect` (confirm
     the exact callback URI displayed by the ChatGPT connection UI during
     [Section P3](#p3-connect-in-chatgpt-and-verify-events-delivery-measured-2026-11-10)). Provision a
-    separate confidential client for RFC 7662 token introspection.
+    separate confidential lookup client when the provider requires RFC 7662 caller authentication. Kanidm 1.11.2 ignores introspection Basic credentials; keep its configured lookup header separate from the hosted client, but do not count it as an authentication control.
 - **Host or Kubernetes Pod runtime:**
   - `xmsg` (`ghcr.io/sini/xmsg:latest` or release binary) running in `--leaf`
     mode with outbound mTLS to the `xmsg` hub (`allow` and `targets` scoped to

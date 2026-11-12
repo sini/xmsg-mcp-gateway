@@ -564,6 +564,12 @@ impl Store {
         if let Some(reservation) = existing {
             return Ok(reservation.target.clone());
         }
+        identity
+            .custody_authority(self)
+            .map_err(|error| match error {
+                GrantError::Denied => Error::Denied,
+                other => Error::from(other),
+            })?;
         let version: i64 = self
             .connection
             .pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -770,7 +776,10 @@ pub(crate) async fn list_verified(
         list_store.require_retirement_ready()?;
         require_current(context, &list_store)?;
         let authority = context.authority();
-        list_store.outbound_policy(&authority.grant_id)?
+        match context.identity().admitted_policy() {
+            Some(policy) => policy.clone(),
+            None => list_store.outbound_policy(&authority.grant_id)?,
+        }
     };
     let permission = policy.send.as_ref().ok_or(Error::Denied)?;
     if !verifier.requires_scope_for(context.identity(), &permission.required_scope) {
@@ -813,7 +822,10 @@ async fn verify_context(
     let identity = tokio::time::timeout(limits.timeout, verifier.verify(token))
         .await
         .map_err(|_| Error::Deadline)??;
-    let authority = store.authorize(&identity)?;
+    let authority = match identity.admitted_authority() {
+        Some(authority) => authority.clone(),
+        None => store.authorize(&identity)?,
+    };
     Ok(VerifiedContext::new(
         std::sync::Arc::new(identity),
         authority,
@@ -821,6 +833,9 @@ async fn verify_context(
 }
 
 pub(crate) fn require_current(context: &VerifiedContext, store: &Store) -> Result<(), Error> {
+    if context.identity().admitted_authority().is_some() {
+        return Ok(());
+    }
     if context.identity().expires_at() <= now() as u64 {
         return Err(crate::auth::Error::InvalidToken.into());
     }
@@ -929,7 +944,10 @@ async fn dispatch_on_connection(
     if selected_grant.is_some_and(|id| id != initial_grant.grant_id) {
         return Err(Error::Denied);
     }
-    let initial_policy = store.outbound_policy(&initial_grant.grant_id)?;
+    let initial_policy = match identity.admitted_policy() {
+        Some(policy) => policy.clone(),
+        None => store.outbound_policy(&initial_grant.grant_id)?,
+    };
     let initial_permission = initial_policy.permission(request)?;
     if !verifier.requires_scope_for(identity, &initial_permission.required_scope) {
         return Err(Error::Denied);
@@ -1064,7 +1082,10 @@ async fn submit(
     if selected_grant.is_some_and(|id| id != authority.grant_id) {
         return Err(Error::Denied);
     }
-    let policy = store.outbound_policy(&authority.grant_id)?;
+    let policy = match identity.admitted_policy() {
+        Some(policy) => policy.clone(),
+        None => store.outbound_policy(&authority.grant_id)?,
+    };
     let (op, id, text) = request.parts();
     let permission = policy.permission(request)?;
     if !verifier.requires_scope_for(identity, &permission.required_scope) {
