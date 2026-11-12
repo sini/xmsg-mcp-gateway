@@ -280,7 +280,7 @@ pub(crate) fn owned_attachment(
         return Err(Error::Arguments);
     }
     let _transaction = store.connection.unchecked_transaction()?;
-    let authority = store.authorize(identity)?;
+    let authority = identity.custody_authority(store)?;
     let version: i64 = store
         .connection
         .pragma_query_value(None, "user_version", |r| r.get(0))?;

@@ -173,7 +173,7 @@ class MutationGatesTests(unittest.TestCase):
 
     def test_complete_inventory_and_execution_modes(self):
         self.assertEqual(len(self.suites), 22)
-        self.assertEqual(sum(s["count"] for s in self.suites), 434)
+        self.assertEqual(sum(s["count"] for s in self.suites), 436)
         modes = {(s["script"], tuple(s["args"])) for s in self.suites}
         self.assertIn(("scripts/reservation_lifetime_mutants.py", ("--live",)), modes)
 
@@ -181,10 +181,10 @@ class MutationGatesTests(unittest.TestCase):
         self,
     ):
         suite = next(s for s in self.suites if s["id"] == "authorization_server")
-        self.assertEqual(suite["count"], 118)
-        self.assertEqual(len(suite["required_output"]), 236)
+        self.assertEqual(suite["count"], 120)
+        self.assertEqual(len(suite["required_output"]), 240)
         self.assertEqual(
-            suite["completion"], "authorization-server-mutants-complete:118/118"
+            suite["completion"], "authorization-server-mutants-complete:120/120"
         )
         for filename in [
             "src/auth/identity.rs",

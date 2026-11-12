@@ -1242,10 +1242,10 @@
       "id": "authorization_server",
       "script": "scripts/authorization_server_mutants.py",
       "args": [],
-      "count": 118,
+      "count": 120,
       "fixture": false,
       "python": false,
-      "completion": "authorization-server-mutants-complete:118/118",
+      "completion": "authorization-server-mutants-complete:120/120",
       "dependencies": [
         "src/authorization_server/**",
         "src/auth.rs",
@@ -1383,7 +1383,9 @@
         "canary-membership-authority",
         "liveness-completion-time",
         "pending-eviction-refused",
-        "negative-as-graced-outage"
+        "negative-as-graced-outage",
+        "union-attachment-pre-revision",
+        "union-attachment-post-revision"
       ],
       "required_output": [
         "^g5-events RED 01-access\\-expiry-red:",
@@ -1621,9 +1623,13 @@
         "^g5-events RED 117-pending\\-eviction\\-refused-red:",
         "^g5-events GREEN 117-pending\\-eviction\\-refused-restored$",
         "^g5-events RED 118-negative\\-as\\-graced\\-outage-red:",
-        "^g5-events GREEN 118-negative\\-as\\-graced\\-outage-restored$"
+        "^g5-events GREEN 118-negative\\-as\\-graced\\-outage-restored$",
+        "^g5-events RED 119-union\\-attachment\\-pre\\-revision-red:",
+        "^g5-events GREEN 119-union\\-attachment\\-pre\\-revision-restored$",
+        "^g5-events RED 120-union\\-attachment\\-post\\-revision-red:",
+        "^g5-events GREEN 120-union\\-attachment\\-post\\-revision-restored$"
       ],
-      "script_sha256": "bb7c393768a6657ebfcfe9609d3c40c0995738cd57e3a84512997f7f7c8c9fcf"
+      "script_sha256": "e5a2a56d7524d3d95e51c0ff3b923367ce1a3936531497761a6b5ed091f36823"
     }
   ]
 }

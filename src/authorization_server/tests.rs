@@ -2570,6 +2570,8 @@ fn limits() -> crate::outbound::Limits {
     }
 }
 
+type AttachmentReadHook = Arc<std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>>;
+
 struct Bus {
     _directory: tempfile::TempDir,
     registered: xmsg::client::RegisteredService,
@@ -2577,6 +2579,7 @@ struct Bus {
     pending: Arc<std::sync::Mutex<std::collections::VecDeque<serde_json::Value>>>,
     acked: Arc<std::sync::atomic::AtomicUsize>,
     stop: tokio::sync::oneshot::Sender<()>,
+    on_attachment_read: AttachmentReadHook,
     register_task: tokio::task::JoinHandle<()>,
     agent_task: tokio::task::JoinHandle<()>,
 }
@@ -2616,7 +2619,7 @@ impl Bus {
             );
             stream
                 .get_mut()
-                .write_all(b"{\"status\":\"ok\",\"node\":\"bus\",\"address\":\"gateway@bus\"}\n")
+                .write_all(b"{\"status\":\"ok\",\"node\":\"bus\",\"address\":\"gateway@bus\",\"reply_ttl_secs\":604800,\"idempotency_ttl_secs\":604800,\"svc_queue_cap\":1000,\"max_body_bytes\":65536,\"max_attachment_bytes\":8388608}\n")
                 .await
                 .unwrap();
             loop {
@@ -2649,6 +2652,8 @@ impl Bus {
         let registered = config.register().await.unwrap();
         let frames = Arc::new(std::sync::Mutex::new(Vec::new()));
         let record = frames.clone();
+        let on_attachment_read: AttachmentReadHook = Arc::new(std::sync::Mutex::new(None));
+        let read_hook = on_attachment_read.clone();
         let (stop, mut done) = tokio::sync::oneshot::channel();
         let agent_task = tokio::spawn(async move {
             loop {
@@ -2657,6 +2662,10 @@ impl Bus {
                     let response=match request["action"].as_str().unwrap(){
                         "list"=>json!({"status":"ok","nodes":[{"node":"peer","status":"ok"}],"recipients":[{"address":"receiver@peer","node":"peer","kind":"service","harness":"svc","status":"live","user":"fixture"},{"address":"sender@peer","node":"peer","kind":"service","harness":"svc","status":"live","user":"fixture"}]}),
                         "send"=>json!({"status":"ok","message_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","address":request["to"],"outcome":"delivered"}),
+                        "read_attachment"=>{
+                            let hook=read_hook.lock().unwrap().take();if let Some(hook)=hook {hook();}
+                            json!({"status":"ok","attachment":{"name":"file.txt","size":4,"media_type":"text/plain","sha256":format!("{:x}",Sha256::digest(b"file"))},"offset":0,"length":4,"next":null,"encoding":"utf-8","data":"file"})
+                        },
                         "reply"=>json!({"status":"ok","reply":{"seq":1,"messageId":request["message_id"],"createdAt":1,"replierSessionId":"gateway@bus","text":request["text"],"pushOutcome":"delivered"}}),
                         _=>panic!("unexpected local bus action"),
                     };
@@ -2668,6 +2677,7 @@ impl Bus {
             _directory: directory,
             registered,
             frames,
+            on_attachment_read,
             pending,
             acked,
             stop,
@@ -2728,6 +2738,7 @@ async fn admitted_send_uses_its_policy_snapshot_after_policy_changes() {
         request_id: crate::outbound::RequestId::parse("snapshot-send").unwrap(),
         to: "receiver@peer".into(),
         text: "admitted policy bytes".into(),
+        attachments: vec![],
     });
     let result = crate::outbound::dispatch_verified(
         &mut store,
@@ -2818,6 +2829,7 @@ async fn reply_lookup_refuses_after_disable_before_reservation_or_effect() {
             request_id: crate::outbound::RequestId::parse("fenced-reply").unwrap(),
             message_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
             text: "must refuse".into(),
+            attachments: vec![],
         });
         let result = crate::outbound::dispatch_verified(
             &mut store,
@@ -4880,6 +4892,7 @@ async fn enabled_new_grant_cannot_reply_to_fenced_prior_custody() {
         request_id: crate::outbound::RequestId::parse("old-custody-reply").unwrap(),
         message_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
         text: "must refuse".into(),
+        attachments: vec![],
     });
     let result = crate::outbound::dispatch_verified(
         &mut store,
@@ -5710,4 +5723,106 @@ async fn common_liveness_application_uses_network_observation_start_not_completi
     );
     assert_eq!(row.1, started + 3600);
     assert_eq!(refreshed.expires_in, 3600 - 123);
+}
+
+async fn local_as_attachment_union_case(scenario: &'static str) {
+    let setup = Setup::new();
+    setup.server.store().unwrap().migrate_attachments().unwrap();
+    let pair = setup.pair();
+    let verifier = crate::auth::Verifier::local_only(setup.server.clone(), true);
+    let identity = Arc::new(verifier.verify(&pair.access_token).await.unwrap());
+    let context =
+        crate::auth::VerifiedContext::new(identity.clone(), identity.admitted_authority().unwrap());
+    seed(&setup, "local-file");
+    let reference = json!({"name":"file.txt","size":4,"media_type":"text/plain","sha256":format!("{:x}",Sha256::digest(b"file"))});
+    setup
+        .db()
+        .execute(
+            "UPDATE custody_items SET attachments=?1",
+            [json!([reference]).to_string()],
+        )
+        .unwrap();
+    let bus = Bus::new().await;
+    let file = setup.server.file.clone();
+    let change = move || {
+        let mut store = Store::open(&file).unwrap();
+        if scenario.ends_with("disable") {
+            store.set_enabled("local", 2, false).unwrap();
+        } else {
+            store
+                .set_outbound_policy("local", 2, &send_policy("receiver@peer"))
+                .unwrap();
+            rusqlite::Connection::open(&file)
+                .unwrap()
+                .execute("UPDATE event_authorizations SET dispatch_revision=3", [])
+                .unwrap();
+        }
+    };
+    if scenario.starts_with("pre") {
+        change();
+    } else if scenario.starts_with("post") {
+        *bus.on_attachment_read.lock().unwrap() = Some(Box::new(change));
+    }
+    let result = crate::attachments::read(
+        setup.server.store().unwrap(),
+        &context,
+        &bus.endpoint(),
+        "bus",
+        "gateway@bus",
+        crate::attachments::ReadArguments {
+            message_id: "local-file".into(),
+            index: 0,
+            offset: None,
+            limit: None,
+        },
+    )
+    .await;
+    if scenario == "valid" {
+        assert_eq!(
+            result.unwrap()["data"],
+            "file",
+            "valid local AS attachment body was not readable"
+        );
+    } else {
+        assert!(
+            matches!(
+                result,
+                Err(crate::outbound::Error::Denied
+                    | crate::outbound::Error::Authority(crate::grants::Error::Denied))
+            ),
+            "local AS attachment read returned body under changed custody authority: {scenario}"
+        );
+    }
+    let reads = bus
+        .frames
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|f| f["action"] == "read_attachment")
+        .count();
+    assert_eq!(
+        reads,
+        usize::from(!scenario.starts_with("pre")),
+        "attachment pre-effect guard did not prevent bus read"
+    );
+    assert_eq!(
+        setup
+            .db()
+            .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .unwrap(),
+        5
+    );
+    bus.close().await;
+}
+#[tokio::test]
+async fn local_as_attachment_union_preserves_success_and_pre_effect_custody_fence() {
+    for scenario in ["valid", "pre-disable", "pre-revision"] {
+        local_as_attachment_union_case(scenario).await;
+    }
+}
+#[tokio::test]
+async fn local_as_attachment_union_rechecks_custody_after_bus_read() {
+    for scenario in ["post-disable", "post-revision"] {
+        local_as_attachment_union_case(scenario).await;
+    }
 }

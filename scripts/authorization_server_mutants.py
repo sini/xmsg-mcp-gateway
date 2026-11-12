@@ -1149,6 +1149,31 @@ CASES += [
     ),
 ]
 
+CASES += [
+    case(
+        "union-attachment-pre-revision",
+        "local_as_attachment_union_preserves_success_and_pre_effect_custody_fence",
+        Edit(
+            "src/reads.rs",
+            "identity.custody_authority(store)?",
+            "store.authorize(identity)?",
+            "pub(crate) fn owned_attachment(",
+            "#[cfg",
+        ),
+    ),
+    case(
+        "union-attachment-post-revision",
+        "local_as_attachment_union_rechecks_custody_after_bus_read",
+        Edit(
+            "src/reads.rs",
+            "identity.custody_authority(store)?",
+            "store.authorize(identity)?",
+            "pub(crate) fn owned_attachment(",
+            "#[cfg",
+        ),
+    ),
+]
+
 
 def preflight(cases):
     with tempfile.TemporaryDirectory(prefix="gateway-as-preflight-") as temporary:

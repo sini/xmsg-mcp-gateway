@@ -175,3 +175,5 @@ custody bounds include reference metadata. Expiry clears references with retaine
 content; no blob bytes are stored in the gateway. Inbox and message reads expose references
 only under the existing complete ownership and dispatch-revision predicate. The file read
 adds fresh effect-point checks before asking xmsg and before releasing the returned data.
+
+With the planned authorization-server profile, attachment byte reads retain the same custody revision fence as other owned reads: both before and after the bus read, the current grant/revision must match the captured admission. A change refuses the response rather than returning bytes under stale custody authority.

@@ -355,3 +355,62 @@ fn migrations_pending_keeps_one_readonly_snapshot_during_migration() {
         ]
     );
 }
+
+#[test]
+fn attachment_marker_and_as_migrations_work_in_both_orders_and_preserve_metadata() {
+    for attachments_first in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("state.db");
+        let key = key(dir.path());
+        let mut store = Store::initialize(&file).unwrap();
+        store.migrate_profiles().unwrap();
+        store.migrate_custody().unwrap();
+        store.migrate_outbound().unwrap();
+        store.migrate_retirement().unwrap();
+        store
+            .migrate_events(&xmsg_mcp_gateway::event_store::EventKey::load(&key).unwrap())
+            .unwrap();
+        assert_eq!(
+            store.pending_migrations().unwrap(),
+            ["migrate-attachments", "migrate-authorization-server"]
+        );
+        if !attachments_first {
+            store.migrate_authorization_server().unwrap();
+        }
+        let before = rusqlite::Connection::open(&file)
+            .unwrap()
+            .pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
+            .unwrap();
+        store.migrate_attachments().unwrap();
+        let db = rusqlite::Connection::open(&file).unwrap();
+        assert_eq!(
+            db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
+                .unwrap(),
+            before,
+            "attachment marker changed global schema version"
+        );
+        if attachments_first {
+            store.migrate_authorization_server().unwrap();
+        }
+        assert_eq!(
+            db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
+                .unwrap(),
+            5
+        );
+        assert!(store
+            .migration_applied(xmsg_mcp_gateway::grants::Migration::Attachments)
+            .unwrap());
+        assert!(store
+            .migration_applied(xmsg_mcp_gateway::grants::Migration::AuthorizationServer)
+            .unwrap());
+        for table in ["custody_items", "outbound_reservations"] {
+            let column:(String,i64,String)=db.query_row("SELECT type,[notnull],dflt_value FROM pragma_table_info(?1) WHERE name='attachments'",[table],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+            assert_eq!(column, ("TEXT".into(), 1, "'[]'".into()));
+        }
+        assert!(Store::open(&file)
+            .unwrap()
+            .pending_migrations()
+            .unwrap()
+            .is_empty());
+    }
+}
