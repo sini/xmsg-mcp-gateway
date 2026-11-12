@@ -177,7 +177,7 @@ CASES = [
         "fresh-token",
         "src/outbound.rs",
         "let current = verifier.verify(token).await?;",
-        "let current = identity;",
+        "let current = &identity;",
         "custody_outbound",
         SEND_TEST,
         "revoked token was not rechecked before submission",

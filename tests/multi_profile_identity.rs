@@ -1,5 +1,5 @@
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{Ipv4Addr, TcpListener};
+use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -21,6 +21,62 @@ struct Server {
     response: Arc<Mutex<(u16, Value)>>,
     stop: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
+}
+
+fn configure_fixture_socket(socket: &TcpStream) {
+    socket.set_nonblocking(false).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    socket
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn accepted_fixture_socket_waits_for_delayed_bytes_with_inherited_nonblocking_flag() {
+    use std::os::fd::AsRawFd;
+    use std::sync::mpsc::{self, RecvTimeoutError};
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (mut socket, _) = listener.accept().unwrap();
+    socket.set_nonblocking(true).unwrap();
+    let flags = unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_GETFL) };
+    assert!(
+        flags >= 0 && flags & libc::O_NONBLOCK != 0,
+        "forced nonblocking control failed"
+    );
+    configure_fixture_socket(&socket);
+    let flags = unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_GETFL) };
+    assert!(
+        flags >= 0 && flags & libc::O_NONBLOCK == 0,
+        "accepted fixture socket retained inherited nonblocking mode"
+    );
+    let (started_tx, started_rx) = mpsc::sync_channel(0);
+    let (done_tx, done_rx) = mpsc::sync_channel(1);
+    let reader = thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        let mut byte = [0];
+        done_tx
+            .send(socket.read_exact(&mut byte).map(|()| byte))
+            .unwrap();
+    });
+    started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(matches!(
+        done_rx.recv_timeout(Duration::from_millis(20)),
+        Err(RecvTimeoutError::Timeout)
+    ));
+    client.write_all(b"x").unwrap();
+    assert_eq!(
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap(),
+        *b"x"
+    );
+    reader.join().unwrap();
 }
 
 impl Server {
@@ -51,12 +107,7 @@ impl Server {
                     }
                     Err(error) => panic!("fixture accept: {error}"),
                 };
-                socket
-                    .set_read_timeout(Some(Duration::from_secs(2)))
-                    .unwrap();
-                socket
-                    .set_write_timeout(Some(Duration::from_secs(2)))
-                    .unwrap();
+                configure_fixture_socket(&socket);
                 let connection = rustls::ServerConnection::new(tls.clone()).unwrap();
                 let stream = rustls::StreamOwned::new(connection, socket);
                 let mut stream = BufReader::new(stream);
