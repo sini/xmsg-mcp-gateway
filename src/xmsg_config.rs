@@ -23,7 +23,7 @@ fn default_frame_bytes() -> usize {
 }
 
 fn default_timeout_ms() -> u64 {
-    10_000
+    15_000
 }
 
 #[derive(Clone, Debug, Deserialize)]

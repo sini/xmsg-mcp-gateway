@@ -54,6 +54,10 @@ enum Command {
     },
     Init,
     MigrationsPending,
+    MigrateAttachments {
+        #[arg(long)]
+        if_needed: bool,
+    },
     MigrateProfiles {
         #[arg(long)]
         if_needed: bool,
@@ -220,6 +224,17 @@ async fn run(cli: Cli) -> Result<(), CommandError> {
         (Some(state), Command::Init) => {
             Store::initialize(&state)?;
             println!("authority store initialized");
+        }
+        (Some(state), Command::MigrateAttachments { if_needed }) => {
+            let mut store = Store::open(&state)?;
+            if if_needed
+                && store.migration_applied(xmsg_mcp_gateway::grants::Migration::Attachments)?
+            {
+                println!("already migrated");
+                return Ok(());
+            }
+            store.migrate_attachments()?;
+            println!("attachment reference metadata migrated");
         }
         (Some(state), Command::MigrateProfiles { if_needed }) => {
             let mut store = Store::open(&state)?;

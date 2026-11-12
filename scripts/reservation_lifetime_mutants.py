@@ -40,8 +40,8 @@ CASES = [
     (
         "floor-reader-cap",
         "src/outbound.rs",
-        ".saturating_add(1)",
-        ".saturating_add(0)",
+        ".saturating_add(limits.dedup_lifetime_secs)\n                .saturating_add(1)",
+        ".saturating_add(limits.dedup_lifetime_secs)\n                .saturating_add(0)",
         UNITS[3],
         "ceiled retry window was shortened",
     ),

@@ -159,6 +159,7 @@ async fn foreign_pending_and_confirmed_reservations_are_denied_before_reverifica
             .unwrap();
             db.execute("INSERT INTO outbound_reservations(owner,operation,request_id,payload_hash,sender,grant_id,grant_revision,idempotency_key,target,framed_text,created_at,retry_until,state,receipt,recovery_until) VALUES(?1,'send','same-id',?2,'gateway@fixture','grant',3,'original-key','receiver@peer','original',?3,?4,?5,?6,?4)", rusqlite::params![owner,payload,at,at+86400,if confirmed { "confirmed" } else { "pending" },encoded_receipt]).unwrap();
             let request = Request::Send(SendArguments {
+                attachments: vec![],
                 request_id: RequestId::parse("same-id").unwrap(),
                 to: "receiver@peer".into(),
                 text: "original".into(),

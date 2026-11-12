@@ -45,9 +45,11 @@ pub(crate) struct Snapshot {
 }
 
 impl Snapshot {
-    fn from_registered(registered: &RegisteredService) -> Result<Self, Error> {
+    fn from_registered(registered: &RegisteredService, frame_bytes: usize) -> Result<Self, Error> {
         Ok(Self {
-            endpoint: Endpoint::from_registered(registered).map_err(|_| Error::Identity)?,
+            endpoint: Endpoint::from_registered(registered)
+                .map_err(|_| Error::Identity)?
+                .with_frame_budget(frame_bytes),
             bus: registered.node().ok_or(Error::Identity)?.to_owned(),
         })
     }
@@ -141,7 +143,10 @@ impl Session {
         mut store: Store,
         ingress: Option<Ingress>,
     ) -> Result<Self, Error> {
-        let snapshot = Arc::new(Snapshot::from_registered(&registered)?);
+        let snapshot = Arc::new(Snapshot::from_registered(
+            &registered,
+            config.max_frame_bytes,
+        )?);
         let bus = snapshot.bus.clone();
         let initial_observation = tokio::time::Instant::now();
         let custody_limits = ingress
@@ -254,7 +259,7 @@ impl Session {
                         }
                         let replacement = async {
                             let registered = register(&config, &manifest).await?;
-                            let snapshot = Arc::new(Snapshot::from_registered(&registered)?);
+                            let snapshot = Arc::new(Snapshot::from_registered(&registered, config.max_frame_bytes)?);
                             let observation = record_link(file.clone(), snapshot.bus.clone(), true, custody_limits.clone()).await?;
                             registered.health().map_err(Error::Registration)?;
                             Ok::<_, Error>((registered, snapshot, observation))

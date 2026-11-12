@@ -274,3 +274,24 @@ and explicit rebinds retain their fences. Legacy custody has no Events authority
 witness, so its conservative exact accepted-revision guard remains unchanged.
 Recovery item visibility survives policy-only edits, but revision-bound inbox
 pagination cursors must be restarted. Recovery reads do not mutate custody.
+
+
+## Inline files (planned)
+
+`xmsg_send` and `xmsg_reply` accept up to eight inline text/base64 files. Pure decoding and
+canonical name/media/hash calculation precede request-identity comparisons in both the
+busy-lease and submission paths. After scope, target and owned-reply checks, staging occurs
+before the durable outbound reservation. Each stage, chunk, finalization and message effect
+checks current authority. Staging alone never marks a message as submitted.
+
+The reservation stores canonical references and correlation, not file bytes. Reference JSON
+counts toward both existing-row and new-row retention bounds. Submission uses those stored
+references with the original `gw-` key. Same-key retries after uncertainty therefore preserve
+one bus effect; altered file bytes or metadata conflict. Confirmed receipt lookup does not
+require re-uploading an expired stage. Plain requests preserve their earlier fingerprints.
+
+The current recovery contract is status/ack plus a same-key client retry. This extends that
+contract; it does not add an autonomous resubmission worker. An expired bus stage fails
+without delivering a substitute file. Provider revocation remains visible on the next call;
+store/grant/revision/credential/owner changes and token expiry are fenced before later file
+staging or delivery effects. See [file tools and deployment](serving.md#file-tools-planned).

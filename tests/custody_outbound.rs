@@ -41,6 +41,7 @@ fn limits() -> Limits {
 
 fn request(id: &str, target: &str, text: &str) -> Request {
     Request::Send(SendArguments {
+        attachments: vec![],
         request_id: RequestId::parse(id).unwrap(),
         to: target.into(),
         text: text.into(),
@@ -1112,6 +1113,7 @@ async fn confirmed_reply_replay_survives_policy_write_and_correlation_expiry() {
         .unwrap();
     service.ack(delivery.message_id()).await.unwrap();
     let operation = Request::Reply(ReplyArguments {
+        attachments: vec![],
         request_id: RequestId::parse("confirmed-reply").unwrap(),
         message_id: incoming.message_id,
         text: "original reply bytes".into(),
@@ -1403,6 +1405,7 @@ async fn replies_require_owned_current_correlations_and_preserve_bus_receipts() 
         .unwrap();
     service.ack(delivery.message_id()).await.unwrap();
     let operation = Request::Reply(ReplyArguments {
+        attachments: vec![],
         request_id: RequestId::parse("owned-reply").unwrap(),
         message_id: original.message_id.clone(),
         text: "reply bytes".into(),
@@ -1477,6 +1480,7 @@ async fn replies_require_owned_current_correlations_and_preserve_bus_receipts() 
         .unwrap();
     service.ack(delivery.message_id()).await.unwrap();
     let foreign_reply = Request::Reply(ReplyArguments {
+        attachments: vec![],
         request_id: RequestId::parse("foreign-reply").unwrap(),
         message_id: foreign_message.message_id,
         text: "must refuse".into(),
@@ -1500,6 +1504,7 @@ async fn replies_require_owned_current_correlations_and_preserve_bus_receipts() 
     store.set_enabled("grant", 3, false).unwrap();
     store.set_enabled("grant", 4, true).unwrap();
     let held = Request::Reply(ReplyArguments {
+        attachments: vec![],
         request_id: RequestId::parse("held-reply").unwrap(),
         message_id: original.message_id,
         text: "old work must remain held".into(),

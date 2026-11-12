@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod attachment_store;
+mod attachments;
 pub mod auth;
 pub mod broker;
 mod deadline;

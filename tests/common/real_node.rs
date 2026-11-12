@@ -350,6 +350,11 @@ fn command(
 }
 
 impl Node {
+    #[allow(dead_code)]
+    pub fn diagnostics(&self) -> String {
+        std::fs::read_to_string(self._temp.path().join("daemon.log")).unwrap_or_default()
+    }
+
     pub async fn start(binary: &Path) -> Self {
         Self::start_with_service(binary, "gateway").await
     }

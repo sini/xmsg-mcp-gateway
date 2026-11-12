@@ -43,6 +43,7 @@ fn limits() -> Limits {
 #[cfg(target_os = "linux")]
 fn send(id: &str, target: &str, text: &str) -> Request {
     Request::Send(SendArguments {
+        attachments: vec![],
         request_id: RequestId::parse(id).unwrap(),
         to: target.into(),
         text: text.into(),
@@ -51,6 +52,7 @@ fn send(id: &str, target: &str, text: &str) -> Request {
 #[cfg(target_os = "linux")]
 fn reply(id: &str, message_id: &str, text: &str) -> Request {
     Request::Reply(ReplyArguments {
+        attachments: vec![],
         request_id: RequestId::parse(id).unwrap(),
         message_id: message_id.into(),
         text: text.into(),

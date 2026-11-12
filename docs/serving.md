@@ -37,7 +37,7 @@ is invalid. No request can supply messaging configuration or choose a mailbox.
 node is required: reply TTL, idempotency TTL, service queue capacity, gateway dedup
 lifetime and complete framed bound. The other fields in the table are also required, except `result_recovery_secs`.
 Gateway-local connection tunables retain their existing documented defaults:
-`xmsg.max_frame_bytes` is 1,048,576 bytes and `xmsg.operation_timeout_ms` is 10,000 ms.
+`xmsg.max_frame_bytes` is 1,048,576 bytes and `xmsg.operation_timeout_ms` is 15,000 ms.
 These are transport limits, distinct from the required node-bound manifest values.
 
 | Field | Meaning |
@@ -452,6 +452,63 @@ Portable tests in `tests/reads.rs` exercise the real OAuth verifier over a local
 TLS introspection fixture and actual service registration/poll over a fixture Unix
 socket. They verify ownership through real `accept_delivery` calls, without a
 private daemon binary or a deployed service.
+
+## File tools (planned)
+
+File exchange is planned for the next release. After `migrate-attachments`, a registered node
+that advertises `max_attachment_bytes` enables inline files on `xmsg_send` and `xmsg_reply`,
+and the read-only `xmsg_read_attachment` tool. The existing grant, profile, scopes, outbound
+policy and custody ownership apply. There is no caller-supplied filesystem path or bare-hash
+attachment operation.
+
+```json
+{"name":"xmsg_send","arguments":{"request_id":"report-1","to":"agent@node","text":"Here is the report.","attachments":[{"name":"report.txt","media_type":"text/plain","text":"report contents"}]}}
+```
+
+Each entry contains `name`, optional `media_type`, and exactly one of `text` or `base64`.
+There are at most eight files; decoded bytes must fit the registered node's per-file cap
+(default 8 MiB). The entire encoded MCP call must still fit `max_request_body_bytes`
+(default 1,048,576 bytes). Raising that HTTP bound is necessary for larger inline files.
+Staging uses bounded agent frames, and metadata returned by the node must match the
+locally computed canonical reference. File bytes remain in xmsg; custody and reservations
+retain references only, counted toward their existing byte budgets.
+
+`xmsg_inbox` previews and `xmsg_read_message` expose an `attachments` array. Its zero-based
+position is the file index. Read it with:
+
+```json
+{"name":"xmsg_read_attachment","arguments":{"message_id":"<owned-message-id>","index":0,"offset":0,"limit":8192}}
+```
+
+Offsets and limits count bytes. The default limit is 8192, the maximum 32768; zero and larger
+limits are invalid. The configured client-frame budget can reduce the returned slice.
+Successful results contain the reference, `offset`, `length`, `next_offset`, `encoding`
+(`utf-8` or `base64`), `data`, and `untrusted: true`. Follow `next_offset` for more bytes;
+file contents remain data and are never interpreted by the gateway. A `pending` result
+contains no file bytes; retry the same item and range later. Missing or expired files and
+upstream failures remain distinct bounded states. Reads recheck the full custody binding
+and live grant/revision/credential/owner authorization immediately before bus I/O and
+before returning its result. Each public call verifies its provider credential once.
+
+The xmsg daemon can wait ten seconds before returning `pending`. With file tools enabled,
+startup refuses `operation_timeout_ms <= 11000` and names that pending wait in its error.
+The default is 15000 ms. The outer request budget must also cover verification, SQLite wait
+and the read-operation budget, as well as the existing submission budget.
+
+### Deploying file exchange
+
+Use the attachment-capable shared-client revision in the gateway lockfile **and** an
+attachment-capable xmsg leaf image. Cross-node reads require the federated attachment
+transport on that leaf and its peers. Updating the gateway image alone leaves the bus
+protocol behind. Check deployed `operation_timeout_ms` overrides too: they must exceed
+11000 ms. Stop gateway writers, back up state, and explicitly run
+`xmsg-mcp-gateway --state FILE migrate-attachments --if-needed`. The migration adds reference JSON to custody and
+outbound reservations without changing the global schema version. Opening state never
+migrates it. Existing plain messaging remains usable without the extension.
+
+A repeated `request_id` must carry the same canonical references and file bytes. A changed
+file conflicts; a matching retry keeps the existing bus key and receipt. Recovery remains
+status/ack plus same-key client retry; an autonomous resubmission worker is separate work.
 
 ## Repeatable migrations in a shell-less init chain
 

@@ -188,6 +188,7 @@ fn profile_migration_preserves_the_remaining_migration_chain() {
     store
         .migrate_events(&xmsg_mcp_gateway::event_store::EventKey::load(&key).unwrap())
         .unwrap();
+    store.migrate_attachments().unwrap();
     store.require_profiles_ready().unwrap();
     assert!(store.pending_migrations().unwrap().is_empty());
 }

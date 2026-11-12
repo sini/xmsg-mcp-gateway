@@ -8,6 +8,7 @@ mod provider;
 #[allow(dead_code)]
 #[path = "common/real_node.rs"]
 mod real_node;
+use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 use std::{collections::BTreeSet, time::Duration};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -113,6 +114,7 @@ async fn mcp_leaf_send_reply_enters_owned_custody_with_attested_origin() {
     store.migrate_custody().unwrap();
     store.migrate_outbound().unwrap();
     store.migrate_retirement().unwrap();
+    store.migrate_attachments().unwrap();
     store.migrate_events(&key).unwrap();
     store
         .set_outbound_policy(
@@ -132,7 +134,7 @@ async fn mcp_leaf_send_reply_enters_owned_custody_with_attested_origin() {
     setup.config["events"] =
         json!({"grant_id":"grant","key_file":keyfile,"dispatch_timeout_ms":13000});
     let c = &leaf.config;
-    setup.config["messaging"] = json!({"xmsg":{"service":c.service,"expected_node":c.expected_node,"daemon_uid":c.daemon_uid,"register_socket":c.register_socket,"agent_socket":c.agent_socket,"operation_timeout_ms":fixture::HAPPY_DISPATCH_TIMEOUT_MS},"manifest":{"reply_ttl_secs":604800,"idempotency_ttl_secs":86400,"svc_queue_cap":100,"dedup_lifetime_secs":3600,"max_framed_bytes":65536},"submission_timeout_ms":fixture::HAPPY_DISPATCH_TIMEOUT_MS,"max_reservations":100,"max_retained_bytes":1048576});
+    setup.config["messaging"] = json!({"xmsg":{"service":c.service,"expected_node":c.expected_node,"daemon_uid":c.daemon_uid,"register_socket":c.register_socket,"agent_socket":c.agent_socket,"operation_timeout_ms":15000},"manifest":{"reply_ttl_secs":604800,"idempotency_ttl_secs":86400,"svc_queue_cap":100,"dedup_lifetime_secs":3600,"max_framed_bytes":65536},"submission_timeout_ms":fixture::HAPPY_DISPATCH_TIMEOUT_MS,"max_reservations":100,"max_retained_bytes":1048576});
     fixture::private_file(
         &setup.config_file,
         &serde_json::to_vec(&setup.config).unwrap(),
@@ -319,10 +321,12 @@ async fn mcp_leaf_send_reply_enters_owned_custody_with_attested_origin() {
     )
     .await;
     let session_msg_r4 = session_send_r4["message_id"].as_str().unwrap().to_owned();
+    let mut latest_inbox = serde_json::Value::Null;
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let (_, inbox, _) =
                 fixture::request(&serving, "good-token", rpc("xmsg_inbox", json!({}))).await;
+            latest_inbox = inbox.clone();
             if inbox["result"]["structuredContent"]["items"]
                 .as_array()
                 .is_some_and(|items| items.iter().any(|i| i["message_id"] == session_msg_r4))
@@ -333,7 +337,13 @@ async fn mcp_leaf_send_reply_enters_owned_custody_with_attested_origin() {
         }
     })
     .await
-    .unwrap();
+    .unwrap_or_else(|_| {
+        panic!(
+            "rev4 session mail absent; inbox={latest_inbox}; hub={} leaf={}",
+            hub.diagnostics(),
+            leaf.diagnostics()
+        )
+    });
     let (refused_status, refused_reply, _) = fixture::request(
         &serving,
         "good-token",
@@ -529,5 +539,137 @@ async fn mcp_leaf_send_reply_enters_owned_custody_with_attested_origin() {
                 .is_some_and(|t| t.contains("hello real subagent")))),
         "subagent message not found in subagent inbox: {sub_inbox}"
     );
+    // Remove the session fixture so raw agent calls attest the still-registered receiver service.
+    std::fs::remove_file(hub.sessions_dir().join(format!("{pid}-{session_id}.json"))).unwrap();
+    let outgoing_text = "gateway file: café → receiver";
+    let outgoing_binary = [0x00_u8, 0x7f, 0x80, 0xff];
+    let sent_file = confirmed_first_call(&serving, rpc("xmsg_send", json!({
+        "request_id":"leaf-send-files", "to":"receiver@hub.fixture", "text":"file transport request",
+        "attachments":[
+            {"name":"outgoing.txt","media_type":"text/plain","text":outgoing_text},
+            {"name":"outgoing.bin","media_type":"application/octet-stream","base64":STANDARD.encode(outgoing_binary)}
+        ]
+    }))).await;
+    let sent_file_id = sent_file["result"]["structuredContent"]["receipt"]["receipt"]["message_id"]
+        .as_str()
+        .unwrap();
+    let file_delivery = receiver.poll(5).await.unwrap().unwrap();
+    assert_eq!(file_delivery.message_id(), sent_file_id);
+    assert_eq!(file_delivery.origin().service.as_deref(), Some("gateway"));
+    assert_eq!(file_delivery.origin().node, "leaf.fixture");
+    assert_eq!(
+        file_delivery.attachments().len(),
+        2,
+        "receiver lost MCP inline file refs"
+    );
+    assert_eq!(file_delivery.attachments()[0].name, "outgoing.txt");
+    assert_eq!(file_delivery.attachments()[1].name, "outgoing.bin");
+    let expected: [&[u8]; 2] = [outgoing_text.as_bytes(), &outgoing_binary];
+    for (index, bytes) in expected.into_iter().enumerate() {
+        let range = tokio::time::timeout(Duration::from_secs(20), agent_frame(&hub.config.agent_socket,
+            json!({"action":"read_attachment","message_id":sent_file_id,"index":index,"offset":0,"length":128})))
+            .await.expect("receiver raw attachment read timed out");
+        assert_eq!(
+            range["status"], "ok",
+            "receiver must read files from undialable gateway leaf: {range}"
+        );
+        let read = match range["encoding"].as_str().unwrap() {
+            "utf-8" => range["data"].as_str().unwrap().as_bytes().to_vec(),
+            "base64" => STANDARD.decode(range["data"].as_str().unwrap()).unwrap(),
+            other => panic!("unsupported actual attachment encoding {other}"),
+        };
+        assert_eq!(read, bytes, "receiver file bytes changed at index {index}");
+    }
+    receiver.ack(file_delivery.message_id()).await.unwrap();
+    let answer_bytes = [0xfe_u8, 0x00, 0x81, 0x42];
+    let staged = receiver
+        .agent_client()
+        .attach(xmsg::client::AttachRequest {
+            name: Some("answer.bin".into()),
+            media_type: Some("application/octet-stream".into()),
+            data: Some(STANDARD.encode(answer_bytes)),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let answer_ref: xmsg::client::AttachmentRef =
+        serde_json::from_value(staged["attachment"].clone()).unwrap();
+    let answer = receiver
+        .agent_client()
+        .reply_with_attachments(
+            sent_file_id,
+            "receiver file answer",
+            Some("receiver-file-answer"),
+            std::slice::from_ref(&answer_ref),
+        )
+        .await
+        .unwrap();
+    let answer_id = answer.pushed_message_id.as_deref().unwrap();
+    let owned_answer = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let (_, inbox, _) =
+                fixture::request(&serving, "good-token", rpc("xmsg_inbox", json!({}))).await;
+            if let Some(item) = inbox["result"]["structuredContent"]["items"]
+                .as_array()
+                .and_then(|items| items.iter().find(|item| item["message_id"] == answer_id))
+                .cloned()
+            {
+                break item;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("receiver file reply did not enter gateway owned custody");
+    assert_eq!(owned_answer["in_reply_to"], sent_file_id);
+    assert_eq!(owned_answer["origin"]["service"], "receiver");
+    assert_eq!(owned_answer["origin"]["node"], "hub.fixture");
+    assert_eq!(
+        owned_answer["attachments"],
+        json!([answer_ref]),
+        "owned inbox lost reply file refs"
+    );
+    let (status, read_answer, _) = fixture::request(
+        &serving,
+        "good-token",
+        rpc(
+            "xmsg_read_attachment",
+            json!({"message_id":answer_id,"index":0,"offset":0,"limit":128}),
+        ),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{read_answer}");
+    let read_answer = &read_answer["result"]["structuredContent"];
+    assert_eq!(read_answer["state"], "found", "{read_answer}");
+    assert_eq!(read_answer["encoding"], "base64");
+    assert_eq!(
+        STANDARD
+            .decode(read_answer["data"].as_str().unwrap())
+            .unwrap(),
+        answer_bytes
+    );
+    assert_eq!(read_answer["untrusted"], true);
+
+    let followup_text = "gateway replies with a file";
+    let file_followup = confirmed_first_call(&serving, rpc("xmsg_reply", json!({
+        "request_id":"leaf-reply-files", "message_id":answer_id, "text":"gateway file followup",
+        "attachments":[{"name":"followup.txt","media_type":"text/plain","text":followup_text}]
+    }))).await;
+    let followup_id = file_followup["result"]["structuredContent"]["receipt"]["receipt"]
+        ["pushedMessageId"]
+        .as_str()
+        .unwrap();
+    let followup = receiver.poll(5).await.unwrap().unwrap();
+    assert_eq!(followup.message_id(), followup_id);
+    assert_eq!(followup.in_reply_to(), Some(answer_id));
+    assert_eq!(followup.attachments().len(), 1, "MCP reply lost file refs");
+    assert_eq!(followup.attachments()[0].name, "followup.txt");
+    let followup_read = tokio::time::timeout(Duration::from_secs(20), agent_frame(&hub.config.agent_socket,
+        json!({"action":"read_attachment","message_id":followup_id,"index":0,"offset":0,"length":128})))
+        .await.expect("receiver followup file read timed out");
+    assert_eq!(followup_read["status"], "ok", "{followup_read}");
+    assert_eq!(followup_read["data"], followup_text);
+    receiver.ack(followup.message_id()).await.unwrap();
     println!("gateway-leaf-reply-complete:mcp-owned-custody-attested-origin");
+    println!("gateway-leaf-attachments-complete:bidirectional-files");
 }

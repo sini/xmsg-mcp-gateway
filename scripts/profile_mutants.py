@@ -304,6 +304,8 @@ CASES = [
                 "src/serving.rs",
                 ".is_some_and(|events| events.selected_grant != grant.grant_id)",
                 ".is_some_and(|_events| false)",
+                'if matches!(call.name.as_str(), "xmsg_inbox" | "xmsg_read_message")',
+                'if call.name == "xmsg_list"',
             ),
         ),
     ),

@@ -172,8 +172,8 @@ class MutationGatesTests(unittest.TestCase):
         )
 
     def test_complete_inventory_and_execution_modes(self):
-        self.assertEqual(len(self.suites), 20)
-        self.assertEqual(sum(s["count"] for s in self.suites), 292)
+        self.assertEqual(len(self.suites), 21)
+        self.assertEqual(sum(s["count"] for s in self.suites), 316)
         modes = {(s["script"], tuple(s["args"])) for s in self.suites}
         self.assertIn(("scripts/reservation_lifetime_mutants.py", ("--live",)), modes)
 
@@ -237,7 +237,7 @@ class MutationGatesTests(unittest.TestCase):
         self.assertIn("dispatch_logging", gates.select(self.suites, ["src/serving.rs"]))
         self.assertIn("broker", gates.select(self.suites, ["tests/broker_bridge.rs"]))
         self.assertEqual(
-            len(gates.select(self.suites, ["tests/common/provider.rs"])), 20
+            len(gates.select(self.suites, ["tests/common/provider.rs"])), 21
         )
         self.assertEqual(gates.select(self.suites, ["phase1/worker.py"]), ["python"])
 

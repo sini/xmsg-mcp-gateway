@@ -72,6 +72,7 @@ pub enum Migration {
     Retirement,
     Events,
     Profiles,
+    Attachments,
 }
 
 pub struct Store {
@@ -163,6 +164,7 @@ impl Store {
         if version >= EVENTS_SCHEMA_VERSION {
             crate::event_store::validate_schema(connection)?;
         }
+        crate::attachment_store::validate_optional(connection)?;
         Ok(())
     }
 
@@ -226,6 +228,7 @@ impl Store {
             Migration::Retirement => retirement,
             Migration::Events => version == EVENTS_SCHEMA_VERSION,
             Migration::Profiles => self.profiles_migrated()?,
+            Migration::Attachments => self.attachments_migrated()?,
         })
     }
 
@@ -241,6 +244,7 @@ impl Store {
             (Migration::CustodySummaries, "migrate-custody-summaries"),
             (Migration::Events, "migrate-events"),
             (Migration::Profiles, "migrate-profiles"),
+            (Migration::Attachments, "migrate-attachments"),
         ] {
             if !self.migration_applied(migration)? {
                 pending.push(command);

@@ -37,7 +37,7 @@ fn owner_configuration_requires_node_uid_and_rejects_unknown_fields() {
     });
     let parsed: XmsgConfig = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(parsed.max_frame_bytes, 1_048_576);
-    assert_eq!(parsed.operation_timeout_ms, 10_000);
+    assert_eq!(parsed.operation_timeout_ms, 15_000);
     for field in ["expected_node", "daemon_uid"] {
         let mut missing = value.clone();
         missing.as_object_mut().unwrap().remove(field);

@@ -572,7 +572,7 @@
         "^floor\\-reader\\-cap: intended result;",
         "^extend\\-stored\\-window: intended result;"
       ],
-      "script_sha256": "050b423b97bb9726c39cf78b52ec8cecf7b04e6ef6fbe296363bafae8cebc833"
+      "script_sha256": "6c59b598e76c433f15fb8c79dddf0fbe4bbc4c745f44236906df3932beb42b9f"
     },
     {
       "id": "custody_retention",
@@ -854,7 +854,7 @@
         "^pending\\-row\\-is\\-uncertain: GREEN baseline / RED intended$",
         "^submission\\-flag\\-before\\-send: GREEN baseline / RED intended$"
       ],
-      "script_sha256": "59a357decb39e25b4a6e8d994744f061fde709536eb8b5701f61b4ab18708459"
+      "script_sha256": "49062569e63135805a071ee349159d5a468e6cc522c79118ee378755e77b77f8"
     },
     {
       "id": "wiring",
@@ -980,7 +980,7 @@
       "required_output": [
         "^old\\-one\\-second\\-setup: intended result;"
       ],
-      "script_sha256": "050b423b97bb9726c39cf78b52ec8cecf7b04e6ef6fbe296363bafae8cebc833"
+      "script_sha256": "6c59b598e76c433f15fb8c79dddf0fbe4bbc4c745f44236906df3932beb42b9f"
     },
     {
       "id": "python",
@@ -1152,7 +1152,91 @@
         "^g5-events RED 33-tool\\-scopes\\-profile-red:",
         "^g5-events GREEN 33-tool\\-scopes\\-profile-restored$"
       ],
-      "script_sha256": "4a4b09208a833526da7487b15ea831621e965ce505c3def58b1ee6c821b48415"
+      "script_sha256": "6276539dd0c7466bcc91c182b30177ecce9eda23f815069e61213bbbe5f10af7"
+    },
+    {
+      "id": "attachments",
+      "script": "scripts/attachments_mutants.py",
+      "args": [],
+      "count": 24,
+      "fixture": false,
+      "python": false,
+      "completion": "attachments-mutants-complete:24",
+      "dependencies": [
+        "scripts/attachments_mutants.py",
+        "scripts/grant_mutants.py",
+        "scripts/artifact_evidence.py",
+        "scripts/transport_compat.py",
+        "src/attachments.rs",
+        "src/attachment_store.rs",
+        "src/auth.rs",
+        "src/grants.rs",
+        "src/outbound.rs",
+        "src/reads.rs",
+        "src/custody.rs",
+        "src/serving.rs",
+        "src/session.rs",
+        "src/xmsg_config.rs",
+        "tests/outbound_attachments.rs",
+        "tests/outbound_arguments.rs",
+        "tests/attachments_rpc.rs",
+        "tests/attachment_arguments.rs",
+        "tests/common/provider.rs",
+        "tests/common/serving_fixture.rs"
+      ],
+      "labels": [
+        "M11-busy",
+        "M11-submit",
+        "inline-freshness",
+        "chunk-freshness",
+        "finish-freshness",
+        "send-freshness",
+        "capacity-sum",
+        "capacity-new",
+        "returned-ref",
+        "stage-order",
+        "read-owner",
+        "read-revision",
+        "read-expiry",
+        "read-maximum",
+        "read-response-bound",
+        "read-reference",
+        "M12-custody-fingerprint",
+        "startup-timeout",
+        "startup-default",
+        "decoded-file-cap",
+        "file-count",
+        "read-db-worker",
+        "read-post-authority",
+        "upload-geometry"
+      ],
+      "required_output": [
+        "^M11\\-busy: GREEN baseline / RED intended / GREEN restored$",
+        "^M11\\-submit: GREEN baseline / RED intended / GREEN restored$",
+        "^inline\\-freshness: GREEN baseline / RED intended / GREEN restored$",
+        "^chunk\\-freshness: GREEN baseline / RED intended / GREEN restored$",
+        "^finish\\-freshness: GREEN baseline / RED intended / GREEN restored$",
+        "^send\\-freshness: GREEN baseline / RED intended / GREEN restored$",
+        "^capacity\\-sum: GREEN baseline / RED intended / GREEN restored$",
+        "^capacity\\-new: GREEN baseline / RED intended / GREEN restored$",
+        "^returned\\-ref: GREEN baseline / RED intended / GREEN restored$",
+        "^stage\\-order: GREEN baseline / RED intended / GREEN restored$",
+        "^read\\-owner: GREEN baseline / RED intended / GREEN restored$",
+        "^read\\-revision: GREEN baseline / RED intended / GREEN restored$",
+        "^read\\-expiry: GREEN baseline / RED intended / GREEN restored$",
+        "^read\\-maximum: GREEN baseline / RED intended / GREEN restored$",
+        "^read\\-response\\-bound: GREEN baseline / RED intended / GREEN restored$",
+        "^read\\-reference: GREEN baseline / RED intended / GREEN restored$",
+        "^M12\\-custody\\-fingerprint: GREEN baseline / RED intended / GREEN restored$",
+        "^startup\\-timeout: GREEN baseline / RED intended / GREEN restored$",
+        "^startup\\-default: GREEN baseline / RED intended / GREEN restored$",
+        "^decoded\\-file\\-cap: GREEN baseline / RED intended / GREEN restored$",
+        "^file\\-count: GREEN baseline / RED intended / GREEN restored$",
+        "^read\\-db\\-worker: GREEN baseline / RED intended / GREEN restored$",
+        "^read\\-post\\-authority: GREEN baseline / RED intended / GREEN restored$",
+        "^upload\\-geometry: GREEN baseline / RED intended / GREEN restored$"
+      ],
+      "script_sha256": "118eac5e02c5cd19e57eb03f60426db5816f23cfa481d9b5d446363dfb74e077"
     }
   ]
 }

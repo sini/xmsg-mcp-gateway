@@ -221,6 +221,27 @@ pub(crate) fn fingerprint(parts: &[&str]) -> String {
     format!("{:x}", digest.finalize())
 }
 
+fn refs_bytes(refs: &str) -> usize {
+    if refs == "[]" {
+        0
+    } else {
+        refs.len()
+    }
+}
+fn delivery_fingerprint(
+    origin: &str,
+    text: &str,
+    envelope: &str,
+    correlation: &str,
+    refs: &str,
+) -> String {
+    if refs == "[]" {
+        fingerprint(&[origin, text, envelope, correlation])
+    } else {
+        fingerprint(&[origin, text, envelope, correlation, refs])
+    }
+}
+
 fn ensure_link(tx: &rusqlite::Transaction<'_>, bus: &str, limits: &Limits) -> Result<(), Error> {
     let known: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM custody_links WHERE bus=?1)",
@@ -273,7 +294,12 @@ fn expire(tx: &rusqlite::Transaction<'_>, limits: &Limits, now: i64) -> Result<(
     } else {
         tx.execute("UPDATE custody_outbox SET state='expired' WHERE event_id IN (SELECT event_id FROM custody_items WHERE text IS NOT NULL AND expires_at<=?1)", [now])?;
     }
-    let redacted = tx.execute("UPDATE custody_items SET text=NULL, envelope=NULL WHERE text IS NOT NULL AND expires_at<=?1", [now])?;
+    let redaction = if crate::attachment_store::ready(tx)? {
+        "UPDATE custody_items SET text=NULL,envelope=NULL,attachments='[]' WHERE text IS NOT NULL AND expires_at<=?1"
+    } else {
+        "UPDATE custody_items SET text=NULL, envelope=NULL WHERE text IS NOT NULL AND expires_at<=?1"
+    };
+    let redacted = tx.execute(redaction, [now])?;
     tx.execute(
         "UPDATE custody_counters SET value=value+?1 WHERE name='expired_content'",
         [redacted as i64],
@@ -538,6 +564,14 @@ impl Store {
         if marker != crate::grants::SUMMARY_APPLICATION_ID {
             return Err(Error::MigrationRequired);
         }
+        let attachments_ready = crate::attachment_store::ready(&tx)?;
+        if !delivery.attachments().is_empty() && !attachments_ready {
+            return Err(Error::MigrationRequired);
+        }
+        if !crate::attachments::validate_refs(delivery.attachments()) {
+            return Err(Error::Configuration);
+        }
+        let refs = serde_json::to_string(delivery.attachments())?;
         expire(&tx, limits, now)?;
         ensure_link(&tx, &scope.bus_instance, limits)?;
         let known_pending: bool = tx.query_row(
@@ -567,7 +601,13 @@ impl Store {
             "node": delivery.origin().node,
         }))?;
         let correlation = serde_json::to_string(&delivery.in_reply_to())?;
-        let hash = fingerprint(&[&origin, delivery.text(), delivery.envelope(), &correlation]);
+        let hash = delivery_fingerprint(
+            &origin,
+            delivery.text(),
+            delivery.envelope(),
+            &correlation,
+            &refs,
+        );
         let existing: Option<(String, String)> = tx.query_row(
             "SELECT event_id, fingerprint FROM custody_items WHERE bus = ?1 AND upstream_id = ?2",
             params![scope.bus_instance, delivery.message_id()], |row| Ok((row.get(0)?, row.get(1)?)),
@@ -588,8 +628,14 @@ impl Store {
             .len()
             .saturating_add(delivery.envelope().len())
             .saturating_add(origin.len())
-            .saturating_add(delivery.in_reply_to().map_or(0, str::len));
-        let (count, bytes): (i64, i64) = tx.query_row("SELECT COUNT(*), COALESCE(SUM(length(CAST(text AS BLOB)) + length(CAST(envelope AS BLOB)) + length(CAST(origin AS BLOB)) + COALESCE(length(CAST(in_reply_to AS BLOB)), 0)), 0) FROM custody_items", [], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            .saturating_add(delivery.in_reply_to().map_or(0, str::len))
+            .saturating_add(refs_bytes(&refs));
+        let stored_refs = if attachments_ready {
+            "+CASE WHEN attachments='[]' THEN 0 ELSE length(CAST(attachments AS BLOB)) END"
+        } else {
+            ""
+        };
+        let (count,bytes):(i64,i64)=tx.query_row(&format!("SELECT COUNT(*),COALESCE(SUM(length(CAST(text AS BLOB))+length(CAST(envelope AS BLOB))+length(CAST(origin AS BLOB))+COALESCE(length(CAST(in_reply_to AS BLOB)),0){stored_refs}),0) FROM custody_items"),[],|row|Ok((row.get(0)?,row.get(1)?)))?;
         let oversized =
             size as u128 > limits.max_item_bytes as u128 || size as u128 > limits.max_bytes as u128;
         let refused = oversized
@@ -620,6 +666,12 @@ impl Store {
             fingerprint(&[&scope.bus_instance, delivery.message_id()])
         );
         tx.execute("INSERT INTO custody_items (bus,upstream_id,event_id,grant_id,grant_revision,mailbox,owner,origin,text,envelope,in_reply_to,fingerprint,received_at,expires_at,held) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,1)", params![scope.bus_instance, delivery.message_id(), event_id, scope.grant_id, revision, mailbox, owner, origin, delivery.text(), delivery.envelope(), delivery.in_reply_to(), hash, now, deadlines.content_expires])?;
+        if attachments_ready {
+            tx.execute(
+                "UPDATE custody_items SET attachments=?1 WHERE bus=?2 AND upstream_id=?3",
+                params![refs, scope.bus_instance, delivery.message_id()],
+            )?;
+        }
         tx.execute(
             "INSERT INTO custody_outbox (event_id,state) VALUES (?1,'held')",
             [&event_id],
@@ -1178,5 +1230,285 @@ mod expiry_boundary_tests {
     #[test]
     fn tombstones_expire_at_the_observed_cutoff() {
         boundary("tombstones");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod attachment_custody_tests {
+    use super::*;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use xmsg::client::{AttachmentRef, ClientOptions};
+    struct Feed {
+        _directory: tempfile::TempDir,
+        service: RegisteredService,
+        delivery: Delivery,
+        worker: tokio::task::JoinHandle<()>,
+    }
+    impl Drop for Feed {
+        fn drop(&mut self) {
+            self.worker.abort();
+        }
+    }
+    impl Feed {
+        async fn new(id: &str, refs: Vec<AttachmentRef>) -> Self {
+            let directory = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            let socket = directory.path().join("register.sock");
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let id = id.to_string();
+            let worker = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                stream
+                    .get_mut()
+                    .write_all(
+                        b"{\"status\":\"ok\",\"address\":\"gateway@node\",\"node\":\"node\"}\n",
+                    )
+                    .await
+                    .unwrap();
+                line.clear();
+                stream.read_line(&mut line).await.unwrap();
+                let value = serde_json::json!({"action":"deliver","messageId":id,"fromName":"source","text":"body","envelope":"envelope","origin":{"service":"source","node":"peer"},"inReplyTo":null,"attachments":refs});
+                stream
+                    .get_mut()
+                    .write_all(format!("{value}\n").as_bytes())
+                    .await
+                    .unwrap();
+                line.clear();
+                let _ = stream.read_line(&mut line).await;
+            });
+            let mut service = RegisteredService::register(ClientOptions {
+                register_socket: socket,
+                agent_socket: directory.path().join("agent.sock"),
+                max_frame_bytes: 1048576,
+                operation_timeout: Duration::from_secs(2),
+                service: "gateway".into(),
+                expected_node: Some("node".into()),
+                daemon_uid: std::fs::metadata(directory.path()).unwrap().uid(),
+            })
+            .await
+            .unwrap();
+            let delivery = service.poll(0).await.unwrap().unwrap();
+            Self {
+                _directory: directory,
+                service,
+                delivery,
+                worker,
+            }
+        }
+    }
+    fn reference(name: &str) -> AttachmentRef {
+        AttachmentRef {
+            name: name.into(),
+            size: 4,
+            media_type: "text/plain".into(),
+            sha256: "a".repeat(64),
+        }
+    }
+    fn store() -> (tempfile::TempDir, Store) {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::initialize(&directory.path().join("authority.db")).unwrap();
+        store
+            .enroll(
+                "grant",
+                &crate::grants::Binding {
+                    service: "gateway".into(),
+                    issuer: "https://issuer.example".into(),
+                    resource: "https://gateway.example/mcp".into(),
+                    subject: "owner".into(),
+                    hosted_client: "client".into(),
+                },
+            )
+            .unwrap();
+        store.migrate_custody().unwrap();
+        store.migrate_outbound().unwrap();
+        (directory, store)
+    }
+    fn scope() -> Scope {
+        Scope {
+            bus_instance: "bus".into(),
+            grant_id: "grant".into(),
+        }
+    }
+    #[test]
+    fn m12_refs_change_custody_identity_without_changing_legacy_hashes() {
+        assert_eq!(
+            delivery_fingerprint("origin", "text", "envelope", "null", "[]"),
+            fingerprint(&["origin", "text", "envelope", "null"])
+        );
+        let first = serde_json::to_string(&vec![reference("first.txt")]).unwrap();
+        let second = serde_json::to_string(&vec![reference("second.txt")]).unwrap();
+        assert_ne!(
+            delivery_fingerprint("origin", "text", "envelope", "null", &first),
+            delivery_fingerprint("origin", "text", "envelope", "null", &second),
+            "M12: attachment-only changed delivery collided with accepted fingerprint"
+        );
+    }
+    #[tokio::test]
+    async fn refs_require_migration_and_commit_with_content_then_redact() {
+        let feed = Feed::new("item", vec![reference("first.txt")]).await;
+        let (_directory, mut store) = store();
+        let limits = Limits {
+            content_retention_secs: 10,
+            ..Limits::default()
+        };
+        assert!(matches!(
+            store.accept_delivery(
+                &scope(),
+                &feed.service,
+                &feed.delivery,
+                &limits,
+                UNIX_EPOCH + Duration::from_secs(100)
+            ),
+            Err(Error::MigrationRequired)
+        ));
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM custody_items", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        store.migrate_attachments().unwrap();
+        assert!(matches!(
+            store
+                .accept_delivery(
+                    &scope(),
+                    &feed.service,
+                    &feed.delivery,
+                    &limits,
+                    UNIX_EPOCH + Duration::from_secs(100)
+                )
+                .unwrap(),
+            Acceptance::Stored { .. }
+        ));
+        let first: (String, String) = store
+            .connection
+            .query_row(
+                "SELECT attachments,fingerprint FROM custody_items",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Vec<AttachmentRef>>(&first.0).unwrap(),
+            vec![reference("first.txt")]
+        );
+        assert!(matches!(
+            store
+                .accept_delivery(
+                    &scope(),
+                    &feed.service,
+                    &feed.delivery,
+                    &limits,
+                    UNIX_EPOCH + Duration::from_secs(101)
+                )
+                .unwrap(),
+            Acceptance::Duplicate { .. }
+        ));
+        let changed = Feed::new("item", vec![reference("second.txt")]).await;
+        assert_eq!(
+            store
+                .accept_delivery(
+                    &scope(),
+                    &changed.service,
+                    &changed.delivery,
+                    &limits,
+                    UNIX_EPOCH + Duration::from_secs(102)
+                )
+                .unwrap(),
+            Acceptance::Quarantined,
+            "M12: attachment-only changed frame was not quarantined"
+        );
+        store
+            .record_custody_link(
+                &scope(),
+                true,
+                &limits,
+                UNIX_EPOCH + Duration::from_secs(111),
+            )
+            .unwrap();
+        let after: (String, String, Option<String>) = store
+            .connection
+            .query_row(
+                "SELECT attachments,fingerprint,text FROM custody_items",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(after, ("[]".into(), first.1, None));
+    }
+    #[tokio::test]
+    async fn refs_are_billed_in_both_item_and_total_capacity() {
+        let feed = Feed::new("first", vec![reference("file.txt")]).await;
+        let origin =
+            serde_json::to_string(&serde_json::json!({"id":null,"service":"source","node":"peer"}))
+                .unwrap();
+        let plain = origin.len() + "body".len() + "envelope".len();
+        let size = plain
+            + serde_json::to_string(feed.delivery.attachments())
+                .unwrap()
+                .len();
+        let (_directory, mut store) = store();
+        store.migrate_attachments().unwrap();
+        let mut limits = Limits {
+            max_item_bytes: plain as i64,
+            ..Limits::default()
+        };
+        assert_eq!(
+            store
+                .accept_delivery(
+                    &scope(),
+                    &feed.service,
+                    &feed.delivery,
+                    &limits,
+                    UNIX_EPOCH + Duration::from_secs(100)
+                )
+                .unwrap(),
+            Acceptance::Refused,
+            "refs missing from individual retained byte bound"
+        );
+        limits.max_item_bytes = 100000;
+        limits.max_bytes = (size * 2 - 1) as i64;
+        assert!(matches!(
+            store
+                .accept_delivery(
+                    &scope(),
+                    &feed.service,
+                    &feed.delivery,
+                    &limits,
+                    UNIX_EPOCH + Duration::from_secs(101)
+                )
+                .unwrap(),
+            Acceptance::Stored { .. }
+        ));
+        let second = Feed::new("second", vec![reference("file.txt")]).await;
+        assert_eq!(
+            store
+                .accept_delivery(
+                    &scope(),
+                    &second.service,
+                    &second.delivery,
+                    &limits,
+                    UNIX_EPOCH + Duration::from_secs(102)
+                )
+                .unwrap(),
+            Acceptance::Deferred,
+            "refs missing from aggregate retained byte bound"
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM custody_items", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
     }
 }

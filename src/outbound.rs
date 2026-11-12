@@ -3,11 +3,13 @@ use crate::grants::{
     Error as GrantError, Store, CUSTODY_SCHEMA_VERSION, MAX_SUPPORTED_SCHEMA_VERSION,
     OUTBOUND_SCHEMA_VERSION,
 };
+use base64::{engine::general_purpose::STANDARD, Engine};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
+use xmsg::client::{AttachRequest, AttachmentRef};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -29,6 +31,8 @@ pub enum Error {
     Capacity,
     #[error("outbound store busy; operation not submitted, retry the same request_id")]
     Busy,
+    #[error("read worker unavailable")]
+    Worker,
     #[error(transparent)]
     Authority(GrantError),
     #[error("outbound store unavailable")]
@@ -362,6 +366,8 @@ pub struct SendArguments {
     pub request_id: RequestId,
     pub to: String,
     pub text: String,
+    #[serde(default, deserialize_with = "crate::attachments::deserialize_inputs")]
+    pub attachments: Vec<crate::attachments::Input>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -370,6 +376,8 @@ pub struct ReplyArguments {
     pub request_id: RequestId,
     pub message_id: String,
     pub text: String,
+    #[serde(default, deserialize_with = "crate::attachments::deserialize_inputs")]
+    pub attachments: Vec<crate::attachments::Input>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -433,6 +441,12 @@ impl Request {
             Self::Reply(args) => ("reply", &args.request_id, &args.text),
         }
     }
+    fn attachments(&self) -> &[crate::attachments::Input] {
+        match self {
+            Self::Send(args) => &args.attachments,
+            Self::Reply(args) => &args.attachments,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -465,6 +479,9 @@ pub struct Limits {
 pub struct Endpoint {
     sender: String,
     client: xmsg::client::AgentClient,
+    max_attachment_bytes: Option<usize>,
+    max_body_bytes: Option<usize>,
+    frame_budget: usize,
 }
 
 impl Endpoint {
@@ -476,6 +493,30 @@ impl Endpoint {
         &self.sender
     }
 
+    pub(crate) fn frame_budget(&self) -> usize {
+        self.frame_budget
+    }
+
+    pub(crate) fn with_frame_budget(mut self, max_frame_bytes: usize) -> Self {
+        self.frame_budget = max_frame_bytes;
+        self
+    }
+
+    pub(crate) async fn read_attachment(
+        &self,
+        message_id: &str,
+        index: usize,
+        offset: usize,
+        length: Option<usize>,
+    ) -> Result<xmsg::client::AttachmentRead, xmsg::client::ClientError> {
+        if self.max_attachment_bytes.is_none() {
+            return Err(xmsg::client::ClientError::Protocol);
+        }
+        self.client
+            .read_attachment(message_id, index, offset, length)
+            .await
+    }
+
     pub fn from_registered(service: &xmsg::client::RegisteredService) -> Result<Self, Error> {
         Ok(Self {
             sender: service
@@ -483,6 +524,9 @@ impl Endpoint {
                 .ok_or(xmsg::client::ClientError::Disconnected)?
                 .to_owned(),
             client: service.agent_client(),
+            max_attachment_bytes: service.max_attachment_bytes(),
+            max_body_bytes: service.max_body_bytes(),
+            frame_budget: service.max_body_bytes().unwrap_or(0),
         })
     }
 }
@@ -528,6 +572,8 @@ struct Reservation {
     grant_id: String,
     grant_revision: i64,
     framed_text: String,
+    attachments: Vec<AttachmentRef>,
+    correlation: Option<String>,
     created_at: i64,
     retry_until: i64,
     receipt: Option<String>,
@@ -602,9 +648,40 @@ impl Store {
         op: &str,
         id: &RequestId,
     ) -> Result<Option<Reservation>, Error> {
-        Ok(self.connection.query_row("SELECT idempotency_key, payload_hash, sender, grant_id, grant_revision, framed_text, created_at, retry_until, receipt, target FROM outbound_reservations WHERE owner=?1 AND operation=?2 AND request_id=?3", params![owner,op,id.as_str()], |r| Ok(Reservation {
-            key:r.get(0)?,payload_hash:r.get(1)?,sender:r.get(2)?,grant_id:r.get(3)?,grant_revision:r.get(4)?,framed_text:r.get(5)?,created_at:r.get(6)?,retry_until:r.get(7)?,receipt:r.get(8)?,target:r.get(9)?
-        })).optional()?)
+        let refs_column = if crate::attachment_store::ready(&self.connection)? {
+            "attachments"
+        } else {
+            "'[]'"
+        };
+        let sql = format!("SELECT idempotency_key,payload_hash,sender,grant_id,grant_revision,framed_text,created_at,retry_until,receipt,target,correlation,{refs_column} FROM outbound_reservations WHERE owner=?1 AND operation=?2 AND request_id=?3");
+        let row = self
+            .connection
+            .query_row(&sql, params![owner, op, id.as_str()], |r| {
+                let json: String = r.get(11)?;
+                let attachments = serde_json::from_str(&json).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        11,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+                Ok(Reservation {
+                    key: r.get(0)?,
+                    payload_hash: r.get(1)?,
+                    sender: r.get(2)?,
+                    grant_id: r.get(3)?,
+                    grant_revision: r.get(4)?,
+                    framed_text: r.get(5)?,
+                    created_at: r.get(6)?,
+                    retry_until: r.get(7)?,
+                    receipt: r.get(8)?,
+                    target: r.get(9)?,
+                    correlation: r.get(10)?,
+                    attachments,
+                })
+            })
+            .optional()?;
+        Ok(row)
     }
 }
 
@@ -934,6 +1011,17 @@ async fn dispatch_on_connection(
     if !verifier.requires_scope_for(identity, &initial_permission.required_scope) {
         return Err(Error::Denied);
     }
+    let inputs = request.attachments();
+    if !inputs.is_empty() && !crate::attachment_store::ready(&store.connection)? {
+        return Err(Error::MigrationRequired);
+    }
+    let cap = if inputs.is_empty() {
+        0
+    } else {
+        service.max_attachment_bytes.ok_or(Error::Configuration)?
+    };
+    let prepared = crate::attachments::prepare(inputs, cap)?;
+    let references: Vec<_> = prepared.iter().map(|file| file.reference.clone()).collect();
     let owner = crate::custody::fingerprint(&[
         identity.service(),
         identity.issuer(),
@@ -966,7 +1054,7 @@ async fn dispatch_on_connection(
                 Request::Reply(args) => (reservation.target.as_str(), args.message_id.as_str()),
             };
             if reservation.payload_hash
-                != crate::custody::fingerprint(&[op, target, correlation, text])
+                != payload_fingerprint(op, target, correlation, text, &references)?
             {
                 return Err(Error::Conflict);
             }
@@ -1020,6 +1108,7 @@ async fn dispatch_on_connection(
             &owner,
             &may_have_submitted,
             selected_grant,
+            &prepared,
         ),
     )
     .await;
@@ -1046,6 +1135,100 @@ async fn dispatch_on_connection(
     }
 }
 
+fn payload_fingerprint(
+    operation: &str,
+    target: &str,
+    correlation: &str,
+    text: &str,
+    refs: &[AttachmentRef],
+) -> Result<String, Error> {
+    if refs.is_empty() {
+        Ok(crate::custody::fingerprint(&[
+            operation,
+            target,
+            correlation,
+            text,
+        ]))
+    } else {
+        Ok(crate::custody::fingerprint(&[
+            operation,
+            target,
+            correlation,
+            text,
+            &serde_json::to_string(refs)?,
+        ]))
+    }
+}
+
+fn attachment_frame_fits(request: &AttachRequest, bound: usize) -> Result<bool, Error> {
+    let mut frame = serde_json::to_value(request)?;
+    frame["action"] = serde_json::json!("attach");
+    frame["schema_version"] = serde_json::json!(xmsg::client::SCHEMA_VERSION);
+    Ok(serde_json::to_vec(&frame)?.len().saturating_add(1) <= bound)
+}
+
+async fn stage_attachment(
+    service: &Endpoint,
+    store: &mut Store,
+    context: &VerifiedContext,
+    file: &crate::attachments::Prepared,
+) -> Result<(), Error> {
+    let bound = service
+        .frame_budget
+        .min(service.max_body_bytes.ok_or(Error::Configuration)?);
+    let inline = AttachRequest {
+        name: Some(file.reference.name.clone()),
+        media_type: Some(file.reference.media_type.clone()),
+        data: Some(STANDARD.encode(&file.data)),
+        ..Default::default()
+    };
+    let response = if attachment_frame_fits(&inline, bound)? {
+        require_current(context, store)?;
+        service.client.attach(inline).await?
+    } else {
+        let chunk_size = bound.saturating_sub(1024) / 4 * 3;
+        if chunk_size == 0 {
+            return Err(Error::Oversized);
+        }
+        let upload = format!("gateway-{}-{chunk_size}", file.reference.sha256);
+        for (index, chunk) in file.data.chunks(chunk_size).enumerate() {
+            let request = AttachRequest {
+                upload: Some(upload.clone()),
+                offset: Some(index * chunk_size),
+                data: Some(STANDARD.encode(chunk)),
+                ..Default::default()
+            };
+            if !attachment_frame_fits(&request, bound)? {
+                return Err(Error::Oversized);
+            }
+            require_current(context, store)?;
+            service.client.attach(request).await?;
+        }
+        let finish = AttachRequest {
+            name: Some(file.reference.name.clone()),
+            media_type: Some(file.reference.media_type.clone()),
+            upload: Some(upload),
+            sha256: Some(file.reference.sha256.clone()),
+            ..Default::default()
+        };
+        if !attachment_frame_fits(&finish, bound)? {
+            return Err(Error::Oversized);
+        }
+        require_current(context, store)?;
+        service.client.attach(finish).await?
+    };
+    let reference: AttachmentRef = serde_json::from_value(
+        response
+            .get("attachment")
+            .cloned()
+            .ok_or(Error::Configuration)?,
+    )?;
+    if reference != file.reference {
+        return Err(Error::Configuration);
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn submit(
     store: &mut Store,
@@ -1058,6 +1241,7 @@ async fn submit(
     owner: &str,
     may_have_submitted: &AtomicBool,
     selected_grant: Option<&str>,
+    prepared: &[crate::attachments::Prepared],
 ) -> Result<Outcome, Error> {
     let identity = context.identity();
     let authority = context.authority();
@@ -1087,7 +1271,10 @@ async fn submit(
             Some(args.message_id.as_str()),
         ),
     };
-    let payload_hash = crate::custody::fingerprint(&[op, &target, correlation.unwrap_or(""), text]);
+    let references: Vec<_> = prepared.iter().map(|file| file.reference.clone()).collect();
+    let refs_json = serde_json::to_string(&references)?;
+    let payload_hash =
+        payload_fingerprint(op, &target, correlation.unwrap_or(""), text, &references)?;
     if existing
         .as_ref()
         .is_some_and(|reservation| reservation.payload_hash != payload_hash)
@@ -1161,6 +1348,23 @@ async fn submit(
             return Err(Error::Denied);
         }
     }
+    if let Request::Reply(args) = request {
+        if store.reply_target(
+            bus_instance,
+            &args.message_id,
+            sender,
+            identity,
+            authority,
+            None,
+            &permission,
+        )? != target
+        {
+            return Err(Error::Denied);
+        }
+    }
+    for file in prepared {
+        stage_attachment(service, store, context, file).await?;
+    }
     let reservation = match existing {
         Some(reservation) => reservation,
         None => {
@@ -1178,12 +1382,25 @@ async fn submit(
                 reservation_times(timestamp_now, limits.dedup_lifetime_secs)?;
             let (_, recovery_until) =
                 reservation_times(timestamp_now, limits.result_recovery_secs)?;
+            let attachments_ready = crate::attachment_store::ready(&store.connection)?;
             let tx = store
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let (count, bytes): (i64,i64) = tx.query_row("SELECT COUNT(*), COALESCE(SUM(length(CAST(framed_text AS BLOB))),0) FROM outbound_reservations", [], |r|Ok((r.get(0)?,r.get(1)?)))?;
+            let size_sql = if attachments_ready {
+                "SELECT COUNT(*), COALESCE(SUM(length(CAST(framed_text AS BLOB))+length(CAST(attachments AS BLOB))),0) FROM outbound_reservations"
+            } else {
+                "SELECT COUNT(*), COALESCE(SUM(length(CAST(framed_text AS BLOB))),0) FROM outbound_reservations"
+            };
+            let (count, bytes): (i64, i64) =
+                tx.query_row(size_sql, [], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            let retained_size = framed_text.len().saturating_add(if attachments_ready {
+                refs_json.len()
+            } else {
+                0
+            });
             if count >= limits.max_reservations
-                || bytes.saturating_add(framed_text.len() as i64) > limits.max_retained_bytes
+                || bytes.saturating_add(i64::try_from(retained_size).unwrap_or(i64::MAX))
+                    > limits.max_retained_bytes
             {
                 return Err(Error::Capacity);
             }
@@ -1192,6 +1409,12 @@ async fn submit(
                 params![owner, id.as_str()],
             )?;
             tx.execute("INSERT INTO outbound_reservations (owner,operation,request_id,payload_hash,sender,grant_id,grant_revision,idempotency_key,target,correlation,framed_text,created_at,retry_until,state,recovery_until) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'pending',?14)", params![owner,op,id.as_str(),payload_hash,sender,authority.grant_id,authority.revision,key,target,correlation,framed_text,timestamp,retry_until,recovery_until])?;
+            if attachments_ready {
+                tx.execute(
+                    "UPDATE outbound_reservations SET attachments=?2 WHERE idempotency_key=?1",
+                    params![key, refs_json],
+                )?;
+            }
             tx.commit()?;
             tracing::debug!(target: "gateway_outbound_reservation_committed", "pending reservation committed");
             store
@@ -1224,15 +1447,25 @@ async fn submit(
     }
     let key = reservation.key.clone();
     may_have_submitted.store(true, Ordering::Relaxed);
-    let submitted = match correlation {
+    let submitted = match reservation.correlation.as_deref() {
         Some(message_id) => service
             .client
-            .reply(message_id, &reservation.framed_text, Some(&key))
+            .reply_with_attachments(
+                message_id,
+                &reservation.framed_text,
+                Some(&key),
+                &reservation.attachments,
+            )
             .await
             .map(|reply| Receipt::Reply(Box::new(reply))),
         None => service
             .client
-            .send(&target, &reservation.framed_text, Some(&key))
+            .send_with_attachments(
+                &reservation.target,
+                &reservation.framed_text,
+                Some(&key),
+                &reservation.attachments,
+            )
             .await
             .map(Receipt::Send),
     };
@@ -1301,11 +1534,10 @@ mod reservation_time_tests {
             .find_map(|line| line.strip_prefix("revision = "))
             .expect("missing reviewed xmsg revision");
         assert_eq!(
-            revision, "\"42c6c756895b7d4b56abf95a72bd7e7e12daf232\"",
+            revision, "\"173f1527d4407a4f0abfd73bae9dc243c5708758\"",
             "review the node's idempotency retention boundary after a pin change"
         );
-        // Reviewed xmsg 42c6c756 storage.rs:1142–1156 keeps created_at >= now - TTL;
-        // purge_idempotency_keys at 1309–1318 removes only created_at < now - TTL.
+        // Reviewed xmsg 173f152 storage.rs:1215 and 1390–1400 retain keys through their final TTL tick.
         for nanos in [1, 999_999_999] {
             for ttl in [1, 86_400] {
                 let (created_at, retry_until) =
@@ -1359,6 +1591,8 @@ mod reservation_time_tests {
             grant_id: String::new(),
             grant_revision: 1,
             framed_text: String::new(),
+            attachments: vec![],
+            correlation: None,
             created_at: 100,
             retry_until: 101,
             receipt: None,

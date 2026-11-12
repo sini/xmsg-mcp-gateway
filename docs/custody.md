@@ -158,3 +158,20 @@ With Events, session health and ingestion share the configured limits described 
 [Events setup](events.md). Events also retain opaque occurrence sequences,
 responsibility checkpoints and an explicit unavailable-history floor; retention
 does not fabricate callback receipt or consumer observation.
+
+
+## File reference custody (planned)
+
+`migrate-attachments` explicitly adds reference JSON to custody and outbound reservations.
+It requires outbound schema readiness and leaves the global schema version unchanged.
+Without the extension, incoming file metadata is not acknowledged or silently discarded;
+plain deliveries retain their existing behavior. Migration is atomic and rejects partial or
+unrecognized attachment metadata schemas.
+
+A delivery fingerprint binds canonical file references as well as its existing origin,
+text, envelope and correlation. Identical redelivery stays a duplicate; changed references
+under the same upstream ID are quarantined as a conflict. Both per-item and aggregate
+custody bounds include reference metadata. Expiry clears references with retained body
+content; no blob bytes are stored in the gateway. Inbox and message reads expose references
+only under the existing complete ownership and dispatch-revision predicate. The file read
+adds fresh effect-point checks before asking xmsg and before releasing the returned data.

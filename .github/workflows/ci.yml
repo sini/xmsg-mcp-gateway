@@ -97,6 +97,7 @@ jobs:
           export XMSG_GATEWAY_BIN="$PWD/.artifacts/transport/$revision/xmsg"
           cargo test --locked --test gateway_leaf_reply mcp_leaf_send_reply_enters_owned_custody_with_attested_origin -- --ignored --exact --nocapture 2>&1 | tee gateway-leaf-reply.log
           grep -Fx 'gateway-leaf-reply-complete:mcp-owned-custody-attested-origin' gateway-leaf-reply.log
+          grep -Fx 'gateway-leaf-attachments-complete:bidirectional-files' gateway-leaf-reply.log
       - name: Private-node custody and completion controls
         run: |
           revision=$(python3 -c 'import tomllib; print(tomllib.load(open("ci/xmsg-pin.toml", "rb"))["revision"])')

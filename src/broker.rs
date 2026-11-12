@@ -155,6 +155,7 @@ pub fn parse(
         return Err(Arguments);
     }
     Ok(SendArguments {
+        attachments: vec![],
         request_id: RequestId::parse(&request_id).map_err(|_| Arguments)?,
         to: destination.to_owned(),
         text: serde_json::to_string(&arguments).map_err(|_| Arguments)?,

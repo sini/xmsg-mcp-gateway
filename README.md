@@ -2,7 +2,9 @@
 
 The Rust gateway serves OAuth-protected MCP tools with durable local grants,
 mailbox custody and optional signed [Events](docs/events.md). A messaging profile
-supports authorized send/reply and repeatable inbox/body reads. An Events profile
+supports authorized send/reply and repeatable inbox/body reads. Planned
+[file tools](docs/serving.md#file-tools-planned) add inline text/base64 files and bounded
+owned attachment reads. An Events profile
 adds service polling, durable webhook delivery, consumer responsibility ACKs and
 read-only outbound status. An optional [gist broker](docs/serving.md#optional-gist-broker)
 profile composes those paths for typed gist operations without a gateway GitHub
@@ -46,6 +48,7 @@ cargo run --locked -- --state .state/grants.db init
 cargo run --locked -- --state .state/grants.db migrate-custody
 cargo run --locked -- --state .state/grants.db migrate-outbound
 cargo run --locked -- --state .state/grants.db migrate-retirement
+cargo run --locked -- --state .state/grants.db migrate-attachments
 cargo run --locked -- --state .state/grants.db enroll grant-id binding.json
 cargo run --locked -- --state .state/grants.db enable grant-id 1
 cargo run --locked -- --state .state/grants.db disable grant-id 2
