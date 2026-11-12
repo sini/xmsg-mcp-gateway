@@ -29,6 +29,7 @@ BASELINE_TARGETS = [
     "events_https",
     "events_contract",
     "webhook",
+    "webhook_transport_e2e",
 ]
 
 
@@ -424,6 +425,20 @@ CASES.extend([
     )),
 ])
 
+CASES.extend([
+    Case("callback-dns-rebinding-pin", "webhook_transport_e2e", "public_https_pins_validation_dns_answer", "tests/webhook_transport_e2e.rs", (
+        Edit("src/webhook.rs", ".resolve_to_addrs(host, addresses)", ""),
+    )),
+    Case("callback-redirect-chain", "webhook_transport_e2e", "public_https_stops_before_redirect_chain", "tests/webhook_transport_e2e.rs", (
+        Edit("src/webhook.rs", "reqwest::redirect::Policy::none()", "reqwest::redirect::Policy::limited(5)"),
+    )),
+])
+
+CALLBACK_TRANSPORT_WITNESSES = {
+    "public_https_pins_validation_dns_answer": "DNS rebinding reached the private trap instead of the pinned sink",
+    "public_https_stops_before_redirect_chain": "callback followed the redirect chain",
+}
+
 def sha(file):
     return hashlib.sha256(file.read_bytes()).hexdigest()
 
@@ -591,6 +606,10 @@ def execute(tree, executable, env, label, *, name=None, marker=None, red=False):
             output[-6000:],
         )
         assert "test result: FAILED. 0 passed; 1 failed;" in output
+        if name in CALLBACK_TRANSPORT_WITNESSES:
+            assert CALLBACK_TRANSPORT_WITNESSES[name] in output, (
+                label, "callback fixture failed outside its intended oracle", output[-6000:]
+            )
         print(f"g5-events RED {label}: {expected}", flush=True)
     else:
         assert result["status"] == 0, (label, output[-6000:])

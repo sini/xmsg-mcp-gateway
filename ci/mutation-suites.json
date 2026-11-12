@@ -5,10 +5,10 @@
       "id": "events",
       "script": "scripts/events_mutants.py",
       "args": [],
-      "count": 33,
+      "count": 35,
       "fixture": false,
       "python": false,
-      "completion": "g5-events-mutants-complete:33/33",
+      "completion": "g5-events-mutants-complete:35/35",
       "dependencies": [
         "scripts/events_mutants.py",
         "src/custody.rs",
@@ -32,7 +32,9 @@
         "tests/events_store.rs",
         "tests/list.rs",
         "tests/webhook.rs",
-        "src/event_renewal_status_tests.rs"
+        "src/event_renewal_status_tests.rs",
+        "tests/webhook_transport_e2e.rs",
+        "tests/test_webhook_transport_gate.py"
       ],
       "labels": [
         "candidate-mailbox",
@@ -67,7 +69,9 @@
         "renewal-write-before-verification",
         "renewal-required-status-omitted",
         "renewal-credential-park-not-cleared",
-        "renewal-transaction-omitted"
+        "renewal-transaction-omitted",
+        "callback-dns-rebinding-pin",
+        "callback-redirect-chain"
       ],
       "required_output": [
         "^g5-events RED 01-candidate\\-mailbox-red:",
@@ -135,9 +139,13 @@
         "^g5-events RED 32-renewal-credential-park-not-cleared-red:",
         "^g5-events GREEN 32-renewal-credential-park-not-cleared-restored$",
         "^g5-events RED 33-renewal-transaction-omitted-red:",
-        "^g5-events GREEN 33-renewal-transaction-omitted-restored$"
+        "^g5-events GREEN 33-renewal-transaction-omitted-restored$",
+        "^g5-events RED 34-callback-dns-rebinding-pin-red:",
+        "^g5-events GREEN 34-callback-dns-rebinding-pin-restored$",
+        "^g5-events RED 35-callback-redirect-chain-red:",
+        "^g5-events GREEN 35-callback-redirect-chain-restored$"
       ],
-      "script_sha256": "42d28ee2530eb1d36c8f069333e6f12021ed8d227eee8b81f543d614ad7f1c2c"
+      "script_sha256": "c7ee288a35b17153c986e7a00299589e27eb9818f929a7c4dd892bae7ac10803"
     },
     {
       "id": "retirement",
