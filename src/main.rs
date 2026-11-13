@@ -444,6 +444,8 @@ fn logging_override(
     }
 }
 
+const DEFAULT_LOG_FILTER: &str = "warn,gateway_dispatch=info,gateway_events=info,gateway_oauth_refresh=info,gateway_oauth_authentication=info,gateway_attachments=info";
+
 fn default_subscriber<W>(
     writer: W,
     explicit: Option<&str>,
@@ -453,7 +455,7 @@ where
 {
     use tracing_subscriber::prelude::*;
     let filter: tracing_subscriber::filter::Targets = explicit
-        .unwrap_or("warn,gateway_dispatch=info,gateway_events=info,gateway_oauth_refresh=info,gateway_oauth_authentication=info")
+        .unwrap_or(DEFAULT_LOG_FILTER)
         .parse()
         .map_err(|_| LoggingConfigurationError)?;
     Ok(tracing_subscriber::registry().with(
@@ -510,7 +512,7 @@ fn private_document(file: &std::path::Path, limit: u64) -> Result<Vec<u8>, Comma
 #[cfg(test)]
 mod logging_tests {
     #[test]
-    fn actual_default_subscriber_enables_only_dispatch_info_and_existing_warnings() {
+    fn actual_default_subscriber_enables_declared_info_targets_and_existing_warnings() {
         use std::io::Write;
         use std::sync::{Arc, Mutex};
         #[derive(Clone)]
@@ -539,6 +541,7 @@ mod logging_tests {
                     tracing::info!(target:"gateway_events",class="subscription",reason="enabled","Events default control");
                     tracing::info!(target:"gateway_oauth_refresh",class="rotate","OAuth refresh default control");
                     tracing::info!(target:"gateway_oauth_authentication",class="invalid_client","OAuth authentication default control");
+                    tracing::info!(target:"gateway_attachments",class="configuration",enabled=true,reason="enabled","Attachments default control");
                     tracing::info!(target:"gateway_registration",address="CANARY_ADDRESS_34","CANARY_REGISTRATION_34");
                     tracing::warn!(target:"default_warning_control","existing warning retained");
                 },
@@ -555,6 +558,7 @@ mod logging_tests {
                 text.contains("OAuth authentication default control"),
                 visible
             );
+            assert_eq!(text.contains("Attachments default control"), visible);
             assert!(
                 !text.contains("CANARY_"),
                 "default subscriber exposed other INFO data: {text}"

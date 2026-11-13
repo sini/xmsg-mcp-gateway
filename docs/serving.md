@@ -282,9 +282,11 @@ withholds the broker result. Unavailable reads, Events operations and local ACK
 writes have a JSON-RPC error body without a claim that a local commit rolled back.
 `tools/list` retains the shared predispatch authentication/admission behavior.
 
-The CLI defaults to `warn,gateway_dispatch=info,gateway_events=info`: dispatch and Events INFO
-are visible while other targets remain at WARN. Set `RUST_LOG` to replace this default with an
-explicit level/target filter; for example, `RUST_LOG=warn` hides dispatch and Events INFO.
+The CLI defaults to
+`warn,gateway_dispatch=info,gateway_events=info,gateway_oauth_refresh=info,gateway_oauth_authentication=info,gateway_attachments=info`:
+dispatch, Events, OAuth refresh/authentication and attachment configuration INFO are visible
+while other targets remain at WARN. Set `RUST_LOG` to replace this default with an explicit
+level/target filter; for example, `RUST_LOG=warn` hides these INFO events.
 An invalid explicit filter is rejected rather than falling back to the default.
 
 At INFO level, `gateway_dispatch` also emits one `dispatch outcome`
@@ -461,7 +463,8 @@ and the read-only `xmsg_read_attachment` tool. The existing grant, profile, scop
 policy and custody ownership apply. There is no caller-supplied filesystem path or bare-hash
 attachment operation.
 
-A planned startup diagnostic emits one INFO event on target `gateway_attachments`, with
+A planned startup diagnostic emits one INFO event on target `gateway_attachments`, enabled by
+the default CLI filter, with
 `class=configuration`, an `enabled` boolean, and one fixed `reason`: `enabled`,
 `migration_missing`, or `leaf_without_attachments`. It reports the existing readiness
 decision: both the attachment migration marker and the registered leaf capability must be
