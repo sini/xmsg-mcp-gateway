@@ -5,8 +5,8 @@ Clippy, Python reference tests, timeout diagnostics, real-daemon transport profi
 and the packaged broker integration. Rust completion counts live in
 `ci/ordinary-counts.json`; updating that census alone does not select mutation suites.
 
-`ci/mutation-suites.json` registers each whole execution suite: 21 Rust executions
-with 423 named mutants, plus the Python reference suite with 13. Reservation units
+`ci/mutation-suites.json` registers each whole execution suite: 22 Rust executions
+with 430 named mutants, plus the Python reference suite with 13. Reservation units
 and live acceptance are separate modes. Each matrix job runs its unchanged script,
 including that script's baselines, cached-artifact controls, nonces, source hashes,
 mutant arms and restoration controls. Fixture-dependent jobs build the existing
@@ -17,7 +17,7 @@ changed. Common helpers, build manifests, toolchains, workflows and mutation scr
 select the full inventory. Unknown file classification also selects everything;
 this deliberately prefers unnecessary work to an omitted gate. Documentation-only
 and ordinary-census changes can select no mutation suite. Every main push, manual
-workflow dispatch, and pull request carrying the `full-gates` label selects all 436
+workflow dispatch, and pull request carrying the `full-gates` label selects all 443
 named mutants. Label changes trigger a new run; later commits retain full selection
 while the label remains present. Manual dispatch uses the workflow available on the
 default branch, so a new workflow must land before it can be dispatched. See
@@ -36,7 +36,12 @@ and script digest together. The digest records the reviewed inventory; it is not
 binary cache key. Keep mutation execution modes together with their existing
 controls. Timeout diagnostic mutants and profile missing-fixture, wrong-revision,
 cached-artifact, early-return and missing-case controls remain ordinary checks,
-outside the 436 named-mutant count.
+outside the 443 named-mutant count.
+
+The `store_recovery` suite covers read-only fast paths, hot-journal recovery,
+live-writer non-interference, preserved forensic copies, journal magic, copy
+failure and integrity failure. Each fault requires its named failing test and a
+freshly compiled restoration passing all nine recovery tests.
 
 The attachment suite covers inline staging, reservation fingerprints, metadata custody,
 owned byte reads, freshness, frame limits and pending-read timeout configuration. It uses
