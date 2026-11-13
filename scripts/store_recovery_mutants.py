@@ -47,6 +47,10 @@ MUTANTS = [
      "if !preserve(&file, &journal)? {",
      "if !preserve(&file, &journal).unwrap_or(true) {",
      "backup_directory_failure_fails_closed_without_recovering"),
+    ("wrong-directory-mode", "src/grants_recovery.rs",
+     "if metadata.mode() & 0o777 != 0o700 || metadata.uid() != source.uid() {",
+     "if false && (metadata.mode() & 0o777 != 0o700 || metadata.uid() != source.uid()) {",
+     "preexisting_permissive_recovery_directory_fails_closed"),
     ("ignore-quick-check-result", "src/grants_recovery.rs",
      'if results != ["ok"] {', 'if false && results != ["ok"] {',
      "quick_check_failure_returns_error_after_one_preserved_recovery"),
@@ -123,8 +127,8 @@ def tests(artifact, root, evidence, label, test=None):
         expected = f"test {PREFIX}{test} ... FAILED"
         if result.returncode != 101 or expected not in output or "1 failed" not in output:
             raise RuntimeError(f"{label}: intended test must fail with exit 101")
-    elif result.returncode != 0 or "9 passed; 0 failed" not in output:
-        raise RuntimeError(f"{label}: restoration must pass all nine recovery tests")
+    elif result.returncode != 0 or "10 passed; 0 failed" not in output:
+        raise RuntimeError(f"{label}: restoration must pass all ten recovery tests")
     return result.returncode
 
 
@@ -169,9 +173,9 @@ def main():
             restored = build(root, target, case, "restored")
             green = tests(restored, root, case, "restored")
             summary.append({"mutant": name, "site_count": count, "test": PREFIX + test,
-                            "red_exit": red, "restored_exit": green, "restored_passed": 9})
+                            "red_exit": red, "restored_exit": green, "restored_passed": 10})
             (evidence / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-            print(f"{name}: intended RED 101; restored 9 GREEN", flush=True)
+            print(f"{name}: intended RED 101; restored 10 GREEN", flush=True)
     print(f"store-recovery-mutants-complete:{len(summary)}/{len(MUTANTS)}")
 
 

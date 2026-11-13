@@ -1638,10 +1638,10 @@
         "--evidence",
         ".artifacts/store-recovery-mutants"
       ],
-      "count": 7,
+      "count": 8,
       "fixture": false,
       "python": false,
-      "completion": "store-recovery-mutants-complete:7/7",
+      "completion": "store-recovery-mutants-complete:8/8",
       "dependencies": [
         "scripts/store_recovery_mutants.py",
         "src/grants.rs",
@@ -1655,18 +1655,20 @@
         "skip-preservation",
         "ignore-magic-after-preservation",
         "ignore-preservation-failure",
+        "wrong-directory-mode",
         "ignore-quick-check-result"
       ],
       "required_output": [
-        "^readonly\\-to\\-writable: intended RED 101; restored 9 GREEN$",
-        "^disable\\-776\\-recovery: intended RED 101; restored 9 GREEN$",
-        "^recover\\-before\\-readonly: intended RED 101; restored 9 GREEN$",
-        "^skip\\-preservation: intended RED 101; restored 9 GREEN$",
-        "^ignore\\-magic\\-after\\-preservation: intended RED 101; restored 9 GREEN$",
-        "^ignore\\-preservation\\-failure: intended RED 101; restored 9 GREEN$",
-        "^ignore\\-quick\\-check\\-result: intended RED 101; restored 9 GREEN$"
+        "^readonly\\-to\\-writable: intended RED 101; restored 10 GREEN$",
+        "^disable\\-776\\-recovery: intended RED 101; restored 10 GREEN$",
+        "^recover\\-before\\-readonly: intended RED 101; restored 10 GREEN$",
+        "^skip\\-preservation: intended RED 101; restored 10 GREEN$",
+        "^ignore\\-magic\\-after\\-preservation: intended RED 101; restored 10 GREEN$",
+        "^ignore\\-preservation\\-failure: intended RED 101; restored 10 GREEN$",
+        "^wrong\\-directory\\-mode: intended RED 101; restored 10 GREEN$",
+        "^ignore\\-quick\\-check\\-result: intended RED 101; restored 10 GREEN$"
       ],
-      "script_sha256": "6b05602073a27365c5b6510349b1be2e82f305bed886a906c6584620c64ce274"
+      "script_sha256": "0829d5543d47761ab396bcccf0c74681d28eabc368ae2c8c639d29a2d6116263"
     }
   ]
 }

@@ -236,6 +236,35 @@ fn backup_directory_failure_fails_closed_without_recovering() {
 }
 
 #[test]
+fn preexisting_permissive_recovery_directory_fails_closed() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_dir, db) = fixture();
+    let mut child = writer(&db);
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    let raw = fs::read(&db).unwrap();
+    let rollback = fs::read(journal(&db)).unwrap();
+    assert_eq!(
+        &rollback[..8],
+        &[0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7]
+    );
+    let directory = recovery(&db);
+    fs::create_dir(&directory).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+    match Store::open_readonly(&db) {
+        Err(Error::Io(error)) => assert_eq!(error.to_string(), "backup-directory"),
+        _ => panic!("permissive backup directory must refuse recovery"),
+    }
+    assert_eq!(fs::read_dir(&directory).unwrap().count(), 0);
+    assert_eq!(
+        fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+    assert_eq!(fs::read(&db).unwrap(), raw);
+    assert_eq!(fs::read(journal(&db)).unwrap(), rollback);
+}
+
+#[test]
 fn quick_check_failure_returns_error_after_one_preserved_recovery() {
     let (_dir, db) = fixture();
     let c = Connection::open(&db).unwrap();

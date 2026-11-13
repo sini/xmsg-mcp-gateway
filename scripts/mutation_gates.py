@@ -71,7 +71,7 @@ def load_registry(root=ROOT):
     if not required <= modes or len(modes) != len(suites):
         raise ValueError("mutation execution mode drift")
     if (
-        sum(s["count"] for s in suites if not s["python"]) != 430
+        sum(s["count"] for s in suites if not s["python"]) != 431
         or sum(s["count"] for s in suites if s["python"]) != 13
     ):
         raise ValueError("mutation case inventory drift")

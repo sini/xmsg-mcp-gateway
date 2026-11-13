@@ -173,14 +173,14 @@ class MutationGatesTests(unittest.TestCase):
 
     def test_complete_inventory_and_execution_modes(self):
         self.assertEqual(len(self.suites), 23)
-        self.assertEqual(sum(s["count"] for s in self.suites), 443)
+        self.assertEqual(sum(s["count"] for s in self.suites), 444)
         modes = {(s["script"], tuple(s["args"])) for s in self.suites}
         self.assertIn(("scripts/reservation_lifetime_mutants.py", ("--live",)), modes)
 
-    def test_store_recovery_requires_all_seven_named_results_and_completion(self):
+    def test_store_recovery_requires_all_eight_named_results_and_completion(self):
         suite = next(s for s in self.suites if s["id"] == "store_recovery")
-        self.assertEqual(suite["count"], 7)
-        lines = [f"{label}: intended RED 101; restored 9 GREEN" for label in suite["labels"]]
+        self.assertEqual(suite["count"], 8)
+        lines = [f"{label}: intended RED 101; restored 10 GREEN" for label in suite["labels"]]
         output = "\n".join([*lines, suite["completion"]]) + "\n"
         gates.validate_output(suite, output)
         for line in [*lines, suite["completion"]]:
