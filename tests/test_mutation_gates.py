@@ -172,10 +172,22 @@ class MutationGatesTests(unittest.TestCase):
         )
 
     def test_complete_inventory_and_execution_modes(self):
-        self.assertEqual(len(self.suites), 22)
-        self.assertEqual(sum(s["count"] for s in self.suites), 436)
+        self.assertEqual(len(self.suites), 23)
+        self.assertEqual(sum(s["count"] for s in self.suites), 443)
         modes = {(s["script"], tuple(s["args"])) for s in self.suites}
         self.assertIn(("scripts/reservation_lifetime_mutants.py", ("--live",)), modes)
+
+    def test_store_recovery_requires_all_seven_named_results_and_completion(self):
+        suite = next(s for s in self.suites if s["id"] == "store_recovery")
+        self.assertEqual(suite["count"], 7)
+        lines = [f"{label}: intended RED 101; restored 9 GREEN" for label in suite["labels"]]
+        output = "\n".join([*lines, suite["completion"]]) + "\n"
+        gates.validate_output(suite, output)
+        for line in [*lines, suite["completion"]]:
+            with self.subTest(missing=line), self.assertRaises(ValueError):
+                gates.validate_output(suite, output.replace(line + "\n", ""))
+        for filename in ["src/grants_recovery.rs", "src/grants_recovery_tests.rs"]:
+            self.assertIn("store_recovery", gates.select(self.suites, [filename]))
 
     def test_authorization_server_inventory_and_all_shared_auth_sources_are_covered(
         self,
@@ -263,7 +275,7 @@ class MutationGatesTests(unittest.TestCase):
         self.assertIn("dispatch_logging", gates.select(self.suites, ["src/serving.rs"]))
         self.assertIn("broker", gates.select(self.suites, ["tests/broker_bridge.rs"]))
         self.assertEqual(
-            len(gates.select(self.suites, ["tests/common/provider.rs"])), 22
+            len(gates.select(self.suites, ["tests/common/provider.rs"])), 23
         )
         self.assertEqual(gates.select(self.suites, ["phase1/worker.py"]), ["python"])
 

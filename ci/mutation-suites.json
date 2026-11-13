@@ -1630,6 +1630,43 @@
         "^g5-events GREEN 120-union\\-attachment\\-post\\-revision-restored$"
       ],
       "script_sha256": "e5a2a56d7524d3d95e51c0ff3b923367ce1a3936531497761a6b5ed091f36823"
+    },
+    {
+      "id": "store_recovery",
+      "script": "scripts/store_recovery_mutants.py",
+      "args": [
+        "--evidence",
+        ".artifacts/store-recovery-mutants"
+      ],
+      "count": 7,
+      "fixture": false,
+      "python": false,
+      "completion": "store-recovery-mutants-complete:7/7",
+      "dependencies": [
+        "scripts/store_recovery_mutants.py",
+        "src/grants.rs",
+        "src/grants_recovery.rs",
+        "src/grants_recovery_tests.rs"
+      ],
+      "labels": [
+        "readonly-to-writable",
+        "disable-776-recovery",
+        "recover-before-readonly",
+        "skip-preservation",
+        "ignore-magic-after-preservation",
+        "ignore-preservation-failure",
+        "ignore-quick-check-result"
+      ],
+      "required_output": [
+        "^readonly\\-to\\-writable: intended RED 101; restored 9 GREEN$",
+        "^disable\\-776\\-recovery: intended RED 101; restored 9 GREEN$",
+        "^recover\\-before\\-readonly: intended RED 101; restored 9 GREEN$",
+        "^skip\\-preservation: intended RED 101; restored 9 GREEN$",
+        "^ignore\\-magic\\-after\\-preservation: intended RED 101; restored 9 GREEN$",
+        "^ignore\\-preservation\\-failure: intended RED 101; restored 9 GREEN$",
+        "^ignore\\-quick\\-check\\-result: intended RED 101; restored 9 GREEN$"
+      ],
+      "script_sha256": "6b05602073a27365c5b6510349b1be2e82f305bed886a906c6584620c64ce274"
     }
   ]
 }
