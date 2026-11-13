@@ -278,6 +278,15 @@ pagination cursors must be restarted. Recovery reads do not mutate custody.
 
 ## Inline files (planned)
 
+Planned MIME defaults: omitting `media_type` on an inline `text` file uses
+`text/plain; charset=utf-8`. A `base64` file without a type remains
+`application/octet-stream`, including UTF-8 bytes or a `.txt` name. Explicit media types are
+preserved. The exact canonical UTF-8 value is accepted alongside bare media types; other
+parameters, including `charset=latin1`, remain invalid.
+
+Deploy the native xmsg leaf's canonical media-type validation before deploying this gateway
+default. An older leaf rejects the new canonical value during attachment staging.
+
 `xmsg_send` and `xmsg_reply` accept up to eight inline text/base64 files. Pure decoding and
 canonical name/media/hash calculation precede request-identity comparisons in both the
 busy-lease and submission paths. After scope, target and owned-reply checks, staging occurs

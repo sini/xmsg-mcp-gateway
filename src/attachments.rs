@@ -214,6 +214,11 @@ impl<'de> Deserialize<'de> for Input {
             base64: Option<String>,
         }
         let wire = Wire::deserialize(d)?;
+        let default_media_type = if wire.text.is_some() {
+            "text/plain; charset=utf-8"
+        } else {
+            "application/octet-stream"
+        };
         let data = match (wire.text, wire.base64) {
             (Some(text), None) => text.into_bytes(),
             (None, Some(data)) => STANDARD
@@ -227,9 +232,7 @@ impl<'de> Deserialize<'de> for Input {
         };
         let name = normalize_name(&wire.name)
             .ok_or_else(|| serde::de::Error::custom("invalid attachment name"))?;
-        let media_type = wire
-            .media_type
-            .unwrap_or_else(|| "application/octet-stream".into());
+        let media_type = wire.media_type.unwrap_or_else(|| default_media_type.into());
         if !valid_media_type(&media_type) {
             return Err(serde::de::Error::custom("invalid attachment media_type"));
         }
@@ -330,6 +333,9 @@ fn normalize_name(name: &str) -> Option<String> {
 }
 
 fn valid_media_type(value: &str) -> bool {
+    if value == "text/plain; charset=utf-8" {
+        return true;
+    }
     let token = |part: &str| {
         !part.is_empty()
             && part
@@ -340,4 +346,81 @@ fn valid_media_type(value: &str) -> bool {
         && value
             .split_once('/')
             .is_some_and(|(a, b)| token(a) && token(b))
+}
+
+#[cfg(test)]
+mod media_type_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn inline_text_defaults_to_utf8_plain_text() {
+        let input: Input =
+            serde_json::from_value(json!({"name":"note.txt","text":"héllo"})).unwrap();
+        let prepared = prepare(&[input], 1024).unwrap();
+        assert_eq!(
+            prepared[0].reference.media_type,
+            "text/plain; charset=utf-8"
+        );
+        assert!(validate_refs(std::slice::from_ref(&prepared[0].reference)));
+    }
+
+    #[test]
+    fn binary_input_does_not_infer_text_media_type() {
+        for name in ["note.txt", "binary.bin"] {
+            let input: Input = serde_json::from_value(json!({
+                "name":name,"base64":STANDARD.encode("valid UTF-8 text")
+            }))
+            .unwrap();
+            let prepared = prepare(&[input], 1024).unwrap();
+            assert_eq!(prepared[0].reference.media_type, "application/octet-stream");
+        }
+    }
+
+    #[test]
+    fn explicit_media_types_are_preserved() {
+        for media_type in [
+            "application/json",
+            "text/markdown",
+            "text/plain; charset=utf-8",
+        ] {
+            for field in ["text", "base64"] {
+                let mut value = json!({"name":"note.txt","media_type":media_type});
+                value[field] = if field == "text" {
+                    json!("hello")
+                } else {
+                    json!(STANDARD.encode("hello"))
+                };
+                let input: Input = serde_json::from_value(value).unwrap();
+                let prepared = prepare(&[input], 1024).unwrap();
+                assert_eq!(prepared[0].reference.media_type, media_type);
+                assert!(validate_refs(std::slice::from_ref(&prepared[0].reference)));
+            }
+        }
+    }
+
+    #[test]
+    fn media_type_parameters_remain_restricted() {
+        for media_type in [
+            "text/plain; charset=latin1",
+            "text/plain; charset=UTF-8",
+            "text/plain;charset=utf-8",
+            "text/plain; charset=utf-8; extra=value",
+            "text/plain; other=value",
+            "text/plain\r\nInjected: value",
+        ] {
+            let input = json!({"name":"note.txt","text":"hello","media_type":media_type});
+            assert!(
+                serde_json::from_value::<Input>(input).is_err(),
+                "{media_type:?}"
+            );
+            let reference = AttachmentRef {
+                name: "note.txt".into(),
+                size: 5,
+                media_type: media_type.into(),
+                sha256: format!("{:x}", Sha256::digest(b"hello")),
+            };
+            assert!(!validate_refs(&[reference]), "{media_type:?}");
+        }
+    }
 }
