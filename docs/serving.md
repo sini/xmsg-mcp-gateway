@@ -461,6 +461,15 @@ and the read-only `xmsg_read_attachment` tool. The existing grant, profile, scop
 policy and custody ownership apply. There is no caller-supplied filesystem path or bare-hash
 attachment operation.
 
+A planned startup diagnostic emits one INFO event on target `gateway_attachments`, with
+`class=configuration`, an `enabled` boolean, and one fixed `reason`: `enabled`,
+`migration_missing`, or `leaf_without_attachments`. It reports the existing readiness
+decision: both the attachment migration marker and the registered leaf capability must be
+present. `migration_missing` takes precedence when both are absent. With no messaging
+configuration, it reports disabled with `leaf_without_attachments` without probing a leaf or
+checking an additional migration. The event is emitted after successful startup validation
+and session setup, and contains no paths, grant IDs, tokens or file contents.
+
 ```json
 {"name":"xmsg_send","arguments":{"request_id":"report-1","to":"agent@node","text":"Here is the report.","attachments":[{"name":"report.txt","media_type":"text/plain","text":"report contents"}]}}
 ```

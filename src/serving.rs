@@ -30,6 +30,17 @@ use crate::{event_dispatch, events, reads, recovery, session};
 
 const MAX_OWNER_FILE: usize = 65_536;
 
+fn log_attachment_configuration(enabled: bool, metadata: Option<bool>) {
+    let reason = if enabled {
+        "enabled"
+    } else if metadata == Some(false) {
+        "migration_missing"
+    } else {
+        "leaf_without_attachments"
+    };
+    tracing::info!(target: "gateway_attachments", class = "configuration", enabled, reason);
+}
+
 fn default_max_request_body_bytes() -> usize {
     1_048_576
 }
@@ -474,6 +485,7 @@ impl Serving {
             None
         };
         let mut event_worker = None;
+        let mut attachment_metadata_for_diagnostic = None;
         let messaging = if let Some(messaging) = config.messaging {
             store
                 .require_outbound_ready()
@@ -551,6 +563,7 @@ impl Serving {
                 ingress,
             )
             .await?;
+            attachment_metadata_for_diagnostic = Some(attachment_metadata);
             Some(Messaging {
                 session,
                 limits,
@@ -595,6 +608,13 @@ impl Serving {
         ]) {
             router = router.route(&path, get(protected_resource));
         }
+        log_attachment_configuration(
+            state
+                .messaging
+                .as_ref()
+                .is_some_and(|messaging| messaging.attachments_enabled),
+            attachment_metadata_for_diagnostic,
+        );
         Ok(Self {
             header_read_timeout: Duration::from_millis(config.header_read_timeout_ms),
             router: router.with_state(state.clone()),
@@ -2236,5 +2256,107 @@ mod recovery_configuration_tests {
         value["result_recovery_secs"] = serde_json::json!(172800);
         let explicit: MessagingConfiguration = serde_json::from_value(value).unwrap();
         assert_eq!(explicit.result_recovery_secs, 172800);
+    }
+}
+
+#[cfg(test)]
+mod attachment_diagnostic_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Metadata, Subscriber};
+
+    #[derive(Debug)]
+    struct Captured {
+        target: String,
+        level: tracing::Level,
+        fields: BTreeMap<String, Value>,
+    }
+
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<Captured>>>);
+
+    struct Fields(BTreeMap<String, Value>);
+    impl Visit for Fields {
+        fn record_bool(&mut self, field: &Field, value: bool) {
+            self.0.insert(field.name().into(), json!(value));
+        }
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.0.insert(field.name().into(), json!(value));
+        }
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .insert(field.name().into(), json!(format!("{value:?}")));
+        }
+    }
+
+    impl Subscriber for Capture {
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+        fn enter(&self, _: &Id) {}
+        fn exit(&self, _: &Id) {}
+        fn event(&self, event: &Event<'_>) {
+            let mut fields = Fields(BTreeMap::new());
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(Captured {
+                target: event.metadata().target().into(),
+                level: *event.metadata().level(),
+                fields: fields.0,
+            });
+        }
+    }
+
+    #[test]
+    fn attachment_configuration_diagnostic_is_fixed_and_complete() {
+        for (enabled, metadata, reason) in [
+            (true, Some(true), "enabled"),
+            (false, Some(true), "leaf_without_attachments"),
+            (false, Some(false), "migration_missing"),
+            (false, None, "leaf_without_attachments"),
+        ] {
+            let capture = Capture::default();
+            tracing::subscriber::with_default(capture.clone(), || {
+                tracing::info!(target: "attachment_capture_control", secret="SECRET-CANARY", file_location="/PATH-CANARY", grant="GRANT-CANARY");
+                log_attachment_configuration(enabled, metadata);
+            });
+            let events = capture.0.lock().unwrap();
+            let control = events
+                .iter()
+                .find(|event| event.target == "attachment_capture_control")
+                .unwrap();
+            assert_eq!(control.fields["secret"], "SECRET-CANARY");
+            assert_eq!(control.fields["file_location"], "/PATH-CANARY");
+            assert_eq!(control.fields["grant"], "GRANT-CANARY");
+            let diagnostics: Vec<_> = events
+                .iter()
+                .filter(|event| event.target == "gateway_attachments")
+                .collect();
+            assert_eq!(
+                diagnostics.len(),
+                1,
+                "configuration emitted no diagnostic or more than one"
+            );
+            assert_eq!(diagnostics[0].level, tracing::Level::INFO);
+            assert_eq!(
+                diagnostics[0].fields,
+                BTreeMap::from([
+                    ("class".into(), json!("configuration")),
+                    ("enabled".into(), json!(enabled)),
+                    ("reason".into(), json!(reason)),
+                ])
+            );
+            let output = format!("{:?}", diagnostics[0]);
+            for canary in ["SECRET-CANARY", "/PATH-CANARY", "GRANT-CANARY"] {
+                assert!(!output.contains(canary));
+            }
+        }
     }
 }
