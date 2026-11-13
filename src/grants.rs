@@ -131,6 +131,18 @@ impl Store {
     }
 
     pub fn open_readonly(file: &Path) -> Result<Self, Error> {
+        match Self::open_readonly_once(file) {
+            Err(Error::Database(rusqlite::Error::SqliteFailure(error, _)))
+                if error.extended_code == rusqlite::ffi::SQLITE_READONLY_ROLLBACK =>
+            {
+                recovery::recover(file)?;
+                Self::open_readonly_once(file)
+            }
+            result => result,
+        }
+    }
+
+    fn open_readonly_once(file: &Path) -> Result<Self, Error> {
         let connection = Connection::open_with_flags(file, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         connection.busy_timeout(Duration::from_secs(30))?;
         Self::from_connection(file, connection)
@@ -478,3 +490,10 @@ impl Store {
             .ok_or(Error::Denied)
     }
 }
+
+#[path = "grants_recovery.rs"]
+mod recovery;
+
+#[cfg(all(test, unix))]
+#[path = "grants_recovery_tests.rs"]
+mod recovery_tests;

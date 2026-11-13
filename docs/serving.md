@@ -570,14 +570,47 @@ summaries alone, before outbound retirement is installed, do not.
 ### Inspect pending migrations
 
 Run `xmsg-mcp-gateway --state /state/grants.db migrations-pending` before
-maintenance. It reads one consistent snapshot without loading an Events key or
-changing the database. Exit 0 with empty stdout means complete; exit 10 prints
+maintenance. Ordinary inspection reads one consistent snapshot without loading an Events key
+or changing the database; crash recovery is the conditional exception described below. Exit 0 with empty stdout means complete; exit 10 prints
 pending `migrate-*` commands, one per line in prerequisite order. Missing, corrupt
 or unsupported stores return the normal error exit 1.
 
 If exit 10 reports work, stop every gateway process, back up the database, then
 run the existing shellless init chain above. Restart only after migration succeeds;
-rollback requires the pre-migration backup. Inspection itself needs no backup.
+rollback requires the pre-migration backup. Ordinary inspection itself needs no backup.
+
+### Crash recovery during inspection (planned)
+
+A killed writer can leave a hot SQLite rollback journal. A read-only connection cannot roll it
+back, so `migrations-pending` previously failed with `authority store unavailable`. Read-only
+store inspection now tries the normal read first. Only SQLite's rollback-required error plus a
+non-empty journal can enter one-shot recovery. A live writer's non-hot journal, an empty/zero
+header whose read succeeds, or a store without a journal stays on the read-only path.
+
+Before any recovery write, the gateway byte-copies the database and journal as found into
+`<canonical-store-path>.recovery/<random-hex>/database` and `journal`. For
+`/state/grants.db`, this is `/state/grants.db.recovery/<random-hex>/`. The directory is beside
+the store on the same volume, mode `0700`; the copies are mode `0600`, created without
+clobbering earlier evidence and synced before recovery. These authority-store copies are
+private and accumulate once per crash; this command does not prune them.
+
+Only the standard eight-byte rollback-journal magic is recognized. An unrecognized journal
+gets the `unrecognized-journal` diagnostic class and retained as-found copies for manual
+handling; it never gets a read-write open. The header check is bounded and does not replace
+SQLite's lock, hot-journal or rollback logic.
+
+For a recognized crash, the gateway opens the existing database read-write once without
+creating it, lets SQLite perform the rollback, requires `quick_check` to return exactly `ok`
+and validates the authority schema. It closes that connection and reopens read-only before
+reporting migrations. Committed state is retained and incomplete writes are rolled back.
+Normal exit 0/10 and migration-command stdout are unchanged; recovery diagnostics go to
+stderr. This operation does not migrate, enroll, mint credentials or repair general corruption.
+
+Copy, changed-source, recovery or integrity failures stop with an error and preserve available
+evidence. No recovery loop or manual journal deletion runs. Inspect the fixed recovery class
+and handle corrupt/unrecognized state manually while the gateway is stopped; do not delete
+its journal or restore an isolated database copy over a running service. Keep recovery pairs
+together with the store's existing backup/rollback controls.
 
 ## Multiple authentication profiles
 
