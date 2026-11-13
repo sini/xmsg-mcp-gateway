@@ -1053,6 +1053,36 @@ fn permission_enabled(
             .is_some_and(|permission| !permission.targets.is_empty())
 }
 
+fn inline_attachments_schema(cap: Option<usize>, request_cap: usize) -> Value {
+    let file_limit = match cap {
+        Some(cap) => format!("at most {cap} decoded bytes per file"),
+        None => "each file must fit the registered node's decoded-byte limit".into(),
+    };
+    let name = json!({"type":"string","minLength":1,
+        "description":"Nonempty display filename; normalized before storage."});
+    let media_type = json!({"type":"string","maxLength":64,
+        "description":"Optional media type; defaults to text/plain; charset=utf-8 for text or application/octet-stream for base64."});
+    let text = json!({"type":"string",
+        "description":format!("Literal UTF-8 file contents, {file_limit}; omitted media_type defaults to text/plain; charset=utf-8.")});
+    let base64 = json!({"type":"string","contentEncoding":"base64",
+        "description":format!("Standard Base64 file bytes, not a data URL, {file_limit}; omitted media_type defaults to application/octet-stream.")});
+    let mut text_media_type = media_type.clone();
+    text_media_type["default"] = json!("text/plain; charset=utf-8");
+    let mut binary_media_type = media_type.clone();
+    binary_media_type["default"] = json!("application/octet-stream");
+    json!({"type":"array","maxItems":attachments::MAX_FILES,"default":[],
+    "description":format!("Up to eight inline files, {file_limit}; the complete JSON request must also fit the gateway's {request_cap}-byte request body limit."),
+    "items":{"type":"object",
+        "properties":{"name":name,"media_type":media_type,"text":text,"base64":base64},
+        "required":["name"],"additionalProperties":false,
+        "oneOf":[
+            {"type":"object","properties":{"name":name,"media_type":text_media_type,"text":text},
+                "required":["name","text"],"additionalProperties":false},
+            {"type":"object","properties":{"name":name,"media_type":binary_media_type,"base64":base64},
+                "required":["name","base64"],"additionalProperties":false}
+        ]}})
+}
+
 fn tools(app: &App, identity: &VerifiedIdentity, policy: &Policy, grant: &Authorization) -> Value {
     let scopes: Vec<_> = app
         .scopes
@@ -1070,6 +1100,14 @@ fn tools(app: &App, identity: &VerifiedIdentity, policy: &Policy, grant: &Author
             .messaging
             .as_ref()
             .is_some_and(|messaging| messaging.attachments_enabled);
+        let attachment_schema = files_enabled.then(|| {
+            let cap = app
+                .messaging
+                .as_ref()
+                .and_then(|messaging| messaging.session.snapshot().ok())
+                .and_then(|snapshot| snapshot.endpoint.max_attachment_bytes());
+            inline_attachments_schema(cap, app.max_request_body_bytes)
+        });
         let custody_selected = app
             .events
             .as_ref()
@@ -1124,8 +1162,8 @@ fn tools(app: &App, identity: &VerifiedIdentity, policy: &Policy, grant: &Author
                 continue;
             }
             let mut properties = json!({"request_id":{"type":"string","minLength":1,"maxLength":128,"pattern":"^[A-Za-z0-9._:-]+$"},target:{"type":"string"},"text":{"type":"string"}});
-            if files_enabled {
-                properties["attachments"] = json!({"type":"array","maxItems":8,"default":[],"items":{"type":"object","properties":{"name":{"type":"string","minLength":1},"media_type":{"type":"string","maxLength":64},"text":{"type":"string"},"base64":{"type":"string"}},"required":["name"],"oneOf":[{"required":["text"],"not":{"required":["base64"]}},{"required":["base64"],"not":{"required":["text"]}}],"additionalProperties":false}});
+            if let Some(schema) = &attachment_schema {
+                properties["attachments"] = schema.clone();
             }
             tools.push(json!({"name":name,"description":"Submit authorized external-data text and optional inline files with a durable request_id; retry only with that same request_id.",
                 "inputSchema":{"type":"object","properties":properties,"required":["request_id",target,"text"],"additionalProperties":false},

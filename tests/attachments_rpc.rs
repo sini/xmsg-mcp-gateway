@@ -129,6 +129,10 @@ impl Drop for Setup {
 }
 impl Setup {
     async fn new() -> Self {
+        Self::with_attachment_cap(1_048_576).await
+    }
+
+    async fn with_attachment_cap(attachment_cap: usize) -> Self {
         let mut provider = Fixture::new();
         provider
             .tokens
@@ -178,7 +182,7 @@ impl Setup {
                             let mut stream=BufReader::new(stream);let mut line=String::new();
                             stream.read_line(&mut line).await.unwrap();
                             let frame:Value=serde_json::from_str(&line).unwrap();assert_eq!(frame["name"],"gateway");
-                            let ready=json!({"status":"ok","address":"gateway@bus","node":"bus","reply_ttl_secs":604800,"idempotency_ttl_secs":604800,"svc_queue_cap":1000,"max_body_bytes":65536,"max_attachment_bytes":1048576});
+                            let ready=json!({"status":"ok","address":"gateway@bus","node":"bus","reply_ttl_secs":604800,"idempotency_ttl_secs":604800,"svc_queue_cap":1000,"max_body_bytes":65536,"max_attachment_bytes":attachment_cap});
                             stream.get_mut().write_all(format!("{ready}\n").as_bytes()).await.unwrap();
                             loop {
                                 line.clear();if stream.read_line(&mut line).await.unwrap()==0 { break; }
@@ -263,7 +267,7 @@ async fn call(serving: &Serving, name: &str, args: Value) -> (StatusCode, Value)
 
 #[tokio::test]
 async fn schemas_advertise_inline_files_and_bounded_read_only_attachment_tool() {
-    let setup = Setup::new().await;
+    let setup = Setup::with_attachment_cap(262_144).await;
     let serving = setup.provider.serving().await;
     let (status, body, _) =
         fixture::request(&serving, "good-token", rpc("tools/list", json!({}))).await;
@@ -275,6 +279,55 @@ async fn schemas_advertise_inline_files_and_bounded_read_only_attachment_tool() 
             tool["inputSchema"]["properties"]["attachments"]["maxItems"], 8,
             "inline files absent from {name} schema"
         );
+        let attachments = &tool["inputSchema"]["properties"]["attachments"];
+        let description = attachments["description"].as_str().unwrap();
+        assert!(description.contains("262144") && description.contains("decoded"));
+        assert!(description.contains("1048576") && description.contains("request"));
+        let item = &attachments["items"];
+        assert_eq!(item["required"], json!(["name"]));
+        assert_eq!(item["additionalProperties"], false);
+        assert_eq!(item["oneOf"].as_array().unwrap().len(), 2);
+        for property in ["name", "text", "base64", "media_type"] {
+            let schema = &item["properties"][property];
+            assert_eq!(schema["type"], "string", "{name}: {property}");
+            let description = schema["description"].as_str().unwrap();
+            assert!(!description.is_empty() && !description.contains('\n'));
+        }
+        for (encoding, opposite, default) in [
+            ("text", "base64", "text/plain; charset=utf-8"),
+            ("base64", "text", "application/octet-stream"),
+        ] {
+            let branch = item["oneOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|branch| {
+                    branch["required"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&json!(encoding))
+                })
+                .unwrap();
+            assert_eq!(branch["required"], json!(["name", encoding]));
+            assert_eq!(branch["additionalProperties"], false);
+            assert_eq!(branch["properties"]["name"]["type"], "string");
+            assert_eq!(branch["properties"][encoding]["type"], "string");
+            assert_eq!(branch["properties"]["media_type"]["type"], "string");
+            assert!(branch["properties"].get(opposite).is_none());
+            assert_eq!(branch["properties"]["media_type"]["default"], default);
+            assert!(branch["properties"][encoding]["description"]
+                .as_str()
+                .unwrap()
+                .contains("262144"));
+        }
+        assert!(item["properties"]["text"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("text/plain; charset=utf-8"));
+        assert!(item["properties"]["base64"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("application/octet-stream"));
     }
     let tool = tools
         .iter()

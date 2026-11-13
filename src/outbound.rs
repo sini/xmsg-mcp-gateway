@@ -497,6 +497,10 @@ impl Endpoint {
         self.frame_budget
     }
 
+    pub(crate) fn max_attachment_bytes(&self) -> Option<usize> {
+        self.max_attachment_bytes
+    }
+
     pub(crate) fn with_frame_budget(mut self, max_frame_bytes: usize) -> Self {
         self.frame_budget = max_frame_bytes;
         self

@@ -293,6 +293,26 @@ busy-lease and submission paths. After scope, target and owned-reply checks, sta
 before the durable outbound reservation. Each stage, chunk, finalization and message effect
 checks current authority. Staging alone never marks a message as submitted.
 
+The planned `tools/list` input schema describes the same attachment entries on both tools:
+
+| Field | Meaning |
+| --- | --- |
+| `name` | Required string: a nonempty display filename, normalized before storage. |
+| `text` | Literal UTF-8 file contents; use exactly one of `text` or `base64`. |
+| `base64` | Standard Base64-encoded file bytes, without a data URL prefix. |
+| `media_type` | Optional string; defaults to `text/plain; charset=utf-8` for `text` or `application/octet-stream` for `base64`. |
+
+Unknown entry fields are refused. Each file's decoded byte length must fit the current
+registered node's per-file attachment limit; the schema states that limit from the current
+registration, rather than assuming the daemon's default. The complete JSON request must also
+fit the gateway's configured `max_request_body_bytes`, including Base64 and JSON overhead.
+During a registration outage, the schema describes the registered-node bound without
+inventing a numeric value; submission still requires a healthy registration.
+
+For example, add `"attachments":[{"name":"note.txt","text":"hello"}]` to either tool's
+ordinary arguments. Binary input instead uses an entry such as
+`{"name":"sample.bin","base64":"AAEC"}`, which decodes to three bytes.
+
 The reservation stores canonical references and correlation, not file bytes. Reference JSON
 counts toward both existing-row and new-row retention bounds. Submission uses those stored
 references with the original `gw-` key. Same-key retries after uncertainty therefore preserve
