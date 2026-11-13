@@ -40,8 +40,32 @@ fn accepted_fixture_socket_waits_for_delayed_bytes_with_inherited_nonblocking_fl
     use std::sync::mpsc::{self, RecvTimeoutError};
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     listener.set_nonblocking(true).unwrap();
-    let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-    let (mut socket, _) = listener.accept().unwrap();
+    let address = listener.local_addr().unwrap();
+    let (connect_tx, connect_rx) = mpsc::sync_channel(1);
+    let connector = thread::spawn(move || {
+        connect_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        TcpStream::connect(address).unwrap()
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let mut connect_tx = Some(connect_tx);
+    let (mut socket, _) = loop {
+        match listener.accept() {
+            Ok(accepted) => break accepted,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if let Some(connect_tx) = connect_tx.take() {
+                    connect_tx.send(()).unwrap();
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "fixture accept timed out"
+                );
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => panic!("fixture accept: {error}"),
+        }
+    };
+    assert!(connect_tx.is_none(), "forced accept race was not exercised");
+    let mut client = connector.join().unwrap();
     socket.set_nonblocking(true).unwrap();
     let flags = unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_GETFL) };
     assert!(
