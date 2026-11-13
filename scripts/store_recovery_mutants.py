@@ -13,11 +13,10 @@ import hashlib
 import json
 import os
 import re
-from pathlib import Path
-import shutil
 import subprocess
 import tempfile
 import uuid
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PREFIX = "grants::recovery_tests::"
