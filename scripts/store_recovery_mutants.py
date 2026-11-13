@@ -12,6 +12,7 @@ import difflib
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -124,8 +125,11 @@ def tests(artifact, root, evidence, label, test=None):
     result = run(command, root, evidence / f"{label}-test.log", timeout=180)
     output = result.stdout.decode(errors="replace")
     if test:
-        expected = f"test {PREFIX}{test} ... FAILED"
-        if result.returncode != 101 or expected not in output or "1 failed" not in output:
+        failure = rf"^    {re.escape(PREFIX + test)}$"
+        summary = r"^test result: FAILED\. 0 passed; 1 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [^\n]+$"
+        if (result.returncode != 101
+                or len(re.findall(failure, output, re.MULTILINE)) != 1
+                or len(re.findall(summary, output, re.MULTILINE)) != 1):
             raise RuntimeError(f"{label}: intended test must fail with exit 101")
     elif result.returncode != 0 or "10 passed; 0 failed" not in output:
         raise RuntimeError(f"{label}: restoration must pass all ten recovery tests")

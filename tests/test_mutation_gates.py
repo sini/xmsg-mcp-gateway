@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -188,6 +189,38 @@ class MutationGatesTests(unittest.TestCase):
                 gates.validate_output(suite, output.replace(line + "\n", ""))
         for filename in ["src/grants_recovery.rs", "src/grants_recovery_tests.rs"]:
             self.assertIn("store_recovery", gates.select(self.suites, [filename]))
+
+    def test_recovery_parser_accepts_child_interleaving_only_for_intended_failure(self):
+        spec = importlib.util.spec_from_file_location(
+            "store_recovery_mutants", ROOT / "scripts/store_recovery_mutants.py"
+        )
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        test = runner.HOT
+        name = runner.PREFIX + test
+        interleaved = (
+            f"running 1 test\ntest {name} ... \nrunning 1 test\nFAILED\n"
+            f"\nfailures:\n\nfailures:\n    {name}\n\n"
+            "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; "
+            "192 filtered out; finished in 0.03s\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cases = [
+                (interleaved, 101, True),
+                (interleaved.replace(f"    {name}\n", "    unrelated::failure\n"), 101, False),
+                (interleaved.replace("0 passed; 1 failed", "1 passed; 0 failed"), 101, False),
+                (interleaved, 0, False),
+                (interleaved, -9, False),
+            ]
+            for output, status, accepted in cases:
+                result = subprocess.CompletedProcess([], status, output.encode(), b"")
+                with self.subTest(status=status, accepted=accepted), mock.patch.object(runner, "run", return_value=result):
+                    if accepted:
+                        self.assertEqual(runner.tests(root / "artifact", root, root, "mutant", test), 101)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "intended test"):
+                            runner.tests(root / "artifact", root, root, "mutant", test)
 
     def test_authorization_server_inventory_and_all_shared_auth_sources_are_covered(
         self,

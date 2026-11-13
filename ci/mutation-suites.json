@@ -1668,7 +1668,7 @@
         "^wrong\\-directory\\-mode: intended RED 101; restored 10 GREEN$",
         "^ignore\\-quick\\-check\\-result: intended RED 101; restored 10 GREEN$"
       ],
-      "script_sha256": "0829d5543d47761ab396bcccf0c74681d28eabc368ae2c8c639d29a2d6116263"
+      "script_sha256": "053ecf2d22d9ccfe7b89d80575b4be6c9e71f763cf8aa09a87b7b32896401153"
     }
   ]
 }
