@@ -981,7 +981,7 @@ async fn confirmed_broker_recovery_failures_never_claim_no_submission() {
     };
     use tower::ServiceExt;
     use tracing::instrument::WithSubscriber;
-    for failure in ["provider", "lookup", "revocation"] {
+    for failure in ["provider", "provider_busy", "lookup", "revocation"] {
         let (fixture, bus) = setup().await;
         let serving = Serving::from_owner_file(&fixture.config_file)
             .await
@@ -990,12 +990,25 @@ async fn confirmed_broker_recovery_failures_never_claim_no_submission() {
         let file = fixture.store_file.clone();
         let reached = Arc::new(AtomicUsize::new(0));
         let count = reached.clone();
+        let writer = Arc::new(Mutex::new(None::<rusqlite::Connection>));
+        let held_writer = writer.clone();
+        let reservation_file = fixture.store_file.clone();
         let barrier = outbound_observer::AtEvent {
             target: "gateway_broker_submission_confirmed",
             action: move || {
                 assert_eq!(count.fetch_add(1, Ordering::SeqCst), 0);
                 match failure {
-                    "provider" => status.store(503, Ordering::SeqCst),
+                    "provider" | "provider_busy" => {
+                        status.store(503, Ordering::SeqCst);
+                        if failure == "provider_busy" {
+                            let connection = rusqlite::Connection::open(&file).unwrap();
+                            connection
+                                .busy_timeout(std::time::Duration::from_secs(2))
+                                .unwrap();
+                            connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+                            *held_writer.lock().unwrap() = Some(connection);
+                        }
+                    }
                     "lookup" => rusqlite::Connection::open(&file)
                         .unwrap()
                         .execute_batch(
@@ -1031,33 +1044,79 @@ async fn confirmed_broker_recovery_failures_never_claim_no_submission() {
             "confirmed receipt barrier not reached"
         );
         assert_eq!(bus.sends.load(Ordering::SeqCst), 1);
+        let durable: (String, Option<String>) = rusqlite::Connection::open(&reservation_file)
+            .unwrap().query_row(
+                "SELECT state,receipt FROM outbound_reservations WHERE request_id='confirmed-recovery'",
+                [], |row| Ok((row.get(0)?,row.get(1)?)),
+            ).unwrap();
+        assert_eq!(
+            durable.0, "confirmed",
+            "durable confirmation missing: {value}"
+        );
+        assert!(durable.1.is_some(), "durable receipt missing: {value}");
+        eprintln!(
+            "confirmed-recovery-control: arm={failure} durable_state={} receipt_present={} response_state={} response_submission={}",
+            durable.0,
+            durable.1.is_some(),
+            value["result"]["structuredContent"]["state"],
+            value["result"]["structuredContent"]["submission"],
+        );
         if failure == "revocation" {
             assert_eq!(
                 status,
                 StatusCode::FORBIDDEN,
                 "revoked authority leaked broker result: {value}"
             );
-        } else if failure == "provider" {
-            assert_eq!(status, StatusCode::OK, "{value}");
-            assert_eq!(
-                value["result"]["structuredContent"]["submission"],
-                "confirmed"
-            );
-            assert_eq!(fixture.requests.load(Ordering::SeqCst), 1);
         } else {
-            assert_eq!(
-                status,
-                StatusCode::OK,
-                "confirmed recovery hid pending outcome: {failure} {value}"
-            );
-            assert_eq!(
-                value["result"]["structuredContent"]["state"], "pending",
-                "confirmed recovery mislabeled submission: {failure} {value}"
-            );
+            assert_eq!(status, StatusCode::OK, "{value}");
             assert!(
                 value.get("error").is_none(),
                 "confirmed recovery claimed pre-effect failure: {value}"
             );
+            assert_eq!(value["result"]["isError"], false, "{value}");
+            let data = &value["result"]["structuredContent"];
+            assert_eq!(data["request_id"], "confirmed-recovery", "{value}");
+            assert_ne!(data.get("submitted"), Some(&json!(false)), "{value}");
+            let pending = data.get("submission").is_none() && data["state"] == "pending";
+            assert!(data["submission"] == "confirmed" || pending,
+                "confirmed recovery returned neither confirmed nor pending without submission: {value}");
+            if failure == "provider_busy" {
+                assert!(
+                    pending,
+                    "forced recovery writer did not exercise pending: {value}"
+                );
+            }
+            if failure.starts_with("provider") {
+                assert_eq!(fixture.requests.load(Ordering::SeqCst), 1);
+            }
+            drop(writer.lock().unwrap().take());
+            if pending {
+                if failure == "lookup" {
+                    let connection = rusqlite::Connection::open(&reservation_file).unwrap();
+                    connection
+                        .busy_timeout(std::time::Duration::from_secs(2))
+                        .unwrap();
+                    connection
+                        .execute_batch(
+                            "ALTER TABLE unavailable_custody_items RENAME TO custody_items",
+                        )
+                        .unwrap();
+                }
+                fixture.response_status.store(200, Ordering::SeqCst);
+                let (status, recovered, _) = fixture::request(&serving, "good-token", rpc(
+                    "tools/call", json!({"name":"xmsg_message_status","arguments":{"request_id":"confirmed-recovery"}}),
+                )).await;
+                assert_eq!(status, StatusCode::OK, "{recovered}");
+                assert!(recovered.get("error").is_none(), "{recovered}");
+                let result = &recovered["result"]["structuredContent"]["results"][0];
+                assert_eq!(
+                    result["state"], "confirmed",
+                    "durable confirmation unrecoverable: {recovered}"
+                );
+                let receipt: Value = serde_json::from_str(durable.1.as_deref().unwrap()).unwrap();
+                assert_eq!(result["receipt"], receipt, "{recovered}");
+                assert_eq!(bus.sends.load(Ordering::SeqCst), 1, "recovery resubmitted");
+            }
         }
     }
 }
