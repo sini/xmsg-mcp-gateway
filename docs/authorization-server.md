@@ -12,7 +12,7 @@ The MCP resource URL and the authorization-server issuer are distinct. MCP may r
 | `/oauth/token` | POST | Exchange a code or rotate a refresh token |
 | `/oauth/revoke` | POST | Revoke the token's whole family; unknown token returns success |
 
-Token and revocation requests require `client_secret_basic`. S256 PKCE is mandatory for code exchange. There is no dynamic client registration or CIMD. Register the exact redirect URI shown by the new connector; do not derive it from another connector. Provision the downstream client secret separately from upstream credentials and the liveness API token. Kanidm 1.11.2 ignores introspection caller Basic credentials; that measured provider behavior does **not** relax the gateway's own client authentication.
+Token and revocation requests require `client_secret_basic`. S256 PKCE is mandatory for code exchange. There is no dynamic client registration or CIMD. Register the exact redirect URI shown by the new connector; do not derive it from another connector. Provision the downstream client secret separately from upstream credentials and the liveness API token. Its private file must contain exactly 43 unreserved ASCII characters (`A-Z`, `a-z`, `0-9`, `-._~`), without a trailing newline. For example, generate it with `(umask 077; python3 -c 'import secrets; print(secrets.token_urlsafe(32), end="")' > hosted-client-secret)`; keep its value out of logs. Kanidm 1.11.2 ignores introspection caller Basic credentials; that measured provider behavior does **not** relax the gateway's own client authentication.
 
 Startup rejects registered client redirect URIs whose decoded query keys contain `code`, `state`, `iss`, `error`, `error_description` or `error_uri`, including percent-encoded spellings. Noncolliding registered queries remain allowed and are preserved in success and error redirects. The AS never adds `iss` and does not advertise RFC 9207.
 
@@ -135,7 +135,7 @@ A revoked/expired family defers pending delivery without changing item state and
 
 ## Owner-run migration, cutover and rollback
 
-These operations change durable authority and belong to an owner maintenance window. Back up the state database and existing configuration first. Preserve the legacy connector/profile until read-back and rollback checks complete. For a new store, follow the existing custody/outbound/retirement/Events migration sequence before the AS migration.
+These operations change durable authority and belong to an owner maintenance window. Stop every gateway process before taking an untouched backup of the state database and existing configuration, then run the migrations offline. Preserve the legacy connector/profile until read-back and rollback checks complete. For a new store, follow the existing custody/outbound/retirement/Events migration sequence before the AS migration.
 
 ```sh
 xmsg-mcp-gateway --state <store> migrate-profiles --if-needed
@@ -147,7 +147,7 @@ xmsg-mcp-gateway --state <store> migrations-pending
 The attachment metadata migration is an independent marker extension. It can run before or after the AS migration, including on schema version 5, without changing that global version. `migrations-pending` lists attachments before the AS migration.
 
 1. Start creating a **new** hosted connector. Obtain its exact redirect URI and provision the AS client secret and upstream login registration. Do not authorize it yet.
-2. Migrate, read back an empty pending-migration list, enroll/enable the exact local binding, and deploy both profiles. Hide the old issuer with `advertised: false`; retain the old `events.grant_id` initially. The old connector continues to work.
+2. Migrate, read back an empty pending-migration list, enroll/enable the exact local binding, and deploy both profiles. Hide the old issuer with `advertised: false`; retain the old `events.grant_id` initially. The old connector's authorization-code JWS tokens continue to work. The old remote entry must leave `opaque_default` false; the local entry owns opaque-token routing.
 3. Drain the old connector's inbox with reads and ACKs. Stop the gateway/pod before switching authority; a free operation lease alone does not prove the process stopped.
 4. Run the offline guard:
 
@@ -156,8 +156,10 @@ The attachment metadata migration is an independent marker extension. It can run
    ```
 
    Exit 4 means busy. Exit 3 means unobserved, unexpired content remains on either grant; drain it before proceeding. Only the owner may intentionally use `--abandon-unread`, which records `cutover-abandon` audit rows. An observed item with a pending callback is not independently unread.
-5. Read back the latest `events_cutover.to_grant` and the release audit in the backed-up store using owner-controlled database inspection. The latest marker must match the new configured `events.grant_id`. Startup refuses a mismatch. The acceptance transaction defers a stale process still selecting the old grant without acknowledging upstream; queued messages remain in xmsg. This guard protects the switch but does not remove the maintenance-window requirement.
+5. Read back the latest `events_cutover.to_grant` and the release audit in the migrated working store using owner-controlled database inspection. Keep the pre-migration backup untouched; it cannot contain the new marker. The latest marker must match the new configured `events.grant_id`. Startup refuses a mismatch. The acceptance transaction defers a stale process still selecting the old grant without acknowledging upstream; queued messages remain in xmsg. This guard protects the switch but does not remove the maintenance-window requirement.
 6. Start with the new Events grant, complete the new connector's OAuth, then explicitly subscribe with its token. Check identity, a wake, mailbox read/ACK and a send before retiring the old connector/grant. Wakes pause between quiescing and the new subscription. This procedure does not transfer old custody to the new grant.
 7. Before retirement, rollback uses the same procedure in reverse: stop, guard `--from <new-grant> --to <old-grant>` with operator/reason, drain or explicitly abandon unread content, restore the old Events configuration, then use the old connector. Read back marker/configuration agreement again. Keep historical bindings wherever store validation requires them; disabling a grant does not delete its history.
+
+Schema rollback is a separate escape hatch: stop every gateway process, restore the untouched pre-migration database and matching pre-cutover configuration/binary, then verify startup and legacy identity before reopening ingress. Restoring that backup discards state accumulated after it; reverse authority cutover above keeps the migrated schema and its history. Never restore over a running gateway.
 
 Hosted acceptance for this flow remains pending: actual connector redirect/discovery, refresh retries/concurrency, subscription renewal, logout independence, revocation, restart, outage bounds and a soak beyond 25 hours must be observed by the owner. Local capability and the legacy 2026-11-10 hosted result do not substitute for those checks.
