@@ -115,8 +115,12 @@ The `.state/` directory is gitignored and private to its OS account.
 
 The server returns JSON Streamable HTTP responses and advertises Events during
 `initialize`. It supports initialized MCP versions 2025-03-26, 2025-06-18 and
-2025-11-25. It does not implement MCP 2.0 `server/discover`, SSE subscriptions, or
-MCP batch requests. An authenticated GET receives 405; notifications receive 202.
+2025-11-25. Planned for the next release: authenticated `server/discover` answers
+bootstrap probes with only those supported legacy revisions, so modern clients can
+fall back to `initialize`. The discovery-only version-header exception is bootstrap
+compatibility, not 2026-07-28 transport support. Its hints are `ttlMs: 0` and
+`cacheScope: "private"`; capabilities remain scoped to the caller's grant.
+SSE subscriptions and MCP batch requests remain unimplemented. An authenticated GET receives 405; notifications receive 202.
 Standard `params._meta` is accepted separately from strict tool arguments and
 subscription filters. Progress token types are validated, but metadata is otherwise unused and no
 progress notifications are emitted. Idle/backoff worker ticks do not introspect tokens;

@@ -980,6 +980,18 @@ struct Initialize {
     _metadata: Map<String, Value>,
 }
 
+fn server_capabilities(app: &App, grant: &Authorization) -> Value {
+    if app
+        .events
+        .as_ref()
+        .is_some_and(|events| events.selected_grant == grant.grant_id)
+    {
+        json!({"tools":{},"events":{}})
+    } else {
+        json!({"tools":{}})
+    }
+}
+
 fn rpc_result(id: &Value, result: Value) -> Response {
     Json(json!({"jsonrpc":"2.0", "id": id, "result": result})).into_response()
 }
@@ -1649,11 +1661,17 @@ async fn mcp_request(
     {
         return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
     }
-    if headers
-        .get("mcp-protocol-version")
-        .is_some_and(|value| !value.to_str().is_ok_and(|value| VERSIONS.contains(&value)))
-    {
-        return StatusCode::BAD_REQUEST.into_response();
+    if let Some(value) = headers.get("mcp-protocol-version") {
+        let Ok(version) = value.to_str() else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        // Discovery reports legacy versions to a bootstrap probe without expanding transport support.
+        if !VERSIONS.contains(&version)
+            && !serde_json::from_slice::<Value>(&raw)
+                .is_ok_and(|body| body["method"] == "server/discover")
+        {
+            return StatusCode::BAD_REQUEST.into_response();
+        }
     }
     let body: Value = match serde_json::from_slice(&raw) {
         Ok(body) => body,
@@ -1692,10 +1710,20 @@ async fn mcp_request(
         return rpc_error(&id, -32600, "Invalid Request");
     }
     let result = match rpc.method.as_str() {
+        "server/discover" => {
+            if serde_json::from_value::<Parameters>(rpc.params).is_err() {
+                return rpc_error(&id, -32602, "Invalid params");
+            }
+            json!({"resultType":"complete","supportedVersions":VERSIONS,
+                "capabilities":server_capabilities(&app, &grant),
+                "_meta":{"io.modelcontextprotocol/serverInfo":{"name":"xmsg-mcp-gateway","version":env!("CARGO_PKG_VERSION")}},
+                "instructions":"Use initialize with a supported legacy protocol version, then tools/list.",
+                "ttlMs":0,"cacheScope":"private"})
+        }
         "initialize" => match serde_json::from_value::<Initialize>(rpc.params) {
             Ok(init) => {
                 json!({"protocolVersion": if VERSIONS.contains(&init.protocol_version.as_str()) { init.protocol_version.as_str() } else { VERSIONS[2] },
-                "capabilities": if app.events.as_ref().is_some_and(|events| events.selected_grant == grant.grant_id) { json!({"tools":{},"events":{}}) } else { json!({"tools":{}}) },"serverInfo":{"name":"xmsg-mcp-gateway","version":env!("CARGO_PKG_VERSION")}})
+                "capabilities": server_capabilities(&app, &grant),"serverInfo":{"name":"xmsg-mcp-gateway","version":env!("CARGO_PKG_VERSION")}})
             }
             Err(_) => return rpc_error(&id, -32602, "Invalid params"),
         },

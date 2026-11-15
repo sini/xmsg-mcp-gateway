@@ -2,7 +2,7 @@
 
 The Rust listener serves OAuth-protected MCP identity reads with durable local
 grants. Its public resource metadata advertises the canonical resource and issuer
-from the owner's configuration. `initialize`, `ping`, `tools/list`,
+from the owner's configuration. `server/discover`, `initialize`, `ping`, `tools/list`,
 `notifications/initialized` and `xmsg_identity` are implemented. Standard `_meta`
 progress tokens are accepted but unused. An optional owner-file messaging section
 enables authorized `xmsg_list`, `xmsg_send` and `xmsg_reply`, plus mailbox-scoped
@@ -25,6 +25,33 @@ a handler; admitted connections remain usable. Closing an admitted connection
 releases its slot. Capacity refusals have the typed `ConnectionCapacityRefusal`
 reason and never include request content. Invalid values refuse startup with
 `StartupError::Configuration`.
+
+## Supported protocol revisions and discovery
+
+The implemented transport revisions are `2025-03-26`, `2025-06-18` and
+`2025-11-25`. Planned, not yet released: `server/discover` provides a bootstrap
+compatibility answer; it does not declare 2026-07-28 transport support.
+
+Discovery uses the same bearer verification, live-grant authorization and
+Host/Origin rules as `tools/list`. It needs neither an initialized session nor an
+`Mcp-Session-Id`. Its parameters may be omitted or contain only standard `_meta`.
+For example, an authenticated client can POST:
+
+```json
+{"jsonrpc":"2.0","id":"discover-1","method":"server/discover"}
+```
+
+Only this method accepts an otherwise unsupported textual `MCP-Protocol-Version` header to learn
+the supported revisions. Every other method retains the existing version gate;
+malformed version headers are refused even for discovery. The result includes
+`resultType: "complete"`, the three legacy `supportedVersions`, caller-scoped
+`capabilities`, legacy-initialization `instructions`, and server identity under
+`_meta["io.modelcontextprotocol/serverInfo"]`. Events is advertised only to its
+selected grant, exactly as during `initialize`.
+
+The cache hints are `ttlMs: 0` and `cacheScope: "private"`; discovery must not be
+shared across authorization contexts. Clients select a supported legacy version
+and continue through `initialize` and `tools/list`.
 
 ## Optional messaging profile
 

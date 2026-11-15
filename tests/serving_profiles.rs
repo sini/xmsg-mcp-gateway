@@ -161,6 +161,28 @@ async fn one_endpoint_selects_two_profiles_and_advertises_both_issuers() {
                 "tool catalog borrowed another profile's scopes"
             );
         }
+        let (discover_status, discovery, _) = request(
+            &serving,
+            token,
+            json!({"jsonrpc":"2.0","id":"discover","method":"server/discover"}),
+        )
+        .await;
+        assert_eq!(discover_status, StatusCode::OK);
+        assert!(discovery.get("error").is_none(), "{discovery}");
+        assert_eq!(
+            discovery["result"]["capabilities"].get("events").is_some(),
+            selected,
+            "discovery borrowed another profile's Events capability: {discovery}"
+        );
+        assert_eq!(discovery["result"]["ttlMs"], 0);
+        assert_eq!(discovery["result"]["cacheScope"], "private");
+        let (_, initialized, _) = request(&serving, token,
+            json!({"jsonrpc":"2.0","id":"init","method":"initialize","params":{
+                "protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}})).await;
+        assert_eq!(
+            discovery["result"]["capabilities"],
+            initialized["result"]["capabilities"]
+        );
         let names: Vec<_> = body["result"]["tools"]
             .as_array()
             .unwrap()
