@@ -1253,8 +1253,8 @@ async fn first_call_recovery_retries_identical_requests_after_pending() {
     use axum::http::Request;
     use tower::ServiceExt;
     use tracing::instrument::WithSubscriber;
-    for mode in ["provider", "late"] {
-        let (fixture, bus) = setup_mode(mode == "provider").await;
+    for mode in ["provider", "provider_busy", "late"] {
+        let (fixture, bus) = setup_mode(mode.starts_with("provider")).await;
         let serving = Serving::from_owner_file(&fixture.config_file)
             .await
             .unwrap();
@@ -1263,8 +1263,11 @@ async fn first_call_recovery_retries_identical_requests_after_pending() {
             json!({"name":"gist_read","arguments":{"request_id":format!("helper-{mode}"),"id":"abc"}}),
         );
         let started = std::time::Instant::now();
-        let first = if mode == "provider" {
+        let writer = Arc::new(Mutex::new(None::<rusqlite::Connection>));
+        let first = if mode.starts_with("provider") {
             let status = fixture.response_status.clone();
+            let file = fixture.store_file.clone();
+            let held_writer = writer.clone();
             let reached = Arc::new(AtomicUsize::new(0));
             let count = reached.clone();
             let barrier = outbound_observer::AtEvent {
@@ -1272,6 +1275,14 @@ async fn first_call_recovery_retries_identical_requests_after_pending() {
                 action: move || {
                     assert_eq!(count.fetch_add(1, Ordering::SeqCst), 0);
                     status.store(503, Ordering::SeqCst);
+                    if mode == "provider_busy" {
+                        let connection = rusqlite::Connection::open(&file).unwrap();
+                        connection
+                            .busy_timeout(std::time::Duration::from_secs(2))
+                            .unwrap();
+                        connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+                        *held_writer.lock().unwrap() = Some(connection);
+                    }
                 },
             };
             let wire = Request::builder()
@@ -1304,15 +1315,68 @@ async fn first_call_recovery_retries_identical_requests_after_pending() {
             fixture::request(&serving, "good-token", request.clone()).await
         };
         assert_eq!(first.0, axum::http::StatusCode::OK);
-        if mode == "provider" {
-            assert_eq!(
-                first.1["result"]["structuredContent"]["submission"],
-                "confirmed"
+        if mode.starts_with("provider") {
+            assert!(first.1.get("error").is_none(), "{mode}: {}", first.1);
+            assert_eq!(first.1["result"]["isError"], false, "{mode}: {}", first.1);
+            let data = &first.1["result"]["structuredContent"];
+            assert_eq!(data["request_id"], format!("helper-{mode}"));
+            assert_ne!(
+                data.get("submitted"),
+                Some(&json!(false)),
+                "{mode}: {}",
+                first.1
             );
+            let pending = data.get("submission").is_none() && data["state"] == "pending";
+            assert!(
+                data["submission"] == "confirmed" || pending,
+                "{mode}: neither confirmed nor pending without submission: {}",
+                first.1
+            );
+            if mode == "provider_busy" {
+                assert!(
+                    pending,
+                    "forced writer did not exercise pending: {}",
+                    first.1
+                );
+            }
+            let durable: (String, Option<String>) = rusqlite::Connection::open(&fixture.store_file)
+                .unwrap()
+                .query_row(
+                    "SELECT state,receipt FROM outbound_reservations WHERE request_id=?1",
+                    [format!("helper-{mode}")],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                durable.0, "confirmed",
+                "durable confirmation missing: {}",
+                first.1
+            );
+            assert!(durable.1.is_some(), "durable receipt missing: {}", first.1);
+            eprintln!("first-call-recovery-control: mode={mode} pending={pending} durable={} receipt_present={}", durable.0,durable.1.is_some());
+            drop(writer.lock().unwrap().take());
             assert_eq!(fixture.requests.load(Ordering::SeqCst), 1);
             assert_eq!(bus.sends.load(Ordering::SeqCst), 1);
+            if pending {
+                fixture.response_status.store(200, Ordering::SeqCst);
+                let (status, recovered, _) = fixture::request(&serving, "good-token", rpc(
+                    "tools/call",json!({"name":"xmsg_message_status","arguments":{"request_id":format!("helper-{mode}")}}),
+                )).await;
+                assert_eq!(status, axum::http::StatusCode::OK, "{recovered}");
+                assert!(recovered.get("error").is_none(), "{recovered}");
+                let result = &recovered["result"]["structuredContent"]["results"][0];
+                assert_eq!(result["state"], "confirmed", "{recovered}");
+                assert!(!result["receipt"].is_null(), "{recovered}");
+                assert_eq!(bus.sends.load(Ordering::SeqCst), 1, "status resubmitted");
+                fixture.response_status.store(503, Ordering::SeqCst);
+            }
             let (status, _, _) = fixture::request(&serving, "good-token", request.clone()).await;
             assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(
+                bus.sends.load(Ordering::SeqCst),
+                1,
+                "provider failure resubmitted"
+            );
             continue;
         }
         assert_eq!(
