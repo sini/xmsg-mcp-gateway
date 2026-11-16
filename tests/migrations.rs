@@ -308,23 +308,24 @@ fn migrations_pending_keeps_one_readonly_snapshot_during_migration() {
         .pragma_update(None, "journal_mode", "WAL")
         .unwrap();
     let (selected_tx, selected_rx) = mpsc::channel();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (primed_tx, primed_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let inspection_file = file.clone();
     let inspector = std::thread::spawn(move || {
         let release_rx = Mutex::new(release_rx);
         tracing::subscriber::with_default(
-            outbound_observer::AtEvent {
-                target: "gateway_migrations_snapshot",
-                action: move || {
-                    selected_tx.send(()).unwrap();
-                    release_rx
-                        .lock()
-                        .unwrap()
-                        .recv_timeout(Duration::from_secs(3))
-                        .unwrap();
-                },
-            },
+            outbound_observer::AtEvent::new("gateway_migrations_snapshot", move || {
+                selected_tx.send(()).unwrap();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(3))
+                    .unwrap();
+            }),
             || {
+                ready_tx.send(()).unwrap();
+                primed_rx.recv_timeout(Duration::from_secs(3)).unwrap();
                 Store::open_readonly(&inspection_file)
                     .unwrap()
                     .pending_migrations()
@@ -332,6 +333,16 @@ fn migrations_pending_keeps_one_readonly_snapshot_during_migration() {
             },
         )
     });
+    ready_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert_eq!(
+        Store::open_readonly(&file)
+            .unwrap()
+            .pending_migrations()
+            .unwrap()
+            .len(),
+        8
+    );
+    primed_tx.send(()).unwrap();
     selected_rx.recv_timeout(Duration::from_secs(3)).unwrap();
     Store::open(&file).unwrap().migrate_custody().unwrap();
     release_tx.send(()).unwrap();

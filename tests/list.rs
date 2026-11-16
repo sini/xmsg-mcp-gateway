@@ -336,25 +336,22 @@ async fn confirmed_send_replay_rechecks_grant_after_public_entry() {
     let file = fixture.store_file.clone();
     let reached = Arc::new(AtomicUsize::new(0));
     let count = reached.clone();
-    let barrier = observer::AtEvent {
-        target: "gateway_dispatch",
-        action: move || {
-            // Failure outcomes share this target; invalidate only at initial dispatch.
-            if count
-                .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
-                .is_err()
-            {
-                return;
-            }
-            rusqlite::Connection::open(&file)
-                .unwrap()
-                .execute(
-                    "UPDATE grants SET enabled=0, revision=revision+1 WHERE id='grant'",
-                    [],
-                )
-                .unwrap();
-        },
-    };
+    let barrier = observer::AtEvent::new("gateway_dispatch", move || {
+        // Failure outcomes share this target; invalidate only at initial dispatch.
+        if count
+            .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+        rusqlite::Connection::open(&file)
+            .unwrap()
+            .execute(
+                "UPDATE grants SET enabled=0, revision=revision+1 WHERE id='grant'",
+                [],
+            )
+            .unwrap();
+    });
     let input = Request::builder()
         .method("POST")
         .uri("/mcp")

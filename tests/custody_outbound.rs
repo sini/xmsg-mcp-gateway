@@ -342,9 +342,9 @@ async fn same_request_reuses_receipt_and_changed_payload_conflicts() {
         &revoked,
         &operation_limits,
     )
-    .with_subscriber(observer::AtEvent {
-        target: "gateway_outbound_reserved",
-        action: move || {
+    .with_subscriber(observer::AtEvent::new(
+        "gateway_outbound_reserved",
+        move || {
             // Bypass the owner lease to force store invalidation during submission.
             rusqlite::Connection::open(&grant_file)
                 .unwrap()
@@ -354,7 +354,7 @@ async fn same_request_reuses_receipt_and_changed_payload_conflicts() {
                 )
                 .unwrap();
         },
-    })
+    ))
     .await;
     assert!(
         matches!(result, Err(Error::Denied) | Err(Error::Authority(_))),
@@ -939,15 +939,15 @@ async fn pending_recovery_timeout_during_discovery_remains_unknown() {
         &operation,
         &normal_limits,
     )
-    .with_subscriber(observer::AtEvent {
-        target: "gateway_outbound_reserved",
-        action: move || {
+    .with_subscriber(observer::AtEvent::new(
+        "gateway_outbound_reserved",
+        move || {
             rusqlite::Connection::open(&grant_file)
                 .unwrap()
                 .execute("UPDATE grants SET enabled=0 WHERE id='grant'", [])
                 .unwrap();
         },
-    })
+    ))
     .await;
     assert!(matches!(
         first,
@@ -1586,14 +1586,14 @@ async fn busy_at_outcome(after_acceptance: bool) {
         &operation,
         &operation_limits,
     )
-    .with_subscriber(observer::AtEvent {
-        target: "gateway_outbound_submitted",
-        action: move || {
+    .with_subscriber(observer::AtEvent::new(
+        "gateway_outbound_submitted",
+        move || {
             if after_acceptance {
                 *lock.lock().unwrap() = Some(open_writer(&file));
             }
         },
-    })
+    ))
     .await;
     if !after_acceptance {
         assert!(

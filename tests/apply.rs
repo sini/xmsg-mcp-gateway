@@ -300,14 +300,11 @@ fn apply_rechecks_the_pre_lease_revision_even_for_a_prospective_noop() {
         let signaled = Arc::new(AtomicBool::new(false));
         let worker_file = file.clone();
         let worker = std::thread::spawn(move || {
-            let observer = observer::AtEvent {
-                target: "gateway_operation_wait",
-                action: move || {
-                    if !signaled.swap(true, Ordering::SeqCst) {
-                        tx.send(()).unwrap();
-                    }
-                },
-            };
+            let observer = observer::AtEvent::new("gateway_operation_wait", move || {
+                if !signaled.swap(true, Ordering::SeqCst) {
+                    tx.send(()).unwrap();
+                }
+            });
             tracing::subscriber::with_default(observer, || {
                 Store::open(&worker_file).unwrap().apply_outbound_policy(
                     "grant",

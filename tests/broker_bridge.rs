@@ -580,16 +580,13 @@ async fn broker_status_rechecks_send_ceiling_at_the_final_result_read() {
     let file = fixture.store_file.clone();
     let reached = Arc::new(AtomicUsize::new(0));
     let count = reached.clone();
-    let barrier = outbound_observer::AtEvent {
-        target: "gateway_broker_status_result",
-        action: move || {
-            assert_eq!(count.fetch_add(1, Ordering::SeqCst), 0);
-            Store::open(&file)
-                .unwrap()
-                .set_outbound_policy("grant", 3, &Policy::default())
-                .unwrap();
-        },
-    };
+    let barrier = outbound_observer::AtEvent::new("gateway_broker_status_result", move || {
+        assert_eq!(count.fetch_add(1, Ordering::SeqCst), 0);
+        Store::open(&file)
+            .unwrap()
+            .set_outbound_policy("grant", 3, &Policy::default())
+            .unwrap();
+    });
     let input = Request::builder()
         .method("POST")
         .uri("/mcp")
@@ -993,9 +990,8 @@ async fn confirmed_broker_recovery_failures_never_claim_no_submission() {
         let writer = Arc::new(Mutex::new(None::<rusqlite::Connection>));
         let held_writer = writer.clone();
         let reservation_file = fixture.store_file.clone();
-        let barrier = outbound_observer::AtEvent {
-            target: "gateway_broker_submission_confirmed",
-            action: move || {
+        let barrier =
+            outbound_observer::AtEvent::new("gateway_broker_submission_confirmed", move || {
                 assert_eq!(count.fetch_add(1, Ordering::SeqCst), 0);
                 match failure {
                     "provider" | "provider_busy" => {
@@ -1022,8 +1018,7 @@ async fn confirmed_broker_recovery_failures_never_claim_no_submission() {
                             .unwrap();
                     }
                 }
-            },
-        };
+            });
         let request=Request::builder().method("POST").uri("/mcp").header("host","gateway.example").header("content-type","application/json").header("authorization","Bearer good-token").body(Body::from(rpc("tools/call",json!({"name":"gist_read","arguments":{"request_id":"confirmed-recovery","id":"abc"}})).to_string())).unwrap();
         let response = serving
             .router()
@@ -1153,20 +1148,17 @@ async fn authorized_ack_deadline_has_body_without_claiming_rollback() {
     let reached = entered.clone();
     let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
     let waiter = release.clone();
-    let barrier = outbound_observer::AtEvent {
-        target: "gateway_ack_before_commit",
-        action: move || {
-            reached.store(1, Ordering::SeqCst);
-            let (lock, condition) = &*waiter;
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-            let mut released = lock.lock().unwrap();
-            while !*released {
-                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                assert!(!remaining.is_zero(), "owned ACK barrier was not released");
-                released = condition.wait_timeout(released, remaining).unwrap().0;
-            }
-        },
-    };
+    let barrier = outbound_observer::AtEvent::new("gateway_ack_before_commit", move || {
+        reached.store(1, Ordering::SeqCst);
+        let (lock, condition) = &*waiter;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut released = lock.lock().unwrap();
+        while !*released {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            assert!(!remaining.is_zero(), "owned ACK barrier was not released");
+            released = condition.wait_timeout(released, remaining).unwrap().0;
+        }
+    });
     let request = Request::builder()
         .method("POST")
         .uri("/mcp")
@@ -1270,9 +1262,8 @@ async fn first_call_recovery_retries_identical_requests_after_pending() {
             let held_writer = writer.clone();
             let reached = Arc::new(AtomicUsize::new(0));
             let count = reached.clone();
-            let barrier = outbound_observer::AtEvent {
-                target: "gateway_broker_submission_confirmed",
-                action: move || {
+            let barrier =
+                outbound_observer::AtEvent::new("gateway_broker_submission_confirmed", move || {
                     assert_eq!(count.fetch_add(1, Ordering::SeqCst), 0);
                     status.store(503, Ordering::SeqCst);
                     if mode == "provider_busy" {
@@ -1283,8 +1274,7 @@ async fn first_call_recovery_retries_identical_requests_after_pending() {
                         connection.execute_batch("BEGIN IMMEDIATE").unwrap();
                         *held_writer.lock().unwrap() = Some(connection);
                     }
-                },
-            };
+                });
             let wire = Request::builder()
                 .method("POST")
                 .uri("/mcp")

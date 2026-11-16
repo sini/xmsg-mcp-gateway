@@ -72,12 +72,12 @@ fn policy_write_child() {
     let document: serde_json::Value =
         serde_json::from_slice(&std::fs::read(document).unwrap()).unwrap();
     let marker = std::path::PathBuf::from(document["marker"].as_str().unwrap());
-    tracing::subscriber::set_global_default(observer::AtEvent {
-        target: "gateway_operation_wait",
-        action: move || {
+    tracing::subscriber::set_global_default(observer::AtEvent::new(
+        "gateway_operation_wait",
+        move || {
             std::fs::write(&marker, b"observed lease contention").unwrap();
         },
-    })
+    ))
     .unwrap();
     let mut store = Store::open(std::path::Path::new(document["state"].as_str().unwrap())).unwrap();
     let policy: xmsg_mcp_gateway::outbound::Policy =

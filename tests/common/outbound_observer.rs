@@ -2,8 +2,20 @@ use tracing::span::{Attributes, Id, Record};
 use tracing::{Event, Metadata, Subscriber};
 
 pub struct AtEvent<F: Fn() + Send + Sync> {
-    pub target: &'static str,
-    pub action: F,
+    target: &'static str,
+    action: F,
+    _cache_participant: tracing::Dispatch,
+}
+
+impl<F: Fn() + Send + Sync> AtEvent<F> {
+    pub fn new(target: &'static str, action: F) -> Self {
+        // Avoid tracing-core 0.1.36's JustOne cache using the registering thread's default.
+        Self {
+            target,
+            action,
+            _cache_participant: tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()),
+        }
+    }
 }
 
 impl<F: Fn() + Send + Sync + 'static> Subscriber for AtEvent<F> {

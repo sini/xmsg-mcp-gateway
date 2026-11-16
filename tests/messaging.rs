@@ -1181,10 +1181,10 @@ async fn expired_mcp_uncertainty_requires_reconciliation_without_resubmission() 
             task_serving
                 .router()
                 .oneshot(request)
-                .with_subscriber(observer::AtEvent {
-                    target: "gateway_outbound_reservation_committed",
-                    // Shorten the fixture deadline before dispatch reads it, then exercise slow work.
-                    action: move || {
+                .with_subscriber(observer::AtEvent::new(
+                    "gateway_outbound_reservation_committed",
+                    move || {
+                        // Shorten the fixture deadline before dispatch reads it, then exercise slow work.
                         let database = rusqlite::Connection::open(&acceptance_store).unwrap();
                         database.execute(
                             "UPDATE outbound_reservations SET retry_until=created_at+?1 WHERE request_id='expire-uncertainty'",
@@ -1192,7 +1192,7 @@ async fn expired_mcp_uncertainty_requires_reconciliation_without_resubmission() 
                         ).unwrap();
                         std::thread::sleep(Duration::from_millis(2100));
                     },
-                }),
+                )),
         )
         .await
         .unwrap();
