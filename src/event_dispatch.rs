@@ -900,17 +900,15 @@ mod concurrent_tests {
         let release_rx = Mutex::new(release_rx);
         let first = setup.clone();
         let worker = std::thread::spawn(move || {
-            let subscriber = selection_observer::AtEvent {
-                target: "gateway_events_selected",
-                action: move || {
+            let subscriber =
+                selection_observer::AtEvent::new("gateway_events_selected", move || {
                     selected_tx.send(()).unwrap();
                     release_rx
                         .lock()
                         .unwrap()
                         .recv_timeout(Duration::from_secs(10))
                         .unwrap();
-                },
-            };
+                });
             tracing::subscriber::with_default(subscriber, || {
                 tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -973,17 +971,15 @@ mod authority_race_tests {
         let release_rx = Mutex::new(release_rx);
         let first = setup.clone();
         let worker = std::thread::spawn(move || {
-            let observer = super::selection_observer::AtEvent {
-                target: "gateway_events_selected",
-                action: move || {
+            let observer =
+                super::selection_observer::AtEvent::new("gateway_events_selected", move || {
                     selected_tx.send(()).unwrap();
                     release_rx
                         .lock()
                         .unwrap()
                         .recv_timeout(Duration::from_secs(10))
                         .unwrap();
-                },
-            };
+                });
             tracing::subscriber::with_default(observer, || {
                 tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -1166,14 +1162,11 @@ mod policy_tests {
         };
         let policy = tokio::task::spawn_blocking(move || {
             tracing::subscriber::with_default(
-                selection_observer::AtEvent {
-                    target: "gateway_operation_wait",
-                    action: move || {
-                        if let Some(sender) = waiting.lock().unwrap().take() {
-                            let _ = sender.send(());
-                        }
-                    },
-                },
+                selection_observer::AtEvent::new("gateway_operation_wait", move || {
+                    if let Some(sender) = waiting.lock().unwrap().take() {
+                        let _ = sender.send(());
+                    }
+                }),
                 || {
                     Store::open(&file)
                         .unwrap()

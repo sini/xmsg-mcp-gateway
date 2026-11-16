@@ -22,14 +22,14 @@ fn event_crash_child() {
         transport,
     );
     let cut = std::env::var("GATEWAY_EVENT_FIXTURE_CUT").unwrap();
-    let subscriber = observer::AtEvent {
-        target: if cut == "before" {
+    let subscriber = observer::AtEvent::new(
+        if cut == "before" {
             "gateway_event_before_webhook"
         } else {
             "gateway_event_after_webhook"
         },
-        action: || std::process::exit(75),
-    };
+        || std::process::exit(75),
+    );
     tracing::subscriber::with_default(subscriber, || {
         let result = tokio::runtime::Builder::new_current_thread()
             .enable_all()

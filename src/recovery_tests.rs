@@ -314,14 +314,14 @@ fn ack_crash_child() {
         serde_json::from_str(&std::env::var("GATEWAY_ACK_FIXTURE_BINDING").unwrap()).unwrap();
     let identity = crate::provider_fixture::verified(&binding);
     let target = std::env::var("GATEWAY_ACK_FIXTURE_TARGET").unwrap();
-    let subscriber = observer::AtEvent {
-        target: if target == "before" {
+    let subscriber = observer::AtEvent::new(
+        if target == "before" {
             "gateway_ack_before_commit"
         } else {
             "gateway_ack_after_commit"
         },
-        action: || std::process::exit(75),
-    };
+        || std::process::exit(75),
+    );
     tracing::subscriber::with_default(subscriber, || {
         ack(
             Store::open(std::path::Path::new(&file)).unwrap(),
