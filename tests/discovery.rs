@@ -52,42 +52,30 @@ fn discover() -> Value {
 }
 
 #[tokio::test]
-async fn sessionless_discovery_reports_only_implemented_versions_with_private_zero_ttl() {
+async fn discovery_preserves_legacy_fallback_answers() {
     let fixture = Fixture::new();
     let serving = fixture.serving().await;
     for version in [Some("2026-07-28"), None, Some("2025-11-25")] {
-        for params in [
-            None,
-            Some(json!({})),
-            Some(
-                json!({"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"fixture","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}),
-            ),
-        ] {
+        for params in [None, Some(json!({})), Some(json!({"_meta":{}}))] {
             let mut body = discover();
             if let Some(params) = params {
                 body["params"] = params;
             }
             let (status, headers, value) = post(&serving, Some("good-token"), version, body).await;
-            assert_eq!(status, StatusCode::OK, "modern bootstrap rejected: {value}");
-            assert_eq!(value["id"], "bootstrap");
-            assert!(value.get("error").is_none(), "{value}");
-            let result = &value["result"];
-            assert_eq!(
-                result["supportedVersions"],
-                json!(["2025-03-26", "2025-06-18", "2025-11-25"])
-            );
-            assert_eq!(result["resultType"], "complete");
-            assert_eq!(result["capabilities"], json!({"tools":{}}));
-            assert_eq!(result["ttlMs"], 0);
-            assert_eq!(result["cacheScope"], "private");
-            assert_eq!(
-                result["_meta"]["io.modelcontextprotocol/serverInfo"],
-                json!({"name":"xmsg-mcp-gateway","version":env!("CARGO_PKG_VERSION")})
-            );
-            assert!(result["instructions"]
-                .as_str()
-                .unwrap()
-                .contains("initialize"));
+            if version == Some("2026-07-28") {
+                assert_eq!(
+                    status,
+                    StatusCode::BAD_REQUEST,
+                    "modern discovery must preserve the fallback response"
+                );
+                assert_eq!(value, Value::Null, "unsupported version has an empty body");
+            } else {
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(value["id"], "bootstrap");
+                assert_eq!(value["error"]["code"], -32601);
+                assert_eq!(value["error"]["message"], "Method not found");
+                assert!(value.get("result").is_none());
+            }
             assert!(!headers.contains_key("mcp-session-id"));
         }
     }
@@ -126,21 +114,24 @@ async fn discovery_requires_the_same_bearer_and_live_grant_as_the_catalog() {
 }
 
 #[tokio::test]
-async fn discovery_accepts_only_empty_params_and_standard_metadata() {
+async fn unknown_discovery_keeps_generic_parameter_validation() {
     let fixture = Fixture::new();
     let serving = fixture.serving().await;
-    for params in [json!({"unexpected":true}), json!({"_meta":"invalid"})] {
+    for (params, expected) in [
+        (json!({"unexpected":true}), -32601),
+        (json!({"_meta":"invalid"}), -32602),
+    ] {
         let mut body = discover();
         body["params"] = params;
-        let (status, _, value) = post(&serving, Some("good-token"), Some("2026-07-28"), body).await;
+        let (status, _, value) = post(&serving, Some("good-token"), None, body).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(value["error"]["code"], -32602);
+        assert_eq!(value["error"]["code"], expected);
         assert!(value.get("result").is_none());
     }
 }
 
 #[tokio::test]
-async fn discovery_does_not_expand_other_methods_protocol_support_or_break_initialize() {
+async fn legacy_initialize_catalog_and_call_keep_their_protocol_gate() {
     let fixture = Fixture::new();
     let serving = fixture.serving().await;
     for method in [
@@ -173,7 +164,7 @@ async fn discovery_does_not_expand_other_methods_protocol_support_or_break_initi
     assert_eq!(
         serving.router().oneshot(malformed).await.unwrap().status(),
         StatusCode::BAD_REQUEST,
-        "discovery exception admitted a malformed version header"
+        "malformed version header must be refused"
     );
     let init = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}});
     let (status, _, value) = post(&serving, Some("good-token"), Some("2025-11-25"), init).await;
@@ -184,4 +175,16 @@ async fn discovery_does_not_expand_other_methods_protocol_support_or_break_initi
     let (status, _, value) = post(&serving, Some("good-token"), Some("2025-11-25"), body).await;
     assert_eq!(status, StatusCode::OK);
     assert!(value["result"]["tools"].is_array());
+    let (status, _, value) = post(
+        &serving,
+        Some("good-token"),
+        Some("2025-11-25"),
+        Fixture::call(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        value.get("error").is_none(),
+        "legacy tool call failed: {value}"
+    );
 }
