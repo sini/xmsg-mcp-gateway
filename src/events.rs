@@ -326,6 +326,44 @@ impl Events {
         mailbox: &str,
         request: Subscribe,
     ) -> Result<Value, Error> {
+        let mut generation_hint = None;
+        let mut refusal_reason = None;
+        match self
+            .subscribe_inner(
+                identity,
+                token,
+                bus,
+                mailbox,
+                request,
+                &mut generation_hint,
+                &mut refusal_reason,
+            )
+            .await
+        {
+            Ok((value, generation)) => {
+                crate::event_diagnostic::subscribed(generation);
+                Ok(value)
+            }
+            Err(error) => {
+                let reason = refusal_reason.unwrap_or_else(|| Self::default_refusal_reason(&error));
+                let rpc_code = Self::subscribe_rpc_code(&error);
+                crate::event_diagnostic::subscribe_refusal(reason, rpc_code, generation_hint);
+                Err(error)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn subscribe_inner(
+        &self,
+        identity: &VerifiedIdentity,
+        token: &str,
+        bus: &str,
+        mailbox: &str,
+        request: Subscribe,
+        generation_hint: &mut Option<i64>,
+        refusal_reason: &mut Option<&'static str>,
+    ) -> Result<(Value, i64), Error> {
         if request.name != EVENT_NAME
             || request.delivery.mode != "webhook"
             || bus.is_empty()
@@ -357,6 +395,7 @@ impl Events {
         let authority = self.authorized(&store, identity)?;
         let owner = owner_key(identity, bus, mailbox, &authority.grant_id);
         let old = previous(&store.connection, &owner)?;
+        *generation_hint = old.as_ref().map(|o| o.generation);
         let stamp = self.current_time()?;
         let ttl = request
             .ttl_ms
@@ -381,6 +420,7 @@ impl Events {
         let (generation, callback_cursor, checkpoint) = if let Some(old) = &old {
             let previous_url = text(&self.key, &owner, "url", old.generation, &old.url)?;
             if previous_url != url {
+                *refusal_reason = Some("callback_changed_rebind_required");
                 return Err(Error::Conflict);
             }
             let previous_secret = text(&self.key, &owner, "secret", old.generation, &old.secret)?;
@@ -389,6 +429,7 @@ impl Events {
                 && old.old_secret.is_some()
                 && old.rotation_until > stamp
             {
+                *refusal_reason = Some("secret_rotation_pending");
                 return Err(Error::Conflict);
             }
             if old.status == "active" && previous_secret != request.delivery.secret {
@@ -420,7 +461,7 @@ impl Events {
         } else {
             (1, 0, 0)
         };
-        let (after, truncated) = self.cursor(
+        let (after, truncated) = match self.cursor(
             &store,
             &owner,
             request.cursor.as_deref(),
@@ -432,7 +473,14 @@ impl Events {
                 grant: &authority.grant_id,
                 revision: authority.revision,
             },
-        )?;
+        ) {
+            Ok(pair) => pair,
+            Err(Error::Arguments) => {
+                *refusal_reason = Some("bad_cursor");
+                return Err(Error::Arguments);
+            }
+            Err(err) => return Err(err),
+        };
         let id = subscription_id(&owner, &url);
         let sealed_url = self
             .key
@@ -483,6 +531,7 @@ impl Events {
             tx.execute("INSERT INTO event_subscriptions(id,owner_key,service,issuer,resource,subject,hosted_client,bus,mailbox,grant_id,grant_revision,generation,expires,url,secret,old_secret,bearer,rotation_until,status,callback_cursor,observation_checkpoint,verified_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,'active',?19,?20,?21)",params![id,owner,identity.service(),identity.issuer(),identity.resource(),identity.subject(),identity.hosted_client(),bus,mailbox,authority.grant_id,authority.revision,generation,expires,sealed_url,sealed_secret,sealed_old,sealed_bearer,rotation_until,callback_cursor,checkpoint,verified_at])?
         };
         if changed != 1 {
+            *refusal_reason = Some("stale_generation");
             return Err(Error::Conflict);
         }
         let mut released = tx.execute("UPDATE custody_outbox SET state='pending' WHERE state='held' AND event_id IN (SELECT c.event_id FROM custody_items c JOIN event_authorizations a ON a.event_id=c.event_id WHERE c.bus=?1 AND c.mailbox=?2 AND c.owner=?3 AND c.grant_id=?4 AND a.dispatch_revision=?5 AND c.text IS NOT NULL AND c.expires_at>?6)",params![bus,mailbox,identity.subject(),authority.grant_id,authority.revision,stamp])?;
@@ -502,10 +551,44 @@ impl Events {
             0,
             released,
         );
-        Ok(
+        Ok((
             json!({"id":id,"refreshBefore":refresh_before,"cursor":crate::event_cursor::encode(&self.key,&owner,after)?,"truncated":truncated}),
-        )
+            generation,
+        ))
     }
+
+    fn default_refusal_reason(error: &Error) -> &'static str {
+        match error {
+            Error::Arguments => "bad_arguments",
+            Error::Conflict => "stale_generation",
+            Error::Busy => "busy",
+            Error::Callback(webhook::Error::Secret) => "bad_secret",
+            Error::Callback(webhook::Error::Random) => "internal",
+            Error::Callback(webhook::Error::Timeout) => "callback_timeout",
+            Error::Callback(webhook::Error::Challenge) => "callback_challenge_failed",
+            Error::Callback(webhook::Error::Destination) => "bad_callback_url",
+            Error::Callback(webhook::Error::HostNotAllowed) => "callback_host_not_allowed",
+            Error::Callback(webhook::Error::Transport) => "callback_unreachable",
+            Error::Callback(_) => "callback_invalid_response",
+            Error::Authority(crate::grants::Error::Denied) => "authority_denied",
+            Error::Credentials(crate::auth::Error::InvalidToken) => "credential_invalid",
+            _ => "internal",
+        }
+    }
+
+    fn subscribe_rpc_code(error: &Error) -> Option<i64> {
+        match error {
+            Error::Arguments => Some(-32602),
+            Error::Conflict => Some(-32009),
+            Error::Callback(webhook::Error::Secret) => Some(-32602),
+            Error::Callback(webhook::Error::Random) => Some(-32004),
+            Error::Callback(_) => Some(-32015),
+            Error::Authority(crate::grants::Error::Denied) => None,
+            Error::Credentials(crate::auth::Error::InvalidToken) => None,
+            _ => Some(-32004),
+        }
+    }
+
     pub async fn unsubscribe(
         &self,
         identity: &VerifiedIdentity,

@@ -342,8 +342,14 @@ proof that a callback was processed. Use the existing resubscribe and replay
 mechanisms; there is no terminal fencing webhook or new consumer tool.
 
 At the default filter, `gateway_events` INFO records subscription transitions,
-delivery outcomes and held/released counts using closed static reasons and
-numeric fields. They contain no callback URLs, cursors, message IDs, secrets or
+subscribe/renew outcomes, delivery outcomes and held/released counts using closed static reasons and
+numeric fields. Subscribe/renew outcomes log `reason="subscribed"` with numeric `generation` on success,
+or a closed refusal reason (`bad_arguments`, `bad_cursor`, `bad_secret`, `bad_callback_url`,
+`callback_host_not_allowed`, `callback_changed_rebind_required`, `secret_rotation_pending`,
+`stale_generation`, `callback_timeout`, `callback_challenge_failed`, `callback_unreachable`,
+`callback_invalid_response`, `credential_invalid`, `authority_denied`, `busy`, `internal`) with
+numeric `rpc_code` (when JSON-RPC) and `generation` (when known). All `gateway_events` records are
+content-free: they contain no callback URLs, cursors, message IDs, secrets, tokens or
 bodies. Expiry is observed once for the current subscription generation per worker
 lifetime without changing stored state; a worker restart may repeat that observation. Inspect these records together with owned subscription state; do not
 collect raw credential-bearing request logs. An explicit `RUST_LOG` filter replaces

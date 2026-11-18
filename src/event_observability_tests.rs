@@ -51,7 +51,9 @@ fn privacy(capture: &Capture, canaries: &[&str]) {
             "held",
             "released",
             "attempt",
-            "callback_host"
+            "callback_host",
+            "generation",
+            "rpc_code"
         ]
         .contains(&key.as_str())),
         "Events diagnostics leaked an unapproved field: {output}"

@@ -60,3 +60,43 @@ impl Fence {
 pub(crate) fn expired() {
     tracing::info!(target:"gateway_events",class="subscription",reason="expired","Events expiry observed");
 }
+
+pub(crate) fn subscribe_refusal(reason: &str, rpc_code: Option<i64>, generation: Option<i64>) {
+    let reason = match reason {
+        "bad_arguments" => "bad_arguments",
+        "bad_cursor" => "bad_cursor",
+        "bad_secret" => "bad_secret",
+        "bad_callback_url" => "bad_callback_url",
+        "callback_host_not_allowed" => "callback_host_not_allowed",
+        "callback_changed_rebind_required" => "callback_changed_rebind_required",
+        "secret_rotation_pending" => "secret_rotation_pending",
+        "stale_generation" => "stale_generation",
+        "callback_timeout" => "callback_timeout",
+        "callback_challenge_failed" => "callback_challenge_failed",
+        "callback_unreachable" => "callback_unreachable",
+        "callback_invalid_response" => "callback_invalid_response",
+        "credential_invalid" => "credential_invalid",
+        "authority_denied" => "authority_denied",
+        "busy" => "busy",
+        "internal" => "internal",
+        _ => "unrecognized",
+    };
+    tracing::info!(
+        target: "gateway_events",
+        class = "subscription",
+        reason,
+        rpc_code,
+        generation,
+        "Events subscribe refused"
+    );
+}
+
+pub(crate) fn subscribed(generation: i64) {
+    tracing::info!(
+        target: "gateway_events",
+        class = "subscription",
+        reason = "subscribed",
+        generation,
+        "Events subscribe accepted"
+    );
+}

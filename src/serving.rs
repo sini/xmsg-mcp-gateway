@@ -2105,7 +2105,14 @@ async fn mcp_request(
                 "events/subscribe" => {
                     let request = match serde_json::from_value::<events::Subscribe>(rpc.params) {
                         Ok(request) => request,
-                        Err(_) => return rpc_error(&id, -32602, "Invalid params"),
+                        Err(_) => {
+                            crate::event_diagnostic::subscribe_refusal(
+                                "bad_arguments",
+                                Some(-32602),
+                                None,
+                            );
+                            return rpc_error(&id, -32602, "Invalid params");
+                        }
                     };
                     events
                         .subscribe(&identity, &token, bus, mailbox, request)
