@@ -367,28 +367,56 @@ async fn mcp_leaf_send_reply_enters_owned_custody_with_attested_origin() {
     let (list_http, list_val, _) =
         fixture::request(&serving, "good-token", rpc("xmsg_list", json!({}))).await;
     assert_eq!(list_http, axum::http::StatusCode::OK, "{list_val}");
+    let recipients = list_val["result"]["structuredContent"]["recipients"]
+        .as_array()
+        .expect("xmsg_list recipients must be an array");
+    assert_eq!(recipients.len(), 3, "{list_val}");
+    for entry in recipients {
+        assert!(
+            entry["registered_at"].as_i64().is_some(),
+            "missing registered_at in {entry}"
+        );
+    }
+    let strip_registered_at = |entry: &Value| {
+        let mut obj = entry.as_object().unwrap().clone();
+        obj.remove("registered_at");
+        Value::Object(obj)
+    };
+    let actual_without_ts: Vec<Value> = recipients.iter().map(strip_registered_at).collect();
     assert_eq!(
-        list_val["result"]["structuredContent"]["recipients"],
-        json!([
-            {
+        actual_without_ts,
+        vec![
+            json!({
                 "address": format!("{session_id}/{subagent_id}@hub.fixture"),
-                "node": "hub.fixture",
+                "harness": "claude",
                 "kind": "subagent",
-                "status": "live"
-            },
-            {
+                "label": "research",
+                "node": "hub.fixture",
+                "status": "live",
+                "user": "hub"
+            }),
+            json!({
                 "address": format!("{session_id}@hub.fixture"),
-                "node": "hub.fixture",
+                "harness": "claude",
                 "kind": "instance",
-                "status": "live"
-            },
-            {
-                "address": "receiver@hub.fixture",
+                "label": "hub-work",
                 "node": "hub.fixture",
+                "status": "live",
+                "user": "hub"
+            }),
+            json!({
+                "address": "receiver@hub.fixture",
+                "harness": "svc",
                 "kind": "service",
-                "status": "live"
-            }
-        ])
+                "node": "hub.fixture",
+                "status": "live",
+                "user": "hub"
+            })
+        ]
+    );
+    assert_eq!(
+        list_val["result"]["structuredContent"]["nodes"],
+        json!([{"node": "hub.fixture", "status": "ok"}])
     );
 
     // Oracle (1) + point (b): `xmsg_send` to the live session and live subagent on `hub.fixture` succeeds;
