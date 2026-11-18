@@ -43,11 +43,10 @@ fn exercise(partial: bool, stall: bool) {
         "POST /introspect HTTP/1.1\r\nHost: provider.test\r\nauthorization: Basic bG9va3VwLWNsaWVudDpmaXh0dXJlLXNlY3JldA==\r\nContent-Length: 16\r\n\r\ntoken=good-token"
     };
     tls.write_all(raw.as_bytes()).unwrap();
-    tls.flush().unwrap();
     if !stall {
         tls.conn.send_close_notify();
-        tls.flush().unwrap();
     }
+    tls.flush().unwrap();
 
     if partial {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
@@ -61,6 +60,14 @@ fn exercise(partial: bool, stall: bool) {
                 "partial request did not reach its strict parser stage"
             );
             std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        if !stall {
+            let exit_deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+            while *fixture.provider_phase.lock().unwrap() != "exited"
+                && std::time::Instant::now() < exit_deadline
+            {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
         }
     }
     if !partial {
@@ -81,13 +88,13 @@ fn exercise(partial: bool, stall: bool) {
 }
 
 #[test]
-#[should_panic(expected = "serving provider fixture worker panicked")]
+#[should_panic(expected = "partial provider request ended during headers")]
 fn partial_tls_eof_is_a_fixture_error() {
     exercise(true, false);
 }
 
 #[test]
-#[should_panic(expected = "serving provider fixture worker panicked")]
+#[should_panic(expected = "serving provider fixture worker panicked: called `Result::unwrap()`")]
 fn partial_tls_stall_is_a_fixture_error() {
     exercise(true, true);
 }

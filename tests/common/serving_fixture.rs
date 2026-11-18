@@ -252,9 +252,14 @@ fn join_provider(worker: thread::JoinHandle<()>, phase: &Mutex<&'static str>) {
         );
         thread::sleep(Duration::from_millis(10));
     }
-    worker
-        .join()
-        .expect("serving provider fixture worker panicked");
+    if let Err(payload) = worker.join() {
+        let detail = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("non-string panic");
+        panic!("serving provider fixture worker panicked: {detail}");
+    }
 }
 
 #[derive(Clone, Default)]
