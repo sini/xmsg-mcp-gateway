@@ -523,25 +523,30 @@ async fn xmsg_list_returns_only_permitted_send_targets_with_live_status_and_neve
     );
     assert_eq!(bus.list_calls.load(Ordering::SeqCst), 1);
     let structured = &value["result"]["structuredContent"];
-    assert!(
-        structured.get("nodes").is_none(),
-        "xmsg_list must never expose fleet or node metadata: {structured}"
-    );
     assert_eq!(
         structured,
         &json!({
+            "nodes": [
+                {"node": "node", "status": "ok"},
+                {"node": "peer.node", "status": "ok"}
+            ],
             "recipients": [
                 {
                     "address": "alpha@node",
-                    "node": "node",
+                    "harness": "svc",
                     "kind": "service",
-                    "status": "live"
+                    "label": "internal-label",
+                    "node": "node",
+                    "status": "live",
+                    "user": "alice"
                 },
                 {
                     "address": "beta@peer.node",
-                    "node": "peer.node",
+                    "harness": "svc",
                     "kind": "service",
-                    "status": "live"
+                    "node": "peer.node",
+                    "status": "live",
+                    "user": "bob"
                 }
             ]
         })
@@ -591,7 +596,13 @@ async fn xmsg_list_returns_only_permitted_send_targets_with_live_status_and_neve
     assert_eq!(status, axum::http::StatusCode::OK, "{value}");
     assert_eq!(
         value["result"]["structuredContent"],
-        json!({"recipients": []})
+        json!({
+            "nodes": [
+                {"node": "node", "status": "ok"},
+                {"node": "peer.node", "status": "unreachable: peer offline"}
+            ],
+            "recipients": []
+        })
     );
 
     *bus.list_response.lock().unwrap() = json!({"status": "error", "code": "internal_error"});
@@ -629,8 +640,7 @@ async fn xmsg_list_empty_policy_returns_empty_without_node_metadata() {
     let filtered =
         outbound::filter_recipients(&Policy::default(), &ListArguments::default(), listed).unwrap();
     let serialized = serde_json::to_value(&filtered).unwrap();
-    assert_eq!(serialized, json!({"recipients": []}));
-    assert!(serialized.get("nodes").is_none());
+    assert_eq!(serialized, json!({"recipients": [], "nodes": []}));
 
     let empty_targets_policy = Policy {
         send: Some(Permission {
@@ -665,9 +675,8 @@ async fn xmsg_list_empty_policy_returns_empty_without_node_metadata() {
     assert_eq!(bus.list_calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         value["result"]["structuredContent"],
-        json!({"recipients": []})
+        json!({"recipients": [], "nodes": []})
     );
-    assert!(value["result"]["structuredContent"].get("nodes").is_none());
 }
 
 #[tokio::test]
@@ -774,12 +783,18 @@ async fn xmsg_list_filters_only_narrow_and_never_widen_policy_targets() {
     assert_eq!(
         value["result"]["structuredContent"],
         json!({
+            "nodes": [
+                {"node": "node", "status": "ok"},
+                {"node": "peer.node", "status": "ok"}
+            ],
             "recipients": [
                 {
                     "address": "beta@peer.node",
-                    "node": "peer.node",
+                    "harness": "svc",
                     "kind": "service",
-                    "status": "live"
+                    "node": "peer.node",
+                    "status": "live",
+                    "user": "bob"
                 }
             ]
         })
@@ -803,8 +818,8 @@ async fn xmsg_list_filters_only_narrow_and_never_widen_policy_targets() {
         .await;
         assert_eq!(status, axum::http::StatusCode::OK, "{value}");
         assert_eq!(
-            value["result"]["structuredContent"],
-            json!({"recipients": []}),
+            value["result"]["structuredContent"]["recipients"],
+            json!([]),
             "filter {empty_filter} must only narrow and never widen"
         );
     }
@@ -1060,30 +1075,44 @@ async fn xmsg_list_with_node_scoped_wildcard_returns_node_sessions_subagents_and
     assert_eq!(
         value["result"]["structuredContent"],
         json!({
+            "nodes": [
+                {"node": "node", "status": "ok"},
+                {"node": "peer.node", "status": "ok"}
+            ],
             "recipients": [
                 {
                     "address": "alpha@node",
-                    "node": "node",
+                    "harness": "svc",
                     "kind": "service",
-                    "status": "live"
+                    "node": "node",
+                    "status": "live",
+                    "user": "alice"
                 },
                 {
                     "address": "beta@peer.node",
-                    "node": "peer.node",
+                    "harness": "svc",
                     "kind": "service",
-                    "status": "live"
+                    "node": "peer.node",
+                    "status": "live",
+                    "user": "bob"
                 },
                 {
                     "address": "session/sub-a@node",
-                    "node": "node",
+                    "harness": "claude",
                     "kind": "subagent",
-                    "status": "live"
+                    "label": "researcher",
+                    "node": "node",
+                    "status": "live",
+                    "user": "alice"
                 },
                 {
                     "address": "session@node",
-                    "node": "node",
+                    "harness": "claude",
                     "kind": "instance",
-                    "status": "live"
+                    "label": "work",
+                    "node": "node",
+                    "status": "live",
+                    "user": "alice"
                 }
             ]
         })
@@ -1102,12 +1131,19 @@ async fn xmsg_list_with_node_scoped_wildcard_returns_node_sessions_subagents_and
     assert_eq!(
         instances_only["result"]["structuredContent"],
         json!({
+            "nodes": [
+                {"node": "node", "status": "ok"},
+                {"node": "peer.node", "status": "ok"}
+            ],
             "recipients": [
                 {
                     "address": "session@node",
-                    "node": "node",
+                    "harness": "claude",
                     "kind": "instance",
-                    "status": "live"
+                    "label": "work",
+                    "node": "node",
+                    "status": "live",
+                    "user": "alice"
                 }
             ]
         })
@@ -1716,5 +1752,77 @@ async fn events_reply_survives_policy_revision_but_keeps_current_authority_and_t
         .unwrap(),
         6,
         "policy carry-forward failed or enablement promoted fenced authority"
+    );
+}
+
+#[tokio::test]
+async fn xmsg_list_exposes_permitted_session_metadata_and_filters_nodes_to_policy() {
+    let policy = Policy {
+        send: Some(Permission {
+            targets: BTreeSet::from(["*@node".into()]),
+            required_scope: "identity:read".into(),
+        }),
+        reply: None,
+    };
+    let (fixture, bus) = setup_list_bus(policy).await;
+    *bus.list_response.lock().unwrap() = json!({
+        "status": "ok",
+        "nodes": [
+            {"node": "node", "status": "ok"},
+            {"node": "unpermitted.node", "status": "ok"}
+        ],
+        "recipients": [
+            {
+                "address": "genie-uuid@node",
+                "node": "node",
+                "kind": "instance",
+                "harness": "claude",
+                "label": "genie-support",
+                "status": "live",
+                "user": "sini",
+                "registered_at": 1795000123
+            },
+            {
+                "address": "secret-uuid@unpermitted.node",
+                "node": "unpermitted.node",
+                "kind": "instance",
+                "harness": "agy",
+                "label": "outside-policy-label",
+                "status": "live",
+                "user": "mallory",
+                "registered_at": 1795000456
+            }
+        ]
+    });
+    let serving = Serving::from_owner_file(&fixture.config_file)
+        .await
+        .unwrap();
+    let (status, value, _) = fixture::request(
+        &serving,
+        "good-token",
+        rpc("tools/call", json!({"name": "xmsg_list", "arguments": {}})),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{value}");
+    let structured = &value["result"]["structuredContent"];
+    assert_eq!(
+        structured,
+        &json!({
+            "nodes": [
+                {"node": "node", "status": "ok"}
+            ],
+            "recipients": [
+                {
+                    "address": "genie-uuid@node",
+                    "kind": "instance",
+                    "harness": "claude",
+                    "label": "genie-support",
+                    "status": "live",
+                    "node": "node",
+                    "user": "sini",
+                    "registered_at": 1795000123
+                }
+            ]
+        })
     );
 }

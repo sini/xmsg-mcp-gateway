@@ -97,8 +97,11 @@ returned recipients to `send.targets` with live status on healthy nodes: exact
 admit that node's live `svc` services, `instance` sessions and `subagent`s.
 Optional filters (`node`, `kind`, `status`, `within` in `1..=604800` when
 `status` is `"inactive"`) only narrow that permitted set and never widen it,
-and an empty policy returns `{"recipients": []}` with no fleet or node
-metadata. For `xmsg_send`, exact `<service>@<node>` entries admit only live
+and an empty policy returns `{"recipients": [], "nodes": []}` with no unpermitted
+node metadata. Permitted recipients carry full upstream metadata (`address`,
+`kind`, `harness`, `label`, `status`, `node`, `user`, `registered_at`,
+`last_seen`), and `nodes` carries `node` and `status` only for nodes named by
+some `send.targets` entry. For `xmsg_send`, exact `<service>@<node>` entries admit only live
 `svc` services; `*@<node>` entries resolve `<instance-id or label>@<node>`,
 `<parent>/<child>@<node>` and `<service>@<node>` through the leaf's live
 `xmsg list` view on healthy `<node>`, refusing ambiguous labels (`> 1` live

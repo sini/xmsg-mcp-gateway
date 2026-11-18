@@ -1145,7 +1145,7 @@ fn tools(app: &App, identity: &VerifiedIdentity, policy: &Policy, grant: &Author
                 "securitySchemes":[{"type":"oauth2","scopes":scopes}]}));
         }
         if list_enabled(app, identity, &policy.send) {
-            tools.push(json!({"name":"xmsg_list","description":"List authorized send-policy targets with live status.",
+            tools.push(json!({"name":"xmsg_list","description":"List authorized send-policy targets with full recipient metadata and permitted node status.",
                 "inputSchema":{"type":"object","properties":{"node":{"type":"string","minLength":1},
                     "kind":{"type":"string","enum":["service","instance","subagent"]},
                     "status":{"type":"string","enum":["live","inactive"]},

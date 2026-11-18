@@ -86,6 +86,14 @@ impl Permission {
             .any(|target| target.strip_prefix("*@") == Some(node))
     }
 
+    fn names_node(&self, node: &str) -> bool {
+        self.targets.iter().any(|target| {
+            target
+                .split_once('@')
+                .is_some_and(|(_, target_node)| target_node == node)
+        })
+    }
+
     fn admits_target(&self, target: &str) -> bool {
         let Some((name, node)) = target.split_once('@') else {
             return false;
@@ -417,8 +425,24 @@ impl ListArguments {
 #[serde(deny_unknown_fields)]
 pub struct ListedRecipient {
     pub address: String,
-    pub node: String,
     pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub status: String,
+    pub node: String,
+    pub user: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registered_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ListedNode {
+    pub node: String,
     pub status: String,
 }
 
@@ -426,6 +450,8 @@ pub struct ListedRecipient {
 #[serde(deny_unknown_fields)]
 pub struct FilteredList {
     pub recipients: Vec<ListedRecipient>,
+    #[serde(default)]
+    pub nodes: Vec<ListedNode>,
 }
 
 #[derive(Debug)]
@@ -730,14 +756,30 @@ pub fn filter_recipients(
         })
         .map(|item| ListedRecipient {
             address: item.address,
-            node: item.node,
             kind: item.kind,
+            harness: item.harness,
+            label: item.label,
             status: item.status,
+            node: item.node,
+            user: item.user,
+            registered_at: item.registered_at,
+            last_seen: item.last_seen,
         })
         .collect();
     recipients.sort_by(|left, right| left.address.cmp(&right.address));
     recipients.dedup_by(|left, right| left.address == right.address);
-    Ok(FilteredList { recipients })
+    let mut nodes: Vec<ListedNode> = listed
+        .nodes
+        .into_iter()
+        .filter(|node| permission.is_some_and(|allowed| allowed.names_node(&node.node)))
+        .map(|node| ListedNode {
+            node: node.node,
+            status: node.status,
+        })
+        .collect();
+    nodes.sort_by(|left, right| left.node.cmp(&right.node));
+    nodes.dedup_by(|left, right| left.node == right.node);
+    Ok(FilteredList { recipients, nodes })
 }
 
 fn node_scoped_send_admitted(

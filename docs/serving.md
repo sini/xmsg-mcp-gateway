@@ -67,9 +67,11 @@ Only the owner CLI/store changes per-grant policy. Empty send/reply policy
 while `reply.targets` must still be non-empty (`if self.reply.as_ref().is_some_and(|permission| permission.targets.is_empty()) { return Err(Error::Configuration); }`).
 When `send` is configured and its `required_scope` is required by the verifier,
 `xmsg_list(node?, kind?, status?, within?)` (`within` integer `1..=604800`) is
-advertised and returns only the grant's `send.targets` with live status from the
-bus (returning `{"recipients": []}` with no fleet or node metadata when
-`send.targets` is empty, and omitting `xmsg_send` unless `send.targets` is
+advertised and returns only the grant's `send.targets` with full upstream
+recipient metadata (`address`, `kind`, `harness`, `label`, `status`, `node`,
+`user`, `registered_at`, `last_seen`) and `nodes` (`node`, `status`) restricted
+to nodes named by `send.targets` (returning `{"recipients": [], "nodes": []}`
+when `send.targets` is empty, and omitting `xmsg_send` unless `send.targets` is
 non-empty); optional filters only narrow that set and never widen it. An enabled grant with
 a registered mailbox still exposes its scoped recovery reads.
 
