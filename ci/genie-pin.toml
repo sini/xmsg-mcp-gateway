@@ -1,3 +1,3 @@
 # Test-only dependency for the cross-repository broker fixture.
-repository = "https://github.com/sini/genie-agent"
+repository = "https://github.com/json64-dev/genie-agent"
 revision = "1c2dc601cbbcd49ecfc2e4577f243af784c6cbe0"

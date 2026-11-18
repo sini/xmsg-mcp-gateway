@@ -4,7 +4,7 @@ This runbook covers two paths for connecting a hosted ChatGPT dot through
 OpenAI's Secure MCP Tunnel:
 
 1. **Part I — Production path ([below](#part-i-production-hosted-dot-setup)):**
-   the shipped Rust `xmsg-mcp-gateway` binary (or `ghcr.io/sini/xmsg-mcp-gateway`
+   the shipped Rust `xmsg-mcp-gateway` binary (or `ghcr.io/json64-dev/xmsg-mcp-gateway`
    OCI image) paired with an `xmsg --leaf` daemon, persistent SQLite grants and
    Standard Webhooks Events ([events.md](events.md)), and `tunnel-client`
    (`v0.0.20`+) configured with its Harpoon OAuth shim so a private LAN/tailnet
@@ -38,7 +38,7 @@ This is a planned path with pending hosted acceptance, including actual refresh 
 | Step 0 synthetic tunnel connection, `events/subscribe` signed challenge, and idle dot wakeup | **MEASURED** | Verified live over Secure MCP Tunnel using the Step 0 synthetic probe ([Part II](#part-ii-step-0-synthetic-feasibility-probe)); observed the ChatGPT connection form offering **OAuth** or **No Authentication**. |
 | Rust `xmsg-mcp-gateway` + `xmsg --leaf` registration (with and without `/proc`), `xmsg_send` / `xmsg_reply` / `xmsg_inbox` / `xmsg_read_message`, durable custody, and Standard Webhooks Events | **MEASURED** | Verified locally and in CI against pinned `xmsg` (`ci/xmsg-pin.toml`), including crash/restart handoff cells and mutation suites. |
 | Direct OAuth audience override (`verifier.audience` for Kanidm `1.11.2`) and Keycloak `26.8.1` OAuth 2.1 broker fallback (standalone and Kanidm-federated) | **MEASURED** | Verified locally against the unmodified Rust `xmsg-mcp-gateway` verifier (`HTTP 200` on valid PKCE `S256` + refresh tokens, `HTTP 401` on multi-audience and revoked tokens; see [provider-setup.md](provider-setup.md) and [oauth-keycloak.md](oauth-keycloak.md)). |
-| OCI image (`ghcr.io/sini/xmsg-mcp-gateway`) non-root `User`, ELF entrypoint, and absence of Python / `phase1` / `/bin/sh` | **MEASURED** | Enforced on every build by `nix/check_image.py` (`checks.x86_64-linux.image` in `.github/workflows/oci.yml`). |
+| OCI image (`ghcr.io/json64-dev/xmsg-mcp-gateway`) non-root `User`, ELF entrypoint, and absence of Python / `phase1` / `/bin/sh` | **MEASURED** | Enforced on every build by `nix/check_image.py` (`checks.x86_64-linux.image` in `.github/workflows/oci.yml`). |
 | Live hosted ChatGPT **OAuth** connection through Secure MCP Tunnel, bidirectional messaging and Events delivery | **MEASURED — 2026-11-10** | Production observation: OAuth connected through the tunnel, recipient listing and send/reply worked in both directions, and gateway logs marked Events deliveries `accepted`. This records that deployment; operators still verify their own [cutover checks](#p4-cutover-checks-to-record). |
 
 ---
@@ -71,10 +71,10 @@ All hostnames, tunnel IDs, node names and UUIDs below (`https://auth.example`,
     [Section P3](#p3-connect-in-chatgpt-and-verify-events-delivery-measured-2026-11-10)). Provision a
     separate confidential lookup client when the provider requires RFC 7662 caller authentication. Kanidm 1.11.2 ignores introspection Basic credentials; keep its configured lookup header separate from the hosted client, but do not count it as an authentication control.
 - **Host or Kubernetes Pod runtime:**
-  - `xmsg` (`ghcr.io/sini/xmsg:latest` or release binary) running in `--leaf`
+  - `xmsg` (`ghcr.io/json64-dev/xmsg:latest` or release binary) running in `--leaf`
     mode with outbound mTLS to the `xmsg` hub (`allow` and `targets` scoped to
     this leaf's service and approved peers).
-  - `xmsg-mcp-gateway` (`ghcr.io/sini/xmsg-mcp-gateway:latest` or release binary
+  - `xmsg-mcp-gateway` (`ghcr.io/json64-dev/xmsg-mcp-gateway:latest` or release binary
     built with `cargo build --locked --release`), sharing a `0700` runtime socket
     directory with `xmsg --leaf` under the same non-root numeric UID (for example
     `10001:10001` or `65532:65532`) and backed by persistent storage for
@@ -221,7 +221,7 @@ All hostnames, tunnel IDs, node names and UUIDs below (`https://auth.example`,
    Send/reply permissions start empty by default (receive + `xmsg_inbox` +
    `xmsg_read_message` + Events only); keep outbound send/reply disabled until
    initial hosted read and Events wakeup pass. When using the published container
-   image (`ghcr.io/sini/xmsg-mcp-gateway:latest` or pinned `@sha256:...`), the
+   image (`ghcr.io/json64-dev/xmsg-mcp-gateway:latest` or pinned `@sha256:...`), the
    image runs as `10001:10001` with entrypoint `xmsg-mcp-gateway` and default
    arguments `["serve", "--config", "/etc/xmsg-mcp-gateway/serving.json"]`.
 

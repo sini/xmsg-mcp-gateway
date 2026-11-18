@@ -72,7 +72,7 @@
           );
 
           image = pkgs.dockerTools.buildLayeredImage {
-            name = "ghcr.io/sini/xmsg-mcp-gateway";
+            name = "ghcr.io/json64-dev/xmsg-mcp-gateway";
             tag = "latest";
             contents = [
               pkgs.cacert

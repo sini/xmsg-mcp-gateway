@@ -16,7 +16,7 @@ permissions:
 jobs:
   oci:
     runs-on: ubuntu-latest
-    if: github.repository == 'sini/xmsg-mcp-gateway' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false)
+    if: github.repository == 'json64-dev/xmsg-mcp-gateway' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false)
     # An explicit `shell: bash` runs steps under `bash -eo pipefail`; the implicit default
     # (`bash -e`) lets a failed pipeline pass.
     defaults:
@@ -47,10 +47,10 @@ jobs:
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           docker load < result-image
           SHA_SHORT=$(git rev-parse --short HEAD)
-          docker tag ghcr.io/sini/xmsg-mcp-gateway:latest "ghcr.io/sini/xmsg-mcp-gateway:sha-$SHA_SHORT"
+          docker tag ghcr.io/json64-dev/xmsg-mcp-gateway:latest "ghcr.io/json64-dev/xmsg-mcp-gateway:sha-$SHA_SHORT"
           # GHCR sometimes rejects a manifest with "unknown blob" for a layer it has just accepted;
           # re-pushing uploads nothing new and retries the manifest. Bounded at 3 attempts.
           push() { for i in 1 2 3; do docker push "$1" && return 0; echo "docker push $1 failed (attempt $i)" >&2; sleep $((i * 10)); done; return 1; }
-          push ghcr.io/sini/xmsg-mcp-gateway:latest
-          push "ghcr.io/sini/xmsg-mcp-gateway:sha-$SHA_SHORT"
-          docker inspect --format='{{range .RepoDigests}}{{println .}}{{end}}' ghcr.io/sini/xmsg-mcp-gateway:latest
+          push ghcr.io/json64-dev/xmsg-mcp-gateway:latest
+          push "ghcr.io/json64-dev/xmsg-mcp-gateway:sha-$SHA_SHORT"
+          docker inspect --format='{{range .RepoDigests}}{{println .}}{{end}}' ghcr.io/json64-dev/xmsg-mcp-gateway:latest

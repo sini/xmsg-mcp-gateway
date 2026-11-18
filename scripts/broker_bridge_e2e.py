@@ -31,7 +31,7 @@ def main():
                 "build",
                 "--no-link",
                 "--print-out-paths",
-                f"github:sini/genie-agent/{pin['revision']}#genie-root",
+                f"github:json64-dev/genie-agent/{pin['revision']}#genie-root",
             ],
             cwd=ROOT,
             text=True,
