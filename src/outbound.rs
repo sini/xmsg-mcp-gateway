@@ -783,10 +783,11 @@ pub fn filter_recipients(
         .collect();
     nodes.sort_by(|left, right| left.node.cmp(&right.node));
     nodes.dedup_by(|left, right| left.node == right.node);
+    let total = recipients.len();
     Ok(FilteredList {
         recipients,
         nodes,
-        total: listed.total,
+        total,
         truncated: listed.truncated,
     })
 }

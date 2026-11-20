@@ -70,11 +70,12 @@ When `send` is configured and its `required_scope` is required by the verifier,
 advertised and returns only the grant's `send.targets` with full upstream
 recipient metadata (`address`, `kind`, `harness`, `label`, `status`, `node`,
 `user`, `registered_at`, `last_seen`) and `nodes` (`node`, `status`) restricted
-to nodes named by `send.targets` (returning `{"recipients": [], "nodes": [], "total": ..., "truncated": ...}`
+to nodes named by `send.targets` (returning `{"recipients": [], "nodes": [], "total": 0, "truncated": ...}`
 when `send.targets` is empty, and omitting `xmsg_send` unless `send.targets` is
-non-empty), along with the daemon's `total` and `truncated` cap fields so an
-incomplete capped inventory never reads as complete; optional filters only narrow
-that set and never widen it. An enabled grant with
+non-empty); `total` is the number of permitted recipients in this page (`recipients.len()`,
+never the daemon's unpermitted count), and `truncated` passes through from the
+daemon's capped `list` response so an incomplete inventory never reads as complete;
+optional filters only narrow that set and never widen it. An enabled grant with
 a registered mailbox still exposes its scoped recovery reads.
 
 The real-node cells

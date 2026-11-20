@@ -551,7 +551,7 @@ async fn xmsg_list_returns_only_permitted_send_targets_with_live_status_and_neve
                     "user": "bob"
                 }
             ],
-            "total": 4,
+            "total": 2,
             "truncated": false
         })
     );
@@ -608,7 +608,7 @@ async fn xmsg_list_returns_only_permitted_send_targets_with_live_status_and_neve
                 {"node": "peer.node", "status": "unreachable: peer offline"}
             ],
             "recipients": [],
-            "total": 3,
+            "total": 0,
             "truncated": false
         })
     );
@@ -652,7 +652,7 @@ async fn xmsg_list_empty_policy_returns_empty_without_node_metadata() {
     let serialized = serde_json::to_value(&filtered).unwrap();
     assert_eq!(
         serialized,
-        json!({"recipients": [], "nodes": [], "total": 1, "truncated": false})
+        json!({"recipients": [], "nodes": [], "total": 0, "truncated": false})
     );
 
     let empty_targets_policy = Policy {
@@ -688,7 +688,7 @@ async fn xmsg_list_empty_policy_returns_empty_without_node_metadata() {
     assert_eq!(bus.list_calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         value["result"]["structuredContent"],
-        json!({"recipients": [], "nodes": [], "total": 4, "truncated": false})
+        json!({"recipients": [], "nodes": [], "total": 0, "truncated": false})
     );
 }
 
@@ -810,7 +810,7 @@ async fn xmsg_list_filters_only_narrow_and_never_widen_policy_targets() {
                     "user": "bob"
                 }
             ],
-            "total": 4,
+            "total": 1,
             "truncated": false
         })
     );
@@ -1132,7 +1132,7 @@ async fn xmsg_list_with_node_scoped_wildcard_returns_node_sessions_subagents_and
                     "user": "alice"
                 }
             ],
-            "total": 7,
+            "total": 4,
             "truncated": false
         })
     );
@@ -1165,7 +1165,7 @@ async fn xmsg_list_with_node_scoped_wildcard_returns_node_sessions_subagents_and
                     "user": "alice"
                 }
             ],
-            "total": 7,
+            "total": 1,
             "truncated": false
         })
     );
@@ -1848,7 +1848,7 @@ async fn xmsg_list_exposes_permitted_session_metadata_and_filters_nodes_to_polic
                     "registered_at": 1795000123
                 }
             ],
-            "total": 2,
+            "total": 1,
             "truncated": false
         })
     );
@@ -1903,18 +1903,22 @@ async fn xmsg_list_surfaces_truncated_daemon_cap_and_filters_unpermitted() {
     assert_eq!(status, axum::http::StatusCode::OK, "{value}");
     let structured = &value["result"]["structuredContent"];
     assert_eq!(
-        structured["total"], 55,
-        "missing daemon total: {structured}"
+        structured["total"], 1,
+        "total must count permitted recipients in this page, never daemon unpermitted count: {structured}"
     );
     assert_eq!(
         structured["truncated"], true,
         "missing daemon truncated flag: {structured}"
     );
+    assert!(
+        !structured.to_string().contains("55"),
+        "response must not disclose daemon unpermitted count 55: {structured}"
+    );
     let listed = structured["recipients"].as_array().unwrap();
     assert_eq!(listed.len(), 1, "unpermitted recipients leaked: {listed:?}");
     assert_eq!(listed[0]["address"], "alpha@node");
 
-    // Even when policy filtering leaves 0 recipients, truncated=true and total=55 must surface.
+    // Even when policy filtering leaves 0 recipients, truncated=true surfaces and total=0 (never 55).
     let mut only_unpermitted = Vec::new();
     for index in 0..50 {
         only_unpermitted.push(json!({
@@ -1942,7 +1946,7 @@ async fn xmsg_list_surfaces_truncated_daemon_cap_and_filters_unpermitted() {
     assert_eq!(status, axum::http::StatusCode::OK, "{empty_but_truncated}");
     let structured = &empty_but_truncated["result"]["structuredContent"];
     assert_eq!(structured["recipients"], json!([]));
-    assert_eq!(structured["total"], 55);
+    assert_eq!(structured["total"], 0);
     assert_eq!(structured["truncated"], true);
 }
 
