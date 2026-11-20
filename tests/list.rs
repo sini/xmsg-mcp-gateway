@@ -157,7 +157,9 @@ async fn setup_list_bus(policy: Policy) -> (fixture::Fixture, ListBus) {
                 "status": "live",
                 "user": "alice"
             }
-        ]
+        ],
+        "total": 4,
+        "truncated": false
     })));
     let response_source = list_response.clone();
     let list_delay = Arc::new(Mutex::new(std::time::Duration::ZERO));
@@ -548,7 +550,9 @@ async fn xmsg_list_returns_only_permitted_send_targets_with_live_status_and_neve
                     "status": "live",
                     "user": "bob"
                 }
-            ]
+            ],
+            "total": 4,
+            "truncated": false
         })
     );
 
@@ -584,7 +588,9 @@ async fn xmsg_list_returns_only_permitted_send_targets_with_live_status_and_neve
                 "status": "live",
                 "user": "mallory"
             }
-        ]
+        ],
+        "total": 3,
+        "truncated": false
     });
 
     let (status, value, _) = fixture::request(
@@ -601,7 +607,9 @@ async fn xmsg_list_returns_only_permitted_send_targets_with_live_status_and_neve
                 {"node": "node", "status": "ok"},
                 {"node": "peer.node", "status": "unreachable: peer offline"}
             ],
-            "recipients": []
+            "recipients": [],
+            "total": 3,
+            "truncated": false
         })
     );
 
@@ -634,13 +642,18 @@ async fn xmsg_list_empty_policy_returns_empty_without_node_metadata() {
             "status": "live",
             "user": "alice",
             "label": "secret"
-        }]
+        }],
+        "total": 1,
+        "truncated": false
     }))
     .unwrap();
     let filtered =
         outbound::filter_recipients(&Policy::default(), &ListArguments::default(), listed).unwrap();
     let serialized = serde_json::to_value(&filtered).unwrap();
-    assert_eq!(serialized, json!({"recipients": [], "nodes": []}));
+    assert_eq!(
+        serialized,
+        json!({"recipients": [], "nodes": [], "total": 1, "truncated": false})
+    );
 
     let empty_targets_policy = Policy {
         send: Some(Permission {
@@ -675,7 +688,7 @@ async fn xmsg_list_empty_policy_returns_empty_without_node_metadata() {
     assert_eq!(bus.list_calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         value["result"]["structuredContent"],
-        json!({"recipients": [], "nodes": []})
+        json!({"recipients": [], "nodes": [], "total": 4, "truncated": false})
     );
 }
 
@@ -796,7 +809,9 @@ async fn xmsg_list_filters_only_narrow_and_never_widen_policy_targets() {
                     "status": "live",
                     "user": "bob"
                 }
-            ]
+            ],
+            "total": 4,
+            "truncated": false
         })
     );
 
@@ -1060,7 +1075,9 @@ async fn xmsg_list_with_node_scoped_wildcard_returns_node_sessions_subagents_and
                 "status": "live",
                 "user": "dave"
             }
-        ]
+        ],
+        "total": 7,
+        "truncated": false
     });
     let serving = Serving::from_owner_file(&fixture.config_file)
         .await
@@ -1114,7 +1131,9 @@ async fn xmsg_list_with_node_scoped_wildcard_returns_node_sessions_subagents_and
                     "status": "live",
                     "user": "alice"
                 }
-            ]
+            ],
+            "total": 7,
+            "truncated": false
         })
     );
 
@@ -1145,7 +1164,9 @@ async fn xmsg_list_with_node_scoped_wildcard_returns_node_sessions_subagents_and
                     "status": "live",
                     "user": "alice"
                 }
-            ]
+            ],
+            "total": 7,
+            "truncated": false
         })
     );
 }
@@ -1303,7 +1324,9 @@ async fn node_scoped_targets_send_to_sessions_and_subagents_and_enforce_reply_or
                 "user": "sini",
                 "label": "work"
             }
-        ]
+        ],
+        "total": 6,
+        "truncated": false
     });
 
     {
@@ -1591,7 +1614,7 @@ async fn events_reply_survives_policy_revision_but_keeps_current_authority_and_t
         }),
     };
     let (fixture, bus) = setup_list_bus(allowed.clone()).await;
-    *bus.list_response.lock().unwrap() = json!({"status":"ok","nodes":[{"node":"node","status":"ok"}],"recipients":[{"address":"source@node","node":"node","kind":"service","harness":"svc","status":"live","user":"fixture"}]});
+    *bus.list_response.lock().unwrap() = json!({"status":"ok","nodes":[{"node":"node","status":"ok"}],"recipients":[{"address":"source@node","node":"node","kind":"service","harness":"svc","status":"live","user":"fixture"}],"total":1,"truncated":false});
     let key_file = fixture.keys._directory.path().join("events-reply-key");
     fixture::private_file(&key_file, &[42; 32]);
     let mut store = Store::open(&fixture.store_file).unwrap();
@@ -1792,7 +1815,9 @@ async fn xmsg_list_exposes_permitted_session_metadata_and_filters_nodes_to_polic
                 "user": "mallory",
                 "registered_at": 1795000456
             }
-        ]
+        ],
+        "total": 2,
+        "truncated": false
     });
     let serving = Serving::from_owner_file(&fixture.config_file)
         .await
@@ -1822,7 +1847,142 @@ async fn xmsg_list_exposes_permitted_session_metadata_and_filters_nodes_to_polic
                     "user": "sini",
                     "registered_at": 1795000123
                 }
-            ]
+            ],
+            "total": 2,
+            "truncated": false
         })
+    );
+}
+
+#[tokio::test]
+async fn xmsg_list_surfaces_truncated_daemon_cap_and_filters_unpermitted() {
+    let policy = Policy {
+        send: Some(Permission {
+            targets: BTreeSet::from(["alpha@node".into()]),
+            required_scope: "identity:read".into(),
+        }),
+        reply: None,
+    };
+    let (fixture, bus) = setup_list_bus(policy).await;
+
+    let mut recipients = vec![json!({
+        "address": "alpha@node",
+        "node": "node",
+        "kind": "service",
+        "harness": "svc",
+        "status": "live",
+        "user": "alice"
+    })];
+    for index in 0..49 {
+        recipients.push(json!({
+            "address": format!("unpermitted-{index}@node"),
+            "node": "node",
+            "kind": "service",
+            "harness": "svc",
+            "status": "live",
+            "user": "mallory"
+        }));
+    }
+    *bus.list_response.lock().unwrap() = json!({
+        "status": "ok",
+        "nodes": [{"node": "node", "status": "ok"}],
+        "recipients": recipients,
+        "total": 55,
+        "truncated": true
+    });
+
+    let serving = Serving::from_owner_file(&fixture.config_file)
+        .await
+        .unwrap();
+    let (status, value, _) = fixture::request(
+        &serving,
+        "good-token",
+        rpc("tools/call", json!({"name": "xmsg_list", "arguments": {}})),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{value}");
+    let structured = &value["result"]["structuredContent"];
+    assert_eq!(
+        structured["total"], 55,
+        "missing daemon total: {structured}"
+    );
+    assert_eq!(
+        structured["truncated"], true,
+        "missing daemon truncated flag: {structured}"
+    );
+    let listed = structured["recipients"].as_array().unwrap();
+    assert_eq!(listed.len(), 1, "unpermitted recipients leaked: {listed:?}");
+    assert_eq!(listed[0]["address"], "alpha@node");
+
+    // Even when policy filtering leaves 0 recipients, truncated=true and total=55 must surface.
+    let mut only_unpermitted = Vec::new();
+    for index in 0..50 {
+        only_unpermitted.push(json!({
+            "address": format!("unpermitted-{index}@node"),
+            "node": "node",
+            "kind": "service",
+            "harness": "svc",
+            "status": "live",
+            "user": "mallory"
+        }));
+    }
+    *bus.list_response.lock().unwrap() = json!({
+        "status": "ok",
+        "nodes": [{"node": "node", "status": "ok"}],
+        "recipients": only_unpermitted,
+        "total": 55,
+        "truncated": true
+    });
+    let (status, empty_but_truncated, _) = fixture::request(
+        &serving,
+        "good-token",
+        rpc("tools/call", json!({"name": "xmsg_list", "arguments": {}})),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{empty_but_truncated}");
+    let structured = &empty_but_truncated["result"]["structuredContent"];
+    assert_eq!(structured["recipients"], json!([]));
+    assert_eq!(structured["total"], 55);
+    assert_eq!(structured["truncated"], true);
+}
+
+#[tokio::test]
+async fn new_sdk_rejects_old_daemon_list_json_with_typed_protocol_error() {
+    let old_shape = json!({
+        "nodes": [{"node": "node", "status": "ok"}],
+        "recipients": []
+    });
+    let err = serde_json::from_value::<ListResult>(old_shape).unwrap_err();
+    assert!(
+        err.to_string().contains("missing field `total`"),
+        "expected typed missing-field error: {err}"
+    );
+
+    let policy = Policy {
+        send: Some(Permission {
+            targets: BTreeSet::from(["alpha@node".into()]),
+            required_scope: "identity:read".into(),
+        }),
+        reply: None,
+    };
+    let (fixture, bus) = setup_list_bus(policy).await;
+    *bus.list_response.lock().unwrap() = json!({
+        "status": "ok",
+        "nodes": [{"node": "node", "status": "ok"}],
+        "recipients": []
+    });
+    let serving = Serving::from_owner_file(&fixture.config_file)
+        .await
+        .unwrap();
+    let (status, value, _) = fixture::request(
+        &serving,
+        "good-token",
+        rpc("tools/call", json!({"name": "xmsg_list", "arguments": {}})),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{value}");
+    assert_eq!(
+        value["error"]["code"], -32004,
+        "old-shape daemon response must fail as unavailable, never silently empty: {value}"
     );
 }

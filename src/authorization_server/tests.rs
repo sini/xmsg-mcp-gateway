@@ -2660,7 +2660,7 @@ impl Bus {
                 tokio::select! {_=&mut done=>break,accepted=agent.accept()=>{
                     let mut stream=BufReader::new(accepted.unwrap().0);let mut line=String::new();stream.read_line(&mut line).await.unwrap();let request:serde_json::Value=serde_json::from_str(&line).unwrap();record.lock().unwrap().push(request.clone());
                     let response=match request["action"].as_str().unwrap(){
-                        "list"=>json!({"status":"ok","nodes":[{"node":"peer","status":"ok"}],"recipients":[{"address":"receiver@peer","node":"peer","kind":"service","harness":"svc","status":"live","user":"fixture"},{"address":"sender@peer","node":"peer","kind":"service","harness":"svc","status":"live","user":"fixture"}]}),
+                        "list"=>json!({"status":"ok","nodes":[{"node":"peer","status":"ok"}],"recipients":[{"address":"receiver@peer","node":"peer","kind":"service","harness":"svc","status":"live","user":"fixture"},{"address":"sender@peer","node":"peer","kind":"service","harness":"svc","status":"live","user":"fixture"}],"total":2,"truncated":false}),
                         "send"=>json!({"status":"ok","message_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","address":request["to"],"outcome":"delivered"}),
                         "read_attachment"=>{
                             let hook=read_hook.lock().unwrap().take();if let Some(hook)=hook {hook();}

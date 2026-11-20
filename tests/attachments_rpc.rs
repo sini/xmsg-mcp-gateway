@@ -48,7 +48,7 @@ impl Bus {
     fn frame(&mut self, frame: Value) -> Value {
         match frame["action"].as_str().unwrap() {
             "list" => {
-                json!({"status":"ok","nodes":[{"node":"peer","status":"ok"}],"recipients":[{"address":"receiver@peer","node":"peer","kind":"service","harness":"svc","status":"live","label":"receiver","user":"fixture-user"}]})
+                json!({"status":"ok","nodes":[{"node":"peer","status":"ok"}],"recipients":[{"address":"receiver@peer","node":"peer","kind":"service","harness":"svc","status":"live","label":"receiver","user":"fixture-user"}],"total":1,"truncated":false})
             }
             "attach" => {
                 let upload = frame["upload"].as_str();

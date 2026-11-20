@@ -134,7 +134,7 @@ impl Bus {
                 let action = frame["action"].as_str().unwrap();
                 let response = match action {
                     "list" => {
-                        json!({"status":"ok","nodes":[{"node":"node","status":"ok"}],"recipients":[{"address":"receiver@node","node":"node","kind":"service","harness":"svc","status":"live","user":"owner"}]})
+                        json!({"status":"ok","nodes":[{"node":"node","status":"ok"}],"recipients":[{"address":"receiver@node","node":"node","kind":"service","harness":"svc","status":"live","user":"owner"}],"total":1,"truncated":false})
                     }
                     "attach" => {
                         attached += 1;

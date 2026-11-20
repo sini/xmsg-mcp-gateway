@@ -452,6 +452,10 @@ pub struct FilteredList {
     pub recipients: Vec<ListedRecipient>,
     #[serde(default)]
     pub nodes: Vec<ListedNode>,
+    #[serde(default)]
+    pub total: usize,
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 #[derive(Debug)]
@@ -779,7 +783,12 @@ pub fn filter_recipients(
         .collect();
     nodes.sort_by(|left, right| left.node.cmp(&right.node));
     nodes.dedup_by(|left, right| left.node == right.node);
-    Ok(FilteredList { recipients, nodes })
+    Ok(FilteredList {
+        recipients,
+        nodes,
+        total: listed.total,
+        truncated: listed.truncated,
+    })
 }
 
 fn node_scoped_send_admitted(
@@ -917,6 +926,7 @@ pub(crate) async fn list_verified(
             kind: arguments.kind.clone(),
             status: arguments.status.clone(),
             within: arguments.within,
+            limit: None,
         }),
     )
     .await
@@ -928,6 +938,8 @@ pub(crate) async fn list_verified(
             xmsg::client::ListResult {
                 recipients: Vec::new(),
                 nodes: Vec::new(),
+                total: 0,
+                truncated: false,
             }
         }
         Err(error) => return Err(error.into()),

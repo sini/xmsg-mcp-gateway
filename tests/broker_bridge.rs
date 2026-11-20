@@ -158,7 +158,7 @@ async fn setup_with_list_delay(
                     if let Some(code) = error {
                         json!({"status":"error","error":code})
                     } else {
-                        json!({"status":"ok","nodes":[{"node":"node","status":"ok"}],"recipients":[{"address":"genie@node","node":"node","kind":"service","harness":"svc","status":"live","user":"fixture"}]})
+                        json!({"status":"ok","nodes":[{"node":"node","status":"ok"}],"recipients":[{"address":"genie@node","node":"node","kind":"service","harness":"svc","status":"live","user":"fixture"}],"total":1,"truncated":false})
                     }
                 }
                 "send" => {
