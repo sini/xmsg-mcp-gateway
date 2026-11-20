@@ -918,6 +918,18 @@ pub(crate) async fn list_verified(
     if !verifier.requires_scope_for(context.identity(), &permission.required_scope) {
         return Err(Error::Denied);
     }
+    if arguments
+        .node
+        .as_deref()
+        .is_some_and(|node| !permission.names_node(node))
+    {
+        return Ok(FilteredList {
+            recipients: Vec::new(),
+            nodes: Vec::new(),
+            total: 0,
+            truncated: false,
+        });
+    }
     let remaining = limits.timeout.saturating_sub(started.elapsed());
     let listed = match tokio::time::timeout(
         remaining,
@@ -934,8 +946,15 @@ pub(crate) async fn list_verified(
     .map_err(|_| Error::Deadline)?
     {
         Ok(listed) => listed,
-        Err(xmsg::client::ClientError::Refused { code }) if code == "unknown_peer" => {
-            crate::dispatch_outcome::emit("xmsg_list", "pre_effect_unavailable", "unknown_peer");
+        Err(xmsg::client::ClientError::Refused { code })
+            if code == "unknown_peer" || code == "not_found" =>
+        {
+            let kind = if code == "unknown_peer" {
+                "unknown_peer"
+            } else {
+                "not_found"
+            };
+            crate::dispatch_outcome::emit("xmsg_list", "pre_effect_unavailable", kind);
             xmsg::client::ListResult {
                 recipients: Vec::new(),
                 nodes: Vec::new(),

@@ -96,8 +96,11 @@ returned recipients to `send.targets` with live status on healthy nodes: exact
 `<service>@<node>` entries admit only `svc` services, while `*@<node>` entries
 admit that node's live `svc` services, `instance` sessions and `subagent`s.
 Optional filters (`node`, `kind`, `status`, `within` in `1..=604800` when
-`status` is `"inactive"`) only narrow that permitted set and never widen it,
-and an empty policy returns `{"recipients": [], "nodes": [], "total": 0, "truncated": ...}` with no unpermitted
+`status` is `"inactive"`) only narrow that permitted set and never widen it:
+a `node` outside `send.targets` returns `{"recipients": [], "nodes": [], "total": 0, "truncated": false}`
+without querying the daemon, and a policy-named `node` unknown to the daemon
+(`not_found`) likewise returns an empty result rather than `-32004`.
+An empty policy returns `{"recipients": [], "nodes": [], "total": 0, "truncated": ...}` with no unpermitted
 node metadata or unpermitted target counts. Permitted recipients carry full upstream metadata (`address`,
 `kind`, `harness`, `label`, `status`, `node`, `user`, `registered_at`,
 `last_seen`), `nodes` carries `node` and `status` only for nodes named by

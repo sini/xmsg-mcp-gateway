@@ -1990,3 +1990,67 @@ async fn new_sdk_rejects_old_daemon_list_json_with_typed_protocol_error() {
         "old-shape daemon response must fail as unavailable, never silently empty: {value}"
     );
 }
+
+#[tokio::test]
+async fn xmsg_list_node_outside_policy_skips_daemon_and_unknown_policy_node_returns_empty() {
+    let policy = Policy {
+        send: Some(Permission {
+            targets: BTreeSet::from(["alpha@node".into()]),
+            required_scope: "identity:read".into(),
+        }),
+        reply: None,
+    };
+    let (fixture, bus) = setup_list_bus(policy).await;
+    // Simulate a daemon that returns `not_found` for any node outside its view.
+    *bus.list_response.lock().unwrap() = json!({
+        "status": "error",
+        "error": "not_found"
+    });
+    let serving = Serving::from_owner_file(&fixture.config_file)
+        .await
+        .unwrap();
+
+    // Oracle 1: `node` outside send policy returns empty success without calling the daemon.
+    let (status, outside_value, _) = fixture::request(
+        &serving,
+        "good-token",
+        rpc(
+            "tools/call",
+            json!({"name": "xmsg_list", "arguments": {"node": "sini.patch"}}),
+        ),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{outside_value}");
+    assert_eq!(
+        bus.list_calls.load(Ordering::SeqCst),
+        0,
+        "daemon must not be called for node outside send policy"
+    );
+    assert_eq!(
+        outside_value["result"]["structuredContent"],
+        json!({"recipients": [], "nodes": [], "total": 0, "truncated": false}),
+        "node outside send policy must return empty success: {outside_value}"
+    );
+
+    // Oracle 2: a policy-named `node` that the daemon does not know (`not_found`) returns empty, not -32004.
+    let (status, unknown_policy_value, _) = fixture::request(
+        &serving,
+        "good-token",
+        rpc(
+            "tools/call",
+            json!({"name": "xmsg_list", "arguments": {"node": "node"}}),
+        ),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{unknown_policy_value}");
+    assert_eq!(
+        bus.list_calls.load(Ordering::SeqCst),
+        1,
+        "policy-named node should query daemon once"
+    );
+    assert_eq!(
+        unknown_policy_value["result"]["structuredContent"],
+        json!({"recipients": [], "nodes": [], "total": 0, "truncated": false}),
+        "policy-named node unknown to daemon must return empty, not -32004: {unknown_policy_value}"
+    );
+}
