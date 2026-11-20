@@ -50,30 +50,11 @@ async fn pinned_node_roundtrip_uses_the_registered_service_identity() {
     let mut service = node.config.register().await.unwrap();
     let address = service.address().unwrap().to_owned();
     assert_eq!(address, "gateway@gateway.fixture");
-    let baseline_revision = include_str!("../ci/xmsg-pin.toml")
-        .lines()
-        .find_map(|line| line.strip_prefix("baseline_revision = "))
-        .unwrap()
-        .trim_matches('"');
-    let running_baseline =
-        std::env::var("XMSG_GATEWAY_REVISION").is_ok_and(|rev| rev == baseline_revision);
-    if running_baseline {
-        // Pre-list-cap baseline omits `total`/`truncated`; after the coordinated deploy,
-        // advance `baseline_revision` to `16f20a15` and restore this to a normal success check.
-        assert!(
-            matches!(
-                service.list(ListQuery::default()).await,
-                Err(ClientError::Protocol)
-            ),
-            "expected typed Protocol error from list against pre-cap baseline daemon"
-        );
-    } else {
-        let recipients = service.list(ListQuery::default()).await.unwrap();
-        assert!(recipients
-            .recipients
-            .iter()
-            .any(|recipient| recipient.address == address && recipient.kind == "service"));
-    }
+    let recipients = service.list(ListQuery::default()).await.unwrap();
+    assert!(recipients
+        .recipients
+        .iter()
+        .any(|recipient| recipient.address == address && recipient.kind == "service"));
     let first = service
         .send(&address, "untrusted fixture data", Some("roundtrip-key"))
         .await
