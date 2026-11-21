@@ -2235,7 +2235,7 @@ dependencies = [
 [[package]]
 name = "xmsg"
 version = "0.1.0"
-source = "git+https://github.com/sini/xmsg?rev=123428adc632737d81bfc6ebbab5a4e576e0121a#123428adc632737d81bfc6ebbab5a4e576e0121a"
+source = "git+https://github.com/sini/xmsg?rev=f7354acb70f60c1ade71b750a7e95e1083a4b997#f7354acb70f60c1ade71b750a7e95e1083a4b997"
 dependencies = [
  "libc",
  "serde",

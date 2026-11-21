@@ -15,7 +15,7 @@ chacha20poly1305 = "0.10"
 getrandom = "0.3"
 httpdate = "1"
 time = { version = "0.3", features = ["formatting", "parsing"] }
-xmsg = { git = "https://github.com/sini/xmsg", rev = "123428adc632737d81bfc6ebbab5a4e576e0121a", default-features = false, features = ["client"] }
+xmsg = { git = "https://github.com/sini/xmsg", rev = "f7354acb70f60c1ade71b750a7e95e1083a4b997", default-features = false, features = ["client"] }
 clap = { version = "4.5", features = ["derive"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }

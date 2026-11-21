@@ -1672,10 +1672,10 @@ mod reservation_time_tests {
             .find_map(|line| line.strip_prefix("revision = "))
             .expect("missing reviewed xmsg revision");
         assert_eq!(
-            revision, "\"123428adc632737d81bfc6ebbab5a4e576e0121a\"",
+            revision, "\"f7354acb70f60c1ade71b750a7e95e1083a4b997\"",
             "review the node's idempotency retention boundary after a pin change"
         );
-        // Reviewed xmsg 123428ad storage.rs retains keys through their final TTL tick (`created_at < cutoff`).
+        // Reviewed xmsg f7354acb storage.rs retains keys through their final TTL tick (`created_at < cutoff`).
         for nanos in [1, 999_999_999] {
             for ttl in [1, 86_400] {
                 let (created_at, retry_until) =
