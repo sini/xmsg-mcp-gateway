@@ -99,6 +99,8 @@ struct EventsConfiguration {
 #[serde(deny_unknown_fields)]
 struct MessagingConfiguration {
     xmsg: XmsgConfig,
+    #[serde(default)]
+    context_mask: Vec<outbound::ContextField>,
     manifest: DeploymentManifest,
     submission_timeout_ms: u64,
     #[serde(default = "default_result_recovery_secs")]
@@ -119,6 +121,7 @@ fn present_messaging<'de, D: serde::Deserializer<'de>>(
 
 struct Messaging {
     session: session::Session,
+    context_mask: Vec<outbound::ContextField>,
     limits: outbound::Limits,
     attachments_enabled: bool,
 }
@@ -566,6 +569,7 @@ impl Serving {
             attachment_metadata_for_diagnostic = Some(attachment_metadata);
             Some(Messaging {
                 session,
+                context_mask: messaging.context_mask,
                 limits,
                 attachments_enabled,
             })
@@ -2006,7 +2010,11 @@ async fn mcp_request(
                     &messaging.limits,
                     std::time::Instant::now(),
                 )
-                .await;
+                .await
+                .map(|mut listed| {
+                    listed.mask_context(&messaging.context_mask);
+                    listed
+                });
                 if let Err(error) = &result {
                     let (class, kind) = diagnostic::outbound(error);
                     diagnostic::emit(operation, class, kind);

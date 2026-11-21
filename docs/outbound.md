@@ -223,6 +223,20 @@ timeouts do not count as kills. A source control advances the supported schema
 ceiling while requiring outbound schema 3 to remain usable. The later serving unit owns the end-to-end MCP
 JSON-RPC-ID, missing-request-ID and default-empty-policy acceptance cells.
 
+## Session context tags (planned)
+
+**Planned, not yet released.** For each recipient admitted by `xmsg_list`,
+the gateway can include the daemon's optional `context` object. A matching
+grant and scope still control which recipients appear. Context values are
+self-reported session metadata.
+
+The optional tag keys are `repo`, `branch`, `worktree`, `task`, and `pr`.
+Published context also includes the daemon's `updated_at` timestamp in Unix seconds,
+`generation`, and `stale` flag. The gateway applies its owner-configured
+mask before returning the list. When the daemon supplies no context or the
+mask removes every tag, the gateway omits `context` from that recipient.
+See [gateway mask configuration](serving.md#session-context-tags-planned).
+
 ## Reservation retirement
 
 New effect retries are covered by the registered xmsg idempotency TTL. The

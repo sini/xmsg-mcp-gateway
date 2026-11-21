@@ -2054,3 +2054,83 @@ async fn xmsg_list_node_outside_policy_skips_daemon_and_unknown_policy_node_retu
         "policy-named node unknown to daemon must return empty, not -32004: {unknown_policy_value}"
     );
 }
+
+#[tokio::test]
+async fn context_tags_follow_authorized_list_and_owner_mask() {
+    for (mask, expected) in [
+        (
+            None,
+            Some(
+                json!({"repo":"github.com/example/widget","branch":"feature/parser","task":"issue-418","updated_at":7,"generation":3,"stale":false}),
+            ),
+        ),
+        (
+            Some(json!(["branch", "task"])),
+            Some(
+                json!({"repo":"github.com/example/widget","updated_at":7,"generation":3,"stale":false}),
+            ),
+        ),
+        (Some(json!(["repo", "branch", "task"])), None),
+        (Some(json!(["*"])), None),
+    ] {
+        let (mut fixture, bus) = setup_list_bus(Policy {
+            send: Some(Permission {
+                targets: BTreeSet::from(["*@node".into()]),
+                required_scope: "identity:read".into(),
+            }),
+            reply: None,
+        })
+        .await;
+        if let Some(mask) = mask {
+            fixture.config["messaging"]["context_mask"] = mask;
+            fixture::private_file(
+                &fixture.config_file,
+                &serde_json::to_vec(&fixture.config).unwrap(),
+            );
+        }
+        let context = json!({"repo":"github.com/example/widget","branch":"feature/parser","task":"issue-418","updated_at":7,"generation":3,"stale":false});
+        {
+            let mut response = bus.list_response.lock().unwrap();
+            response["recipients"][2]["kind"] = json!("instance");
+            response["recipients"][2]["node"] = json!("peer.node");
+            response["recipients"][2]["address"] = json!("unpermitted@peer.node");
+            response["recipients"][2]["context"] = context.clone();
+            response["recipients"][3]["context"] = context;
+        }
+        let serving = Serving::from_owner_file(&fixture.config_file)
+            .await
+            .unwrap();
+        let (status, value, _) = fixture::request(
+            &serving,
+            "good-token",
+            rpc(
+                "tools/call",
+                json!({"name":"xmsg_list","arguments":{"kind":"instance"}}),
+            ),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        let listed = value["result"]["structuredContent"]["recipients"]
+            .as_array()
+            .unwrap();
+        assert_eq!(listed.len(), 1, "{value}");
+        assert_eq!(listed[0]["address"], "session@node");
+        assert_eq!(listed[0].get("context"), expected.as_ref(), "{value}");
+        let text_result: Value =
+            serde_json::from_str(value["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(text_result, value["result"]["structuredContent"]);
+    }
+}
+
+#[tokio::test]
+async fn context_mask_rejects_unknown_fields_at_startup() {
+    let (mut fixture, _bus) = setup_list_bus(Policy::default()).await;
+    fixture.config["messaging"]["context_mask"] = json!(["cwd"]);
+    fixture::private_file(
+        &fixture.config_file,
+        &serde_json::to_vec(&fixture.config).unwrap(),
+    );
+    assert!(Serving::from_owner_file(&fixture.config_file)
+        .await
+        .is_err());
+}

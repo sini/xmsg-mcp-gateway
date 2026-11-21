@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 use xmsg::client::{AttachRequest, AttachmentRef};
+use xmsg::session_context::{ContextFields, SessionContext};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -437,6 +438,8 @@ pub struct ListedRecipient {
     pub registered_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<SessionContext>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -456,6 +459,41 @@ pub struct FilteredList {
     pub total: usize,
     #[serde(default)]
     pub truncated: bool,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ContextField {
+    Repo,
+    Branch,
+    Worktree,
+    Task,
+    Pr,
+    #[serde(rename = "*")]
+    All,
+}
+
+impl FilteredList {
+    pub(crate) fn mask_context(&mut self, mask: &[ContextField]) {
+        for recipient in &mut self.recipients {
+            let Some(context) = &mut recipient.context else {
+                continue;
+            };
+            for field in mask {
+                match field {
+                    ContextField::Repo => context.fields.repo = None,
+                    ContextField::Branch => context.fields.branch = None,
+                    ContextField::Worktree => context.fields.worktree = None,
+                    ContextField::Task => context.fields.task = None,
+                    ContextField::Pr => context.fields.pr = None,
+                    ContextField::All => context.fields = ContextFields::default(),
+                }
+            }
+            if context.fields == ContextFields::default() {
+                recipient.context = None;
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -768,6 +806,7 @@ pub fn filter_recipients(
             user: item.user,
             registered_at: item.registered_at,
             last_seen: item.last_seen,
+            context: item.context,
         })
         .collect();
     recipients.sort_by(|left, right| left.address.cmp(&right.address));
@@ -1633,10 +1672,10 @@ mod reservation_time_tests {
             .find_map(|line| line.strip_prefix("revision = "))
             .expect("missing reviewed xmsg revision");
         assert_eq!(
-            revision, "\"16f20a15bda3688d5364afb0a2eb558ae643cb9b\"",
+            revision, "\"123428adc632737d81bfc6ebbab5a4e576e0121a\"",
             "review the node's idempotency retention boundary after a pin change"
         );
-        // Reviewed xmsg 16f20a15 storage.rs retains keys through their final TTL tick (`created_at < cutoff`).
+        // Reviewed xmsg 123428ad storage.rs retains keys through their final TTL tick (`created_at < cutoff`).
         for nanos in [1, 999_999_999] {
             for ttl in [1, 86_400] {
                 let (created_at, retry_until) =

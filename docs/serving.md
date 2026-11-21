@@ -39,7 +39,7 @@ is invalid. No request can supply messaging configuration or choose a mailbox.
 
 `messaging` denies unknown fields. Every manifest value that must agree with the
 node is required: reply TTL, idempotency TTL, service queue capacity, gateway dedup
-lifetime and complete framed bound. The other fields in the table are also required, except `result_recovery_secs`.
+lifetime and complete framed bound. The other fields in the table are also required, except `result_recovery_secs` and the planned `context_mask`.
 Gateway-local connection tunables retain their existing documented defaults:
 `xmsg.max_frame_bytes` is 1,048,576 bytes and `xmsg.operation_timeout_ms` is 15,000 ms.
 These are transport limits, distinct from the required node-bound manifest values.
@@ -56,6 +56,7 @@ These are transport limits, distinct from the required node-bound manifest value
 | `result_recovery_secs` | Result recovery lifetime, default 86400 seconds; at least the registered idempotency TTL |
 | `max_reservations` | Positive active outbound-operation limit |
 | `max_retained_bytes` | Positive outbound-ledger byte limit |
+| `context_mask` | Planned, optional list of session context fields to omit from gateway list results |
 
 The service name uses xmsg's shared validator. The retained registration supplies
 the actual mailbox, node and effective TTL/capacity values; config supplies no bus
@@ -127,6 +128,30 @@ The detached task's `Send` requirement statically rejects a SQLite Transaction
 held across an await. A trybuild refusal and commit-before-await positive control
 cover that boundary. The runtime ordering mutant instead submits before opening
 the reservation transaction; the crash cell detects the premature delivery.
+
+### Session context tags (planned)
+
+**Planned, not yet released.** The owner can set `messaging.context_mask` in
+the JSON serving file. The following fragment omits `branch` and `task`
+from the context of every authorized `xmsg_list` result.
+
+```json
+{
+  "messaging": {
+    "context_mask": ["branch", "task"]
+  }
+}
+```
+
+The other required messaging settings still apply. Entries can be `repo`,
+`branch`, `worktree`, `task`, `pr`, or `*`. Use `["*"]` to omit the
+whole context object. An unknown mask entry refuses startup. Omitting `context_mask` or setting it to `[]` publishes
+the context supplied by the daemon. Daemon-side omissions also apply at the
+gateway. See [the outbound list contract](outbound.md#session-context-tags-planned).
+
+Deploy the xmsg daemon and clients together, then re-pin and deploy the gateway
+using the landed xmsg main revision. An older strict client may reject list
+responses containing the new field.
 
 ## Optional Events profile
 

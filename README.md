@@ -9,7 +9,8 @@ adds service polling, durable webhook delivery, consumer responsibility ACKs and
 read-only outbound status. An optional [gist broker](docs/serving.md#optional-gist-broker)
 profile composes those paths for typed gist operations without a gateway GitHub
 credential. The shipped product is Rust and has no Python runtime
-dependency.
+dependency. Planned [session context tags](docs/serving.md#session-context-tags-planned)
+add optional, owner-maskable metadata to authorized list results.
 
 The Python reference’s authenticated Streamable HTTP endpoint is `/mcp`. It offers one tool,
 `xmsg_identity`, and `events/list`, `events/subscribe`, `events/unsubscribe` for
