@@ -150,6 +150,18 @@ configured grant cannot read Events status after cutover.
 Each intake deferral logs a WARN with both counts, their limits, the
 global byte usage and the reason. The upstream delivery remains unacknowledged.
 
+The planned periodic `gateway_custody` INFO event, `custody capacity`, carries
+`active_rows`, `retired_rows`, `bytes`, `max_items`, `max_retired_items`, and
+`max_bytes`. It contains no message, grant, or bus identifiers. Configure
+`events.custody_capacity_log_interval_secs` as a positive number of seconds
+(default 300). The interval sets a minimum spacing. The gateway samples on
+successful connected link observations, so the observation schedule can
+space lines farther apart. Use `active_rows / max_items >= 0.8` for an 80%
+active-row alert. During a link or gateway outage the line can stop.
+Absence can indicate an outage and does not show that the store has room.
+The default log filter includes this target. If overriding `RUST_LOG`, keep
+`gateway_custody=info` to retain the line.
+
 Relative state, credential, root-certificate and
 Events-key paths resolve against the owner configuration's directory. For example,
 `.state/serving.json` with `grant_store: "grants.db"` and `key_file: "events.key"`

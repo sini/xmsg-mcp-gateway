@@ -956,7 +956,7 @@
         "^read\\-response\\-id: GREEN baseline / RED intended$",
         "^broker\\-expired\\-unknown: GREEN baseline / RED intended$"
       ],
-      "script_sha256": "d93e58d1771c0f1eaa7a4bb18809be23bd31eefcaf9217304d10a84f9c44786e"
+      "script_sha256": "9de2b602765b4fbf93f64ddb135f5d760026253b428620dbee7d26d717c2aa58"
     },
     {
       "id": "reservation_acceptance",

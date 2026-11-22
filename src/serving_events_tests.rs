@@ -636,6 +636,14 @@ async fn production_custody_limits_start_with_retired_default_and_second_profile
         &setup.provider.config_file,
         &serde_json::to_vec(&setup.provider.config).unwrap(),
     );
+    let production_shape = load_configuration(&setup.provider.config_file).unwrap();
+    assert_eq!(
+        production_shape
+            .events
+            .unwrap()
+            .custody_capacity_log_interval_secs,
+        300
+    );
     drop(
         Serving::from_owner_file(&setup.provider.config_file)
             .await

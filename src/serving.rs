@@ -93,6 +93,12 @@ struct EventsConfiguration {
     #[serde(default)]
     custody_limits: crate::custody::Limits,
     dispatch_timeout_ms: u64,
+    #[serde(default = "default_custody_capacity_log_interval_secs")]
+    custody_capacity_log_interval_secs: u64,
+}
+
+fn default_custody_capacity_log_interval_secs() -> u64 {
+    300
 }
 
 #[derive(Deserialize)]
@@ -462,6 +468,7 @@ impl Serving {
         let events = if let Some(configuration) = &config.events {
             if config.messaging.is_none()
                 || configuration.grant_id.is_empty()
+                || configuration.custody_capacity_log_interval_secs == 0
                 || configuration.dispatch_timeout_ms > 60_000
                 || configuration.dispatch_timeout_ms
                     < verification_timeout_ms.saturating_add(11_000)
@@ -568,6 +575,9 @@ impl Serving {
                 .map(|configuration| session::Ingress {
                     grant_id: configuration.grant_id.clone(),
                     limits: configuration.custody_limits.clone(),
+                    capacity_log_interval: Duration::from_secs(
+                        configuration.custody_capacity_log_interval_secs,
+                    ),
                 });
             let session = session::Session::start(
                 messaging.xmsg,

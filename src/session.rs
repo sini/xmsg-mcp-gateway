@@ -79,6 +79,7 @@ impl Drop for Owner {
 pub(crate) struct Ingress {
     pub(crate) grant_id: String,
     pub(crate) limits: custody::Limits,
+    pub(crate) capacity_log_interval: Duration,
 }
 
 pub(crate) struct Session {
@@ -122,15 +123,30 @@ fn record(
         .map_err(|_| Error::Ledger)
 }
 
+struct CapacityLog {
+    interval: Duration,
+    last_sample: Option<tokio::time::Instant>,
+}
+
+impl CapacityLog {
+    fn due(&self) -> bool {
+        self.last_sample
+            .is_none_or(|last| last.elapsed() >= self.interval)
+            && tracing::enabled!(target: "gateway_custody", tracing::Level::INFO)
+    }
+}
+
 async fn record_link(
     file: PathBuf,
     bus: String,
     connected: bool,
     limits: custody::Limits,
+    capacity_log: Option<&mut CapacityLog>,
 ) -> Result<tokio::time::Instant, Error> {
+    let sample = connected && capacity_log.as_ref().is_some_and(|log| log.due());
     let record_bus = bus.clone();
     let observed_at = tokio::time::Instant::now();
-    tokio::task::spawn_blocking(move || {
+    let capacity = tokio::task::spawn_blocking(move || {
         let mut store = Store::open(&file).map_err(|_| Error::Ledger)?;
         record(
             &mut store,
@@ -138,10 +154,28 @@ async fn record_link(
             connected,
             SystemTime::now(),
             &limits,
-        )
+        )?;
+        let capacity = if sample {
+            crate::attachment_store::ready(&store.connection)
+                .and_then(|ready| custody::capacity(&store.connection, &limits, ready))
+                .ok()
+        } else {
+            None
+        };
+        Ok::<_, Error>(capacity)
     })
     .await
     .map_err(|_| Error::Ledger)??;
+    if let Some(log) = capacity_log.filter(|_| sample) {
+        log.last_sample = Some(tokio::time::Instant::now());
+    }
+    if let Some(capacity) = capacity {
+        tracing::info!(target: "gateway_custody",
+            active_rows = capacity.active_rows, retired_rows = capacity.retired_rows,
+            bytes = capacity.bytes, max_items = capacity.max_items,
+            max_retired_items = capacity.max_retired_items, max_bytes = capacity.max_bytes,
+            "custody capacity");
+    }
     tracing::debug!(target: "gateway_bus_observation", bus, connected, "persisted bus observation");
     Ok(observed_at)
 }
@@ -187,6 +221,10 @@ impl Session {
             async move {
                 let mut current = registered;
                 let mut observed_at = initial_observation;
+                let mut capacity_log = ingress.as_ref().map(|ingress| CapacityLog {
+                    interval: ingress.capacity_log_interval,
+                    last_sample: None,
+                });
                 let mut delay = Duration::from_secs(1);
                 loop {
                     let bus = match current.node() {
@@ -199,6 +237,15 @@ impl Session {
                                 Error::Registration(error),
                             )));
                             break;
+                        }
+                        if observed_at.elapsed() >= observation_interval {
+                            match record_link(file.clone(), bus.clone(), true,custody_limits.clone(),capacity_log.as_mut()).await {
+                                Ok(observation) => observed_at = observation,
+                                Err(error) => {
+                                    publish.send_replace(State::Unavailable(Arc::new(error)));
+                                    break;
+                                }
+                            }
                         }
                         if let Some(ingress) = &ingress {
                             let scope = custody::Scope {
@@ -238,15 +285,6 @@ impl Session {
                             }
                         }
                         tracing::trace!(target: "gateway_bus_health", "registration alive");
-                        if observed_at.elapsed() >= observation_interval {
-                            match record_link(file.clone(), bus.clone(), true,custody_limits.clone()).await {
-                                Ok(observation) => observed_at = observation,
-                                Err(error) => {
-                                    publish.send_replace(State::Unavailable(Arc::new(error)));
-                                    break;
-                                }
-                            }
-                        }
                         tokio::select! {
                             _ = tokio::time::sleep(Duration::from_secs(1).min(observation_interval)) => {},
                             _ = owner_wake.notified() => {},
@@ -255,7 +293,7 @@ impl Session {
                     }
                     drop(current);
                     loop {
-                        if let Err(error) = record_link(file.clone(), bus.clone(), false,custody_limits.clone()).await {
+                        if let Err(error) = record_link(file.clone(), bus.clone(), false,custody_limits.clone(),None).await {
                             publish.send_replace(State::Unavailable(Arc::new(error)));
                             tokio::select! {
                                 _ = tokio::time::sleep(delay) => {},
@@ -274,7 +312,7 @@ impl Session {
                         let replacement = async {
                             let registered = register(&config, &manifest).await?;
                             let snapshot = Arc::new(Snapshot::from_registered(&registered, config.max_frame_bytes)?);
-                            let observation = record_link(file.clone(), snapshot.bus.clone(), true, custody_limits.clone()).await?;
+                            let observation = record_link(file.clone(), snapshot.bus.clone(), true, custody_limits.clone(), None).await?;
                             registered.health().map_err(Error::Registration)?;
                             Ok::<_, Error>((registered, snapshot, observation))
                         }
@@ -328,6 +366,7 @@ impl Session {
                 self.bus.clone(),
                 true,
                 self.limits.clone(),
+                None,
             )
             .await?;
         }
@@ -336,6 +375,7 @@ impl Session {
             self.bus.clone(),
             false,
             self.limits.clone(),
+            None,
         )
         .await
         .map(|_| ())
@@ -461,5 +501,73 @@ mod tests {
                 "coalescing exceeded its downtime overestimate bound"
             );
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connected_observation_logs_only_capacity_at_the_configured_interval() {
+        use crate::event_observability_tests::Capture;
+        use crate::events_test_support::Setup;
+        use std::collections::BTreeMap;
+        use tracing::instrument::WithSubscriber;
+
+        let setup = Setup::new();
+        let file = setup.provider.store_file.clone();
+        let mut store = Store::open(&file).unwrap();
+        store.migrate_profiles().unwrap();
+        store.migrate_authorization_server().unwrap();
+        store
+            .enroll("private-retired-grant", &setup.provider.binding)
+            .unwrap();
+        setup.seed("private-active-id", "private-mailbox", 2, i64::MAX);
+        setup.seed("private-retired-id", "private-mailbox", 2, i64::MAX);
+        let db = setup.db();
+        db.execute("UPDATE custody_items SET grant_id='private-retired-grant' WHERE event_id='private-retired-id'", []).unwrap();
+        db.execute(
+            "INSERT INTO events_cutover(from_grant,to_grant,at,operator,reason,abandoned)
+         VALUES('private-retired-grant','grant',1,'fixture','fixture',0)",
+            [],
+        )
+        .unwrap();
+        let limits = custody::Limits {
+            max_items: 10,
+            max_retired_items: 20,
+            max_bytes: 30_000,
+            ..custody::Limits::default()
+        };
+        let mut capacity_log = CapacityLog {
+            interval: Duration::from_secs(4),
+            last_sample: None,
+        };
+        let capture = Capture::custody_info();
+        async {
+            for (delay, connected, expected_lines) in
+                [(0, true, 1), (3, true, 1), (1, false, 1), (0, true, 2)]
+            {
+                tokio::time::advance(Duration::from_secs(delay)).await;
+                record_link(
+                    file.clone(),
+                    "private-bus".into(),
+                    connected,
+                    limits.clone(),
+                    Some(&mut capacity_log),
+                )
+                .await
+                .unwrap();
+                assert_eq!(capture.0.lock().unwrap().len(), expected_lines);
+            }
+        }
+        .with_subscriber(capture.clone())
+        .await;
+        let lines = capture.0.lock().unwrap();
+        let expected = BTreeMap::from([
+            ("message".into(), "custody capacity".into()),
+            ("active_rows".into(), "1".into()),
+            ("retired_rows".into(), "1".into()),
+            ("bytes".into(), "136".into()),
+            ("max_items".into(), "10".into()),
+            ("max_retired_items".into(), "20".into()),
+            ("max_bytes".into(), "30000".into()),
+        ]);
+        assert_eq!(lines.as_slice(), &[expected.clone(), expected]);
     }
 }

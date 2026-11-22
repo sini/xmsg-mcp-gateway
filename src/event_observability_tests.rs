@@ -6,9 +6,18 @@ use std::sync::{Arc, Mutex};
 use tracing::instrument::WithSubscriber;
 
 #[derive(Clone, Default)]
-struct Capture(Arc<Mutex<Vec<BTreeMap<String, String>>>>);
+pub(crate) struct Capture(pub(crate) Arc<Mutex<Vec<BTreeMap<String, String>>>>, bool);
+
+impl Capture {
+    pub(crate) fn custody_info() -> Self {
+        Self(Default::default(), true)
+    }
+}
 impl tracing::Subscriber for Capture {
     fn enabled(&self, m: &tracing::Metadata<'_>) -> bool {
+        if self.1 {
+            return m.target() == "gateway_custody" && *m.level() == tracing::Level::INFO;
+        }
         (m.target() == "gateway_events" && *m.level() == tracing::Level::INFO)
             || (m.target() == "gateway_custody" && *m.level() == tracing::Level::WARN)
     }

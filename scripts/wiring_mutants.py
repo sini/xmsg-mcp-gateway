@@ -300,7 +300,7 @@ CASES.extend(
         (
             "durable-reconnect-before-publication",
             "src/session.rs",
-            "record_link(file.clone(), snapshot.bus.clone(), true, custody_limits.clone()).await?",
+            "record_link(file.clone(), snapshot.bus.clone(), true, custody_limits.clone(), None).await?",
             "tokio::time::Instant::now()",
             "messaging",
             "reconnect_publication_waits_for_a_durable_ledger_commit",

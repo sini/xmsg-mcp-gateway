@@ -448,7 +448,7 @@ fn logging_override(
     }
 }
 
-const DEFAULT_LOG_FILTER: &str = "warn,gateway_dispatch=info,gateway_events=info,gateway_oauth_refresh=info,gateway_oauth_authentication=info,gateway_attachments=info";
+const DEFAULT_LOG_FILTER: &str = "warn,gateway_dispatch=info,gateway_events=info,gateway_oauth_refresh=info,gateway_oauth_authentication=info,gateway_attachments=info,gateway_custody=info";
 
 fn default_subscriber<W>(
     writer: W,
@@ -546,6 +546,7 @@ mod logging_tests {
                     tracing::info!(target:"gateway_oauth_refresh",class="rotate","OAuth refresh default control");
                     tracing::info!(target:"gateway_oauth_authentication",class="invalid_client","OAuth authentication default control");
                     tracing::info!(target:"gateway_attachments",class="configuration",enabled=true,reason="enabled","Attachments default control");
+                    tracing::info!(target:"gateway_custody",active_rows=10,"Custody default control");
                     tracing::info!(target:"gateway_registration",address="CANARY_ADDRESS_34","CANARY_REGISTRATION_34");
                     tracing::warn!(target:"default_warning_control","existing warning retained");
                 },
@@ -563,6 +564,7 @@ mod logging_tests {
                 visible
             );
             assert_eq!(text.contains("Attachments default control"), visible);
+            assert_eq!(text.contains("Custody default control"), visible);
             assert!(
                 !text.contains("CANARY_"),
                 "default subscriber exposed other INFO data: {text}"
