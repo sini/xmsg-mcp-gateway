@@ -3974,7 +3974,13 @@ async fn cutover_acceptance_defers_old_scope_without_ack_then_accepts_same_deliv
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(deferred, crate::custody::Acceptance::Deferred);
+    assert!(matches!(
+        deferred,
+        crate::custody::Acceptance::Deferred {
+            reason: crate::custody::DeferredReason::CutoverMismatch,
+            ..
+        }
+    ));
     assert_eq!(
         bus.acked.load(Ordering::SeqCst),
         1,

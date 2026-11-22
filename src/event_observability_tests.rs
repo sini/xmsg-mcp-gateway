@@ -9,7 +9,8 @@ use tracing::instrument::WithSubscriber;
 struct Capture(Arc<Mutex<Vec<BTreeMap<String, String>>>>);
 impl tracing::Subscriber for Capture {
     fn enabled(&self, m: &tracing::Metadata<'_>) -> bool {
-        m.target() == "gateway_events" && *m.level() == tracing::Level::INFO
+        (m.target() == "gateway_events" && *m.level() == tracing::Level::INFO)
+            || (m.target() == "gateway_custody" && *m.level() == tracing::Level::WARN)
     }
     fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
         tracing::span::Id::from_u64(1)
@@ -215,5 +216,32 @@ async fn expiry_is_observed_once_per_worker_generation_and_reads_report_expired_
         capture.0.lock().unwrap().len(),
         3,
         "new generation or worker restart did not get one expiry observation"
+    );
+}
+
+#[test]
+fn custody_deferred_warning_reports_only_reason_and_capacity() {
+    let capture = Capture::default();
+    let capacity = crate::custody::Capacity {
+        rows: 1000,
+        bytes: 1874645,
+        max_items: 1000,
+        max_bytes: 67108864,
+    };
+    tracing::subscriber::with_default(capture.clone(), || {
+        crate::session::warn_custody_deferred(&crate::custody::DeferredReason::RowLimit, &capacity);
+    });
+    let captured = capture.0.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(
+        captured[0],
+        BTreeMap::from([
+            ("reason".into(), "row_limit".into()),
+            ("rows".into(), "1000".into()),
+            ("bytes".into(), "1874645".into()),
+            ("max_items".into(), "1000".into()),
+            ("max_bytes".into(), "67108864".into()),
+            ("message".into(), "custody intake deferred".into()),
+        ])
     );
 }

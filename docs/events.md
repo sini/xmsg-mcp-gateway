@@ -131,7 +131,18 @@ The optional `events.custody_limits` defaults to:
 ```
 
 If supplied, all seven positive fields are required. Ingestion and session health
-use this same configuration. Relative state, credential, root-certificate and
+use this same configuration.
+
+The planned `xmsg_identity.events_status.custody_capacity` reports store-wide
+`rows`, charged `bytes`, `max_items`, and `max_bytes` for the selected Events
+grant's authenticated caller. A retained tombstone counts as a row. Detached
+attachments contribute their stored reference metadata. `cutover_matches`
+reports whether the running Events grant matches the latest marker, or true if
+there is no marker. The status read shows stored totals without running expiry.
+Intake reports a WARN with aggregate counters and a reason when it defers for the
+row cap, byte cap, or cutover mismatch. The upstream delivery stays unacknowledged.
+
+Relative state, credential, root-certificate and
 Events-key paths resolve against the owner configuration's directory. For example,
 `.state/serving.json` with `grant_store: "grants.db"` and `key_file: "events.key"`
 uses the files created above.

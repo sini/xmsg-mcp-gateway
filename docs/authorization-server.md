@@ -163,3 +163,8 @@ The attachment metadata migration is an independent marker extension. It can run
 Schema rollback is a separate escape hatch: stop every gateway process, restore the untouched pre-migration database and matching pre-cutover configuration/binary, then verify startup and legacy identity before reopening ingress. Restoring that backup discards state accumulated after it; reverse authority cutover above keeps the migrated schema and its history. Never restore over a running gateway.
 
 Hosted acceptance for this flow remains pending: actual connector redirect/discovery, refresh retries/concurrency, subscription renewal, logout independence, revocation, restart, outage bounds and a soak beyond 25 hours must be observed by the owner. Local capability and the legacy 2026-11-10 hosted result do not substitute for those checks.
+
+
+The planned Events dispatcher fence checks the latest cutover marker again under the
+service operation lease before dispatching. A running worker configured for the
+previous grant stops dispatching when the marker selects a different grant.

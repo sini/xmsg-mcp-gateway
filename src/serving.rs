@@ -121,6 +121,7 @@ fn present_messaging<'de, D: serde::Deserializer<'de>>(
 
 struct Messaging {
     session: session::Session,
+    custody_limits: crate::custody::Limits,
     context_mask: Vec<outbound::ContextField>,
     limits: outbound::Limits,
     attachments_enabled: bool,
@@ -569,6 +570,11 @@ impl Serving {
             attachment_metadata_for_diagnostic = Some(attachment_metadata);
             Some(Messaging {
                 session,
+                custody_limits: config
+                    .events
+                    .as_ref()
+                    .map(|events| events.custody_limits.clone())
+                    .unwrap_or_default(),
                 context_mask: messaging.context_mask,
                 limits,
                 attachments_enabled,
@@ -2070,7 +2076,7 @@ async fn mcp_request(
                     .filter(|events| events.selected_grant == grant.grant_id)
                 {
                     let (bus, mailbox) = messaging.session.custody_scope();
-                    match events.health(&identity, bus, mailbox) {
+                    match events.health(&identity, bus, mailbox, &messaging.custody_limits) {
                         Ok(summary) => data["events_status"] = summary,
                         Err(error) => {
                             let (class, kind) = diagnostic::identity(&error);

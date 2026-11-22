@@ -159,7 +159,8 @@ An `events` section requires messaging, an explicit Events schema migration and 
 owner-private 32-byte key. It selects `grant_id`, `key_file`,
 `dispatch_timeout_ms` and optional `custody_limits`. Required verifier scopes
 include `identity:read` and `events:subscribe`. The configured custody limits are
-shared by the session and incoming receiver.
+shared by the session and incoming receiver. Planned custody capacity diagnostics
+are described in [Events setup](events.md#configure-and-migrate).
 
 Startup requires `dispatch_timeout_ms >= verifier.timeout_ms + 11000` and
 `request_timeout_ms >= 2 * verifier.timeout_ms + 41000`; both are at most 60000 ms.

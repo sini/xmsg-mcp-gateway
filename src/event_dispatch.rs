@@ -232,6 +232,9 @@ pub(crate) async fn tick(events: &Events, bus: &str, mailbox: &str) -> Result<Ti
         return Ok(Tick::Contended);
     };
     // Selection precedes introspection, but due/state must be re-read inside the lease.
+    if !crate::custody::cutover_matches(&store.connection, &events.selected_grant)? {
+        return Ok(Tick::Idle);
+    }
     let at = event_now(events)?;
     let Some(sub) = subscription(&store, bus, mailbox, &events.selected_grant, at)? else {
         return Ok(Tick::Idle);
@@ -502,6 +505,33 @@ impl Drop for Worker {
 mod tests {
     use super::*;
     use crate::events_test_support::{Behavior, Setup};
+    #[tokio::test]
+    async fn stale_dispatcher_cannot_send_after_cutover_marker() {
+        let setup = Setup::new();
+        setup.subscribe().await;
+        setup.seed("old-event", "dot@bus", 2, i64::MAX);
+        let mut store = Store::open(&setup.provider.store_file).unwrap();
+        store.migrate_profiles().unwrap();
+        store.migrate_authorization_server().unwrap();
+        let db = setup.db();
+        db.execute(
+            "INSERT INTO events_cutover(from_grant,to_grant,at,operator,reason,abandoned)
+                    VALUES ('grant','new-grant',1,'fixture','fixture',1)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            tick(&setup.runtime(), "bus", "dot@bus").await.unwrap(),
+            Tick::Idle
+        );
+        assert!(setup.callback.events.lock().unwrap().is_empty());
+        db.execute("DELETE FROM events_cutover", []).unwrap();
+        assert_eq!(
+            tick(&setup.runtime(), "bus", "dot@bus").await.unwrap(),
+            Tick::Accepted
+        );
+    }
+
     #[tokio::test]
     async fn cutover_selects_new_subscription_while_both_grants_remain_enabled() {
         use crate::auth::Verifier;

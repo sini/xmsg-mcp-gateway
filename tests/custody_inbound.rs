@@ -7,7 +7,7 @@ mod custody_time;
 #[path = "common/real_node.rs"]
 mod real_node;
 
-use xmsg_mcp_gateway::custody::{Acceptance, Limits, Scope};
+use xmsg_mcp_gateway::custody::{Acceptance, DeferredReason, Limits, Scope};
 use xmsg_mcp_gateway::grants::{Binding, Store};
 
 #[tokio::test]
@@ -959,7 +959,7 @@ async fn transient_capacity_and_failed_refusal_persistence_keep_redelivery() {
         )
         .await
         .unwrap();
-    assert_eq!(
+    assert!(matches!(
         xmsg_mcp_gateway::custody::receive_one(
             &mut store,
             &mut service,
@@ -969,8 +969,11 @@ async fn transient_capacity_and_failed_refusal_persistence_keep_redelivery() {
         )
         .await
         .unwrap(),
-        Some(Acceptance::Deferred)
-    );
+        Some(Acceptance::Deferred {
+            reason: DeferredReason::RowLimit,
+            ..
+        })
+    ));
     drop(service);
     node.restart(&binary).await;
     let mut service = node.config.register().await.unwrap();
@@ -1434,17 +1437,22 @@ async fn aggregate_byte_capacity_is_transient_and_preserves_redelivery() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        xmsg_mcp_gateway::custody::receive_one(
-            &mut store,
-            &mut service,
-            &scope,
-            &limits,
-            custody_time::at(101)
-        )
-        .await
-        .unwrap(),
-        Some(Acceptance::Deferred),
+    assert!(
+        matches!(
+            xmsg_mcp_gateway::custody::receive_one(
+                &mut store,
+                &mut service,
+                &scope,
+                &limits,
+                custody_time::at(101)
+            )
+            .await
+            .unwrap(),
+            Some(Acceptance::Deferred {
+                reason: DeferredReason::ByteLimit,
+                ..
+            })
+        ),
         "aggregate byte capacity was not enforced"
     );
     drop(service);

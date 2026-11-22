@@ -92,6 +92,16 @@ pub(crate) struct Session {
     mailbox: String,
 }
 
+pub(crate) fn warn_custody_deferred(
+    reason: &custody::DeferredReason,
+    capacity: &custody::Capacity,
+) {
+    tracing::warn!(target: "gateway_custody", reason = reason.label(),
+        rows = capacity.rows, bytes = capacity.bytes,
+        max_items = capacity.max_items, max_bytes = capacity.max_bytes,
+        "custody intake deferred");
+}
+
 fn observation_interval(reply_ttl_secs: u64) -> Duration {
     Duration::from_secs(reply_ttl_secs)
         .div_f64(2.0)
@@ -206,7 +216,9 @@ impl Session {
                                         _ = owner_stop.notified() => return,
                                     };
                                     match received {
-                                        Ok(Some(custody::Acceptance::Deferred)) => {},
+                                        Ok(Some(custody::Acceptance::Deferred { reason, capacity })) => {
+                                            warn_custody_deferred(&reason, &capacity);
+                                        },
                                         Ok(Some(_)) => continue,
                                         Ok(None) => {},
                                         Err(custody::Error::Transport(error)) => {

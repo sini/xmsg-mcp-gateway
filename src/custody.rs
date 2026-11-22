@@ -99,11 +99,18 @@ pub struct Status {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Acceptance {
-    Stored { event_id: String },
-    Duplicate { event_id: String },
+    Stored {
+        event_id: String,
+    },
+    Duplicate {
+        event_id: String,
+    },
     Quarantined,
     Refused,
-    Deferred,
+    Deferred {
+        reason: DeferredReason,
+        capacity: Capacity,
+    },
 }
 impl Acceptance {
     fn can_ack(&self) -> bool {
@@ -111,9 +118,72 @@ impl Acceptance {
             Self::Stored { .. } | Self::Duplicate { .. } | Self::Quarantined | Self::Refused => {
                 true
             }
-            Self::Deferred => false,
+            Self::Deferred { .. } => false,
         }
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum DeferredReason {
+    CutoverMismatch,
+    RowLimit,
+    ByteLimit,
+}
+
+impl DeferredReason {
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            Self::CutoverMismatch => "cutover_mismatch",
+            Self::RowLimit => "row_limit",
+            Self::ByteLimit => "byte_limit",
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+pub struct Capacity {
+    pub rows: i64,
+    pub bytes: i64,
+    pub max_items: i64,
+    pub max_bytes: i64,
+}
+
+pub(crate) fn capacity(
+    conn: &rusqlite::Connection,
+    limits: &Limits,
+    attachments_ready: bool,
+) -> rusqlite::Result<Capacity> {
+    let stored_refs = if attachments_ready {
+        "+CASE WHEN attachments='[]' THEN 0 ELSE length(CAST(attachments AS BLOB)) END"
+    } else {
+        ""
+    };
+    let (rows, bytes) = conn.query_row(
+        &format!("SELECT COUNT(*),COALESCE(SUM(length(CAST(text AS BLOB))+length(CAST(envelope AS BLOB))+length(CAST(origin AS BLOB))+COALESCE(length(CAST(in_reply_to AS BLOB)),0){stored_refs}),0) FROM custody_items"),
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(Capacity {
+        rows,
+        bytes,
+        max_items: limits.max_items,
+        max_bytes: limits.max_bytes,
+    })
+}
+
+pub(crate) fn cutover_matches(conn: &rusqlite::Connection, grant: &str) -> rusqlite::Result<bool> {
+    let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version < crate::authorization_server::SCHEMA_VERSION {
+        return Ok(true);
+    }
+    let selected: Option<String> = conn
+        .query_row(
+            "SELECT to_grant FROM events_cutover ORDER BY seq DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(selected.is_none_or(|id| id == grant))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -560,17 +630,11 @@ impl Store {
         if !(CUSTODY_SCHEMA_VERSION..=MAX_SUPPORTED_SCHEMA_VERSION).contains(&version) {
             return Err(Error::MigrationRequired);
         }
-        if version >= crate::authorization_server::SCHEMA_VERSION {
-            let selected: Option<String> = tx
-                .query_row(
-                    "SELECT to_grant FROM events_cutover ORDER BY seq DESC LIMIT 1",
-                    [],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            if selected.is_some_and(|id| id != scope.grant_id) {
-                return Ok(Acceptance::Deferred);
-            }
+        if !cutover_matches(&tx, &scope.grant_id)? {
+            return Ok(Acceptance::Deferred {
+                reason: DeferredReason::CutoverMismatch,
+                capacity: capacity(&tx, limits, crate::attachment_store::ready(&tx)?)?,
+            });
         }
         let marker: i64 = tx.pragma_query_value(None, "application_id", |r| r.get(0))?;
         if marker != crate::grants::SUMMARY_APPLICATION_ID {
@@ -642,20 +706,22 @@ impl Store {
             .saturating_add(origin.len())
             .saturating_add(delivery.in_reply_to().map_or(0, str::len))
             .saturating_add(refs_bytes(&refs));
-        let stored_refs = if attachments_ready {
-            "+CASE WHEN attachments='[]' THEN 0 ELSE length(CAST(attachments AS BLOB)) END"
-        } else {
-            ""
-        };
-        let (count,bytes):(i64,i64)=tx.query_row(&format!("SELECT COUNT(*),COALESCE(SUM(length(CAST(text AS BLOB))+length(CAST(envelope AS BLOB))+length(CAST(origin AS BLOB))+COALESCE(length(CAST(in_reply_to AS BLOB)),0){stored_refs}),0) FROM custody_items"),[],|row|Ok((row.get(0)?,row.get(1)?)))?;
+        let capacity = capacity(&tx, limits, attachments_ready)?;
         let oversized =
             size as u128 > limits.max_item_bytes as u128 || size as u128 > limits.max_bytes as u128;
-        let refused = oversized
-            || count >= limits.max_items
-            || size as u128 + bytes as u128 > limits.max_bytes as u128;
-        if !conflict && refused && !oversized {
-            tx.commit()?;
-            return Ok(Acceptance::Deferred);
+        let reason = if capacity.rows >= limits.max_items {
+            Some(DeferredReason::RowLimit)
+        } else if size as u128 + capacity.bytes as u128 > limits.max_bytes as u128 {
+            Some(DeferredReason::ByteLimit)
+        } else {
+            None
+        };
+        let refused = oversized || reason.is_some();
+        if !conflict && !oversized {
+            if let Some(reason) = reason {
+                tx.commit()?;
+                return Ok(Acceptance::Deferred { reason, capacity });
+            }
         }
         if conflict || refused {
             let reason = if conflict { "conflict" } else { "refusal" };
@@ -667,10 +733,8 @@ impl Store {
             tx.commit()?;
             return Ok(if conflict {
                 Acceptance::Quarantined
-            } else if oversized {
-                Acceptance::Refused
             } else {
-                Acceptance::Deferred
+                Acceptance::Refused
             });
         }
         let event_id = format!(
@@ -1457,6 +1521,35 @@ mod attachment_custody_tests {
         assert_eq!(after, ("[]".into(), first.1, None));
     }
     #[tokio::test]
+    async fn tombstones_count_toward_capacity_and_defer_without_ack() {
+        let feed = Feed::new("new", vec![]).await;
+        let (_directory, mut store) = store();
+        store.connection.execute(
+            "INSERT INTO custody_items(bus,upstream_id,event_id,grant_id,grant_revision,mailbox,owner,origin,text,envelope,fingerprint,received_at,expires_at,held)
+             VALUES ('bus','old','old','grant',1,'dot@bus','owner','{}',NULL,NULL,'old',1,100,1)",
+            [],
+        ).unwrap();
+        let limits = Limits {
+            max_items: 1,
+            ..Limits::default()
+        };
+        let result = store
+            .accept_delivery(
+                &scope(),
+                &feed.service,
+                &feed.delivery,
+                &limits,
+                UNIX_EPOCH + Duration::from_secs(101),
+            )
+            .unwrap();
+        assert!(!result.can_ack());
+        assert!(
+            matches!(result, Acceptance::Deferred { reason: DeferredReason::RowLimit, capacity }
+            if capacity.rows == 1 && capacity.bytes == 0)
+        );
+    }
+
+    #[tokio::test]
     async fn refs_are_billed_in_both_item_and_total_capacity() {
         let feed = Feed::new("first", vec![reference("file.txt")]).await;
         let origin =
@@ -1501,17 +1594,13 @@ mod attachment_custody_tests {
             Acceptance::Stored { .. }
         ));
         let second = Feed::new("second", vec![reference("file.txt")]).await;
-        assert_eq!(
-            store
-                .accept_delivery(
-                    &scope(),
-                    &second.service,
-                    &second.delivery,
-                    &limits,
-                    UNIX_EPOCH + Duration::from_secs(102)
-                )
-                .unwrap(),
-            Acceptance::Deferred,
+        assert!(
+            matches!(
+                store.accept_delivery(&scope(), &second.service, &second.delivery, &limits,
+                    UNIX_EPOCH + Duration::from_secs(102)).unwrap(),
+                Acceptance::Deferred { reason: DeferredReason::ByteLimit, capacity }
+                    if capacity.rows == 1 && capacity.bytes == size as i64
+            ),
             "refs missing from aggregate retained byte bound"
         );
         assert_eq!(

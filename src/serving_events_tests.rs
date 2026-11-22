@@ -198,6 +198,12 @@ async fn production_rpc_and_session_poll_commit_ack_and_signed_owned_wake() {
         identity["structuredContent"]["events_status"]["retained_events_by_state"]["accepted"],
         1
     );
+    let status = &identity["structuredContent"]["events_status"];
+    assert_eq!(status["custody_capacity"]["rows"], 1);
+    assert!(status["custody_capacity"]["bytes"].as_i64().unwrap() > 0);
+    assert_eq!(status["custody_capacity"]["max_items"], 1000);
+    assert_eq!(status["custody_capacity"]["max_bytes"], 67108864);
+    assert_eq!(status["cutover_matches"], true);
     bus.handle.abort();
     tokio::time::timeout(Duration::from_secs(5), async {
         while serving

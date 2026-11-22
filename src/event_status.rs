@@ -9,6 +9,7 @@ impl Events {
         identity: &VerifiedIdentity,
         bus: &str,
         mailbox: &str,
+        limits: &crate::custody::Limits,
     ) -> Result<Value, Error> {
         let store = Store::open_for_dispatch(&self.file)?;
         store.require_events_ready(&self.key)?;
@@ -65,8 +66,15 @@ impl Events {
             )
             .optional()?
             .unwrap_or(0);
+        let capacity = crate::custody::capacity(
+            &store.connection,
+            limits,
+            crate::attachment_store::ready(&store.connection)?,
+        )?;
+        let cutover_matches =
+            crate::custody::cutover_matches(&store.connection, &self.selected_grant)?;
         Ok(
-            json!({"subscription":subscription,"retained_events_by_state":states,"delivery_failures_by_reason":failures,"oldest_backlog_age_seconds":oldest.map(|first|now.saturating_sub(first)),"history_truncated":missing>0,"observation_checkpoint":observation_checkpoint}),
+            json!({"custody_capacity": capacity, "cutover_matches": cutover_matches, "subscription":subscription,"retained_events_by_state":states,"delivery_failures_by_reason":failures,"oldest_backlog_age_seconds":oldest.map(|first|now.saturating_sub(first)),"history_truncated":missing>0,"observation_checkpoint":observation_checkpoint}),
         )
     }
 }
