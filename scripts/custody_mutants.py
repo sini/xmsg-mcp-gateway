@@ -151,7 +151,7 @@ CASES += [
     ),
     (
         "aggregate-byte-capacity",
-        "size as u128 + bytes as u128 > limits.max_bytes as u128",
+        "size as u128 + capacity.bytes as u128 > limits.max_bytes as u128",
         "false",
         "aggregate_byte_capacity_is_transient_and_preserves_redelivery",
         "aggregate byte capacity was not enforced",
