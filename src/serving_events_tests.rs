@@ -637,6 +637,13 @@ async fn production_custody_limits_start_with_retired_default_and_second_profile
         &serde_json::to_vec(&setup.provider.config).unwrap(),
     );
     store.connection.execute("INSERT INTO custody_items(bus,upstream_id,event_id,grant_id,grant_revision,mailbox,owner,origin,fingerprint,received_at,expires_at,held) VALUES('bus','first','first','grant',1,'gateway@bus','owner','{}','first-hash',0,9999999999,1)", []).unwrap();
+    store.enroll("retired", &setup.provider.binding).unwrap();
+    store.connection.execute_batch(
+        "INSERT INTO custody_items(bus,upstream_id,event_id,grant_id,grant_revision,mailbox,owner,origin,fingerprint,received_at,expires_at,held)
+         VALUES('bus','retired','retired','retired',1,'gateway@bus','owner','{}','retired-hash',0,9999999999,1);
+         INSERT INTO events_cutover(from_grant,to_grant,at,operator,reason,abandoned)
+         VALUES('retired','grant',1,'fixture','fixture',0);"
+    ).unwrap();
     let serving = Serving::from_owner_file(&setup.provider.config_file)
         .await
         .unwrap();
@@ -650,8 +657,9 @@ async fn production_custody_limits_start_with_retired_default_and_second_profile
     assert_eq!(capacity["max_items"], 20000);
     assert_eq!(capacity["max_bytes"], 134217728);
     assert_eq!(capacity["max_retired_items"], 1000);
+    assert_eq!(capacity["rows"], 2);
     assert_eq!(capacity["active_rows"], 1);
-    assert_eq!(capacity["retired_rows"], 0);
+    assert_eq!(capacity["retired_rows"], 1);
 
     store.enroll("other", &credential).unwrap();
     let db = &store.connection;

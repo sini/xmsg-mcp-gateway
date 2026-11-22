@@ -5988,6 +5988,9 @@ fn custody_cutover_checks_both_buckets_and_rolls_back_expiry_and_audit() {
     let mut old = setup.server.binding.clone();
     old.issuer = "https://old.example".into();
     store.enroll("old", &old).unwrap();
+    let mut third = old.clone();
+    third.hosted_client = "third".into();
+    store.enroll("third", &third).unwrap();
     let db = setup.db();
     let at = setup.clock.wall();
     for (id, grant, expiry) in [
@@ -6055,6 +6058,13 @@ fn custody_cutover_checks_both_buckets_and_rolls_back_expiry_and_audit() {
     limits.max_items = 3;
     limits.max_retired_items = 1;
     let current = &setup.server.binding;
+    assert_eq!(
+        run(&mut store, "local", "third", "local", current, &limits).unwrap(),
+        Cutover::Capacity,
+        "a cutover must not worsen an existing retired overage"
+    );
+    assert_eq!(check_snapshot(), (1, 4, false));
+
     assert_eq!(
         run(&mut store, "local", "old", "local", current, &limits).unwrap(),
         Cutover::Capacity

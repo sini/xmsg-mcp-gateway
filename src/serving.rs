@@ -309,10 +309,11 @@ fn events_profile_binding(
             rusqlite::params![grant_id, binding.service, binding.issuer, binding.resource, binding.subject, binding.hosted_client],
             |row| row.get(0),
         ).map_err(|_| ConfigurationError)?;
-        if found && verifier.requires_scope_for_binding(&binding, "events:subscribe") {
-            if selected.replace(binding).is_some() {
-                return Err(ConfigurationError);
-            }
+        if found
+            && verifier.requires_scope_for_binding(&binding, "events:subscribe")
+            && selected.replace(binding).is_some()
+        {
+            return Err(ConfigurationError);
         }
     }
     selected.ok_or(ConfigurationError)
