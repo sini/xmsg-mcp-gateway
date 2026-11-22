@@ -1,5 +1,5 @@
 use super::{hash, random, token_shape, Error, Outcome, Server, SCHEMA_VERSION};
-use crate::grants::{Authorization, Store};
+use crate::grants::{Authorization, Binding, Store};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 type AccessRow = (String, String, i64, Option<i64>, Option<i64>);
@@ -599,46 +599,74 @@ pub enum Cutover {
     Complete,
     Busy,
     Unread { from: i64, to: i64 },
+    Capacity,
 }
+
+pub(crate) struct CutoverRequest<'a> {
+    pub from: &'a str,
+    pub to: &'a str,
+    pub operator: &'a str,
+    pub reason: &'a str,
+    pub abandon: bool,
+    pub at: i64,
+    pub selected: &'a str,
+    pub binding: &'a Binding,
+    pub limits: &'a crate::custody::Limits,
+}
+
+pub(crate) fn validate_events_authority(
+    conn: &Connection,
+    binding: &Binding,
+) -> Result<(), crate::grants::Error> {
+    let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version < SCHEMA_VERSION {
+        return Ok(());
+    }
+    let mismatch: bool = conn.query_row(
+        "WITH referenced(id) AS (
+             SELECT grant_id FROM custody_items
+             UNION SELECT from_grant FROM events_cutover
+             UNION SELECT to_grant FROM events_cutover
+         ), bindings(service, resource, subject) AS (
+             SELECT service, resource, subject FROM event_subscriptions
+             UNION ALL SELECT g.service, g.resource, g.subject
+             FROM referenced r LEFT JOIN grants g ON g.id=r.id
+         )
+         SELECT EXISTS(SELECT 1 FROM bindings
+             WHERE service IS NOT ?1 OR resource IS NOT ?2 OR subject IS NOT ?3)",
+        params![binding.service, binding.resource, binding.subject],
+        |row| row.get(0),
+    )?;
+    if mismatch {
+        return Err(crate::grants::Error::ProfileMismatch);
+    }
+    Ok(())
+}
+
 impl Store {
-    pub fn cutover_events(
-        &mut self,
-        from: &str,
-        to: &str,
-        operator: &str,
-        reason: &str,
-        abandon: bool,
-        at: i64,
-    ) -> Result<Cutover, Error> {
+    pub(crate) fn cutover_events(&mut self, request: CutoverRequest<'_>) -> Result<Cutover, Error> {
+        let CutoverRequest {
+            from,
+            to,
+            operator,
+            reason,
+            abandon,
+            at,
+            selected,
+            binding,
+            limits,
+        } = request;
         self.require_authorization_server_ready()?;
-        if from == to
+        if from != selected
+            || from == to
             || [from, to, operator, reason]
                 .iter()
                 .any(|s| s.is_empty() || s.len() > 512 || s.chars().any(char::is_control))
         {
             return Err(Error::Configuration);
         }
-        let binding = |id: &str| {
-            self.connection.query_row(
-                "SELECT service,resource,subject,revision FROM grants WHERE id=?1",
-                [id],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, i64>(3)?,
-                    ))
-                },
-            )
-        };
-        let first = binding(from)?;
-        let second = binding(to)?;
-        if first.0 != second.0 || first.1 != second.1 || first.2 != second.2 {
-            return Err(Error::Configuration);
-        }
         let Some(_lease) = self
-            .try_operation_lease(&first.0)
+            .try_operation_lease(&binding.service)
             .map_err(|_| Error::Unavailable)?
         else {
             return Ok(Cutover::Busy);
@@ -646,6 +674,30 @@ impl Store {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !crate::custody::cutover_matches(&tx, from)? {
+            return Err(Error::Configuration);
+        }
+        let valid_grants: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM grants
+                 WHERE id=?1 AND service=?3 AND resource=?4 AND subject=?5
+                 AND issuer=?6 AND hosted_client=?7)
+             AND EXISTS(SELECT 1 FROM grants
+                 WHERE id=?2 AND service=?3 AND resource=?4 AND subject=?5)",
+            params![
+                from,
+                to,
+                binding.service,
+                binding.resource,
+                binding.subject,
+                binding.issuer,
+                binding.hosted_client
+            ],
+            |row| row.get(0),
+        )?;
+        if !valid_grants {
+            return Err(Error::Configuration);
+        }
+        validate_events_authority(&tx, binding).map_err(|_| Error::Configuration)?;
         let unread = |id: &str| {
             tx.query_row("SELECT COUNT(*) FROM custody_items c LEFT JOIN event_observations seen ON seen.event_id=c.event_id WHERE c.grant_id=?1 AND c.text IS NOT NULL AND c.expires_at>?2 AND seen.event_id IS NULL",params![id,at],|r|r.get::<_,i64>(0))
         };
@@ -653,6 +705,24 @@ impl Store {
         let new = unread(to)?;
         if !abandon && (old != 0 || new != 0) {
             return Ok(Cutover::Unread { from: old, to: new });
+        }
+        crate::custody::expire(&tx, limits, at).map_err(|_| Error::Unavailable)?;
+        let attachments = crate::attachment_store::ready(&tx)?;
+        let current = crate::custody::capacity(&tx, limits, attachments)?;
+        let prospective =
+            crate::custody::capacity_after_cutover(&tx, limits, attachments, Some((from, to)))?;
+        let worsens = |before, after, limit| after > limit && after > before;
+        if worsens(
+            current.active_rows,
+            prospective.active_rows,
+            limits.max_items,
+        ) || worsens(
+            current.retired_rows,
+            prospective.retired_rows,
+            limits.max_retired_items,
+        ) || worsens(current.bytes, prospective.bytes, limits.max_bytes)
+        {
+            return Ok(Cutover::Capacity);
         }
         if abandon {
             tx.execute("INSERT INTO event_release_audit(event_id,grant_id,old_revision,new_revision,operator,reason) SELECT c.event_id,c.grant_id,c.grant_revision,c.grant_revision,?4,'cutover-abandon' FROM custody_items c LEFT JOIN event_observations seen ON seen.event_id=c.event_id WHERE c.grant_id IN(?1,?2) AND c.text IS NOT NULL AND c.expires_at>?3 AND seen.event_id IS NULL",params![from,to,at,operator])?;

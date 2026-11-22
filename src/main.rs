@@ -191,6 +191,10 @@ async fn run(cli: Cli) -> Result<(), CommandError> {
                 xmsg_mcp_gateway::authorization_server::Cutover::Complete => {
                     println!("Events cutover recorded")
                 }
+                xmsg_mcp_gateway::authorization_server::Cutover::Capacity => {
+                    println!("Events cutover exceeds custody capacity");
+                    std::process::exit(5)
+                }
                 xmsg_mcp_gateway::authorization_server::Cutover::Busy => {
                     println!("service operation busy");
                     std::process::exit(4)

@@ -279,7 +279,7 @@ fn configured_verifier(
     Ok(Arc::new(verifier))
 }
 
-fn validate_events_profile(
+pub(crate) fn validate_events_profile(
     store: &Store,
     verifier: &Verifier,
     grant_id: &str,
@@ -291,7 +291,18 @@ fn validate_events_profile(
     {
         return Err(ConfigurationError);
     }
-    let mut matches = 0;
+    let binding = events_profile_binding(store, verifier, grant_id)?;
+    crate::authorization_server::validate_events_authority(&store.connection, &binding)
+        .map_err(|_| ConfigurationError)?;
+    Ok(())
+}
+
+fn events_profile_binding(
+    store: &Store,
+    verifier: &Verifier,
+    grant_id: &str,
+) -> Result<crate::grants::Binding, ConfigurationError> {
+    let mut selected = None;
     for binding in verifier.bindings() {
         let found: bool = store.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM grants WHERE id=?1 AND service=?2 AND issuer=?3 AND resource=?4 AND subject=?5 AND hosted_client=?6)",
@@ -299,13 +310,12 @@ fn validate_events_profile(
             |row| row.get(0),
         ).map_err(|_| ConfigurationError)?;
         if found && verifier.requires_scope_for_binding(&binding, "events:subscribe") {
-            matches += 1;
+            if selected.replace(binding).is_some() {
+                return Err(ConfigurationError);
+            }
         }
     }
-    if matches != 1 {
-        return Err(ConfigurationError);
-    }
-    Ok(())
+    selected.ok_or(ConfigurationError)
 }
 
 fn default_header_read_timeout_ms() -> u64 {
@@ -2281,14 +2291,31 @@ pub fn cutover_events(
     reason: &str,
     abandon: bool,
 ) -> Result<crate::authorization_server::Cutover, StartupError> {
-    let config = load_configuration(config_file)?;
+    let mut config = load_configuration(config_file)?;
+    let events = config.events.take().ok_or(ConfigurationError)?;
+    events
+        .custody_limits
+        .validate()
+        .map_err(|_| ConfigurationError)?;
     let mut store = Store::open(&config.grant_store).map_err(|_| ConfigurationError)?;
+    let verifier = configured_verifier(&mut config, &store)?;
+    let binding = events_profile_binding(&store, &verifier, &events.grant_id)?;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| ConfigurationError)?
         .as_secs() as i64;
     store
-        .cutover_events(from, to, operator, reason, abandon, now)
+        .cutover_events(crate::authorization_server::CutoverRequest {
+            from,
+            to,
+            operator,
+            reason,
+            abandon,
+            at: now,
+            selected: &events.grant_id,
+            binding: &binding,
+            limits: &events.custody_limits,
+        })
         .map_err(|_| ConfigurationError.into())
 }
 

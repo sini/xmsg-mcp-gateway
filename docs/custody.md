@@ -97,6 +97,14 @@ Required summary, pending or database writes still fail closed: rollback or a
 failed summary commit never authorizes an ACK. Confirmed ACKs remove only the
 exact known pending ID; an ACK transport error can leave its outcome uncertain.
 
+Planned retired custody accounting treats a grant's rows as retired after a
+committed cutover away from that grant, until it is selected again. Without
+a cutover marker all rows count as active. Both buckets retain tombstones
+through their normal metadata deadline and share the global charged-byte
+limit. Lowering the retired limit preserves existing history and does not
+block intake that fits the active and byte limits. Replay still uses the
+original bus-wide identity when it reaches deduplication.
+
 Each admitted bus also has one rolling gap summary: a saturating observation
 count, first/last bounds, maximum **individual** interval width and retained-until
 deadline. The span from first to last is not treated as one outage. New interval

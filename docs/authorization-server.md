@@ -155,6 +155,15 @@ The attachment metadata migration is an independent marker extension. It can run
    xmsg-mcp-gateway cutover-events --config <owner-file> --from <old-grant> --to <new-grant> --operator <operator> --reason <reason>
    ```
 
+   With planned retired custody accounting, keep `events.grant_id`
+   on `--from` for the guard. After a first cutover the latest committed
+   selection must also match `--from`. The database's Events bindings
+   must share the selected verifier binding's service, resource and subject.
+   Exit 5 means the transition would create or worsen a custody capacity
+   overage. It leaves expiry, marker and abandonment audit unchanged. Wait
+   for normal expiry or raise the affected limit in the offline owner config
+   before retrying. An existing overage that does not grow may be preserved.
+
    Exit 4 means busy. Exit 3 means unobserved, unexpired content remains on either grant; drain it before proceeding. Only the owner may intentionally use `--abandon-unread`, which records `cutover-abandon` audit rows. An observed item with a pending callback is not independently unread.
 5. Read back the latest `events_cutover.to_grant` and the release audit in the migrated working store using owner-controlled database inspection. Keep the pre-migration backup untouched; it cannot contain the new marker. The latest marker must match the new configured `events.grant_id`. Startup refuses a mismatch. The acceptance transaction defers a stale process still selecting the old grant without acknowledging upstream; queued messages remain in xmsg. This guard protects the switch but does not remove the maintenance-window requirement.
 6. Start with the new Events grant, complete the new connector's OAuth, then explicitly subscribe with its token. Check identity, a wake, mailbox read/ACK and a send before retiring the old connector/grant. Wakes pause between quiescing and the new subscription. This procedure does not transfer old custody to the new grant.

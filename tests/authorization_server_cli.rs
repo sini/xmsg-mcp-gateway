@@ -9,6 +9,9 @@ fn cutover_cli_reports_busy_unread_and_complete_without_outbox_state_confusion()
         "observed-pending",
         "observed-held",
         "abandon",
+        "capacity",
+        "invalid-limit",
+        "missing-events",
     ] {
         let directory = tempfile::tempdir().unwrap();
         let file = directory.path().join("state.db");
@@ -58,8 +61,38 @@ fn cutover_cli_reports_busy_unread_and_complete_without_outbox_state_confusion()
             db.execute("INSERT INTO event_observations VALUES('item',1)", [])
                 .unwrap();
         }
+        if scenario == "capacity" {
+            db.execute_batch("INSERT INTO custody_items(bus,upstream_id,event_id,grant_id,grant_revision,mailbox,owner,origin,fingerprint,received_at,expires_at,held) VALUES('bus','tombstone','tombstone','old',2,'gateway@bus','owner','{}','fingerprint',1,9999999999,1);").unwrap();
+        }
         let config = directory.path().join("owner.json");
-        std::fs::write(&config,serde_json::json!({"bind":"127.0.0.1:0","grant_store":file,"request_timeout_ms":5000,"allowed_hosts":["gateway.example"],"allowed_origins":[]}).to_string()).unwrap();
+        let secret = directory.path().join("fixture-client");
+        std::fs::write(&secret, b"fixture-password").unwrap();
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let profiles = ["https://old.example", "https://new.example"].map(|issuer| {
+            serde_json::json!({
+                "service":"gateway", "issuer":issuer, "resource":"https://gateway.example/mcp",
+                "audience":"https://gateway.example/mcp", "subject":"owner", "hosted_client":"dot",
+                "introspection_url":"https://provider.example/introspect",
+                "introspection_client":"fixture", "client_secret_file":secret,
+                "required_scopes":["identity:read", "events:subscribe"], "timeout_ms":1000
+            })
+        });
+        let mut owner = serde_json::json!({
+            "bind":"127.0.0.1:0", "grant_store":file, "request_timeout_ms":5000,
+            "allowed_hosts":["gateway.example"], "allowed_origins":[], "verifier_profiles":profiles,
+            "events":{"grant_id":"old", "key_file":key_file, "dispatch_timeout_ms":13000}
+        });
+        if matches!(scenario, "capacity" | "invalid-limit") {
+            owner["events"]["custody_limits"] = serde_json::json!({
+                "max_items":1000, "max_bytes":67108864, "max_item_bytes":262144, "max_metadata":1000,
+                "content_retention_secs":604800, "metadata_retention_secs":604800,
+                "max_gap_intervals":1000, "max_retired_items":i64::from(scenario == "capacity")
+            });
+        }
+        if scenario == "missing-events" {
+            owner.as_object_mut().unwrap().remove("events");
+        }
+        std::fs::write(&config, owner.to_string()).unwrap();
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
         let lease =
             (scenario == "busy").then(|| store.try_operation_lease("gateway").unwrap().unwrap());
@@ -77,12 +110,14 @@ fn cutover_cli_reports_busy_unread_and_complete_without_outbox_state_confusion()
                 "--reason",
                 "cutover control",
             ]);
-        if scenario == "abandon" {
+        if matches!(scenario, "abandon" | "capacity" | "invalid-limit") {
             command.arg("--abandon-unread");
         }
         let output = command.output().unwrap();
         let expected = match scenario {
             "busy" => 4,
+            "capacity" => 5,
+            "invalid-limit" | "missing-events" => 1,
             "unread-dispatching" => 3,
             _ => 0,
         };

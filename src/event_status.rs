@@ -19,6 +19,8 @@ impl Events {
         if authority.grant_id != self.selected_grant || identity.expires_at() <= now as u64 {
             return Err(crate::grants::Error::Denied.into());
         }
+        crate::serving::validate_events_profile(&store, &self.verifier, &self.selected_grant)
+            .map_err(|_| crate::grants::Error::ProfileMismatch)?;
         let owner = owner_key(identity, bus, mailbox, &authority.grant_id);
         let subscription:Option<(String,i64,i64,i64,i64)>=store.connection.query_row("SELECT status,generation,expires,callback_cursor,observation_checkpoint FROM event_subscriptions WHERE owner_key=?1",[&owner],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).optional()?;
         let effective_state = subscription_state(&store.connection, &owner, now)?;

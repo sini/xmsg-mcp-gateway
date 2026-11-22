@@ -223,7 +223,10 @@ async fn expiry_is_observed_once_per_worker_generation_and_reads_report_expired_
 fn custody_deferred_warning_reports_only_reason_and_capacity() {
     let capture = Capture::default();
     let capacity = crate::custody::Capacity {
-        rows: 1000,
+        rows: 1644,
+        active_rows: 1000,
+        retired_rows: 644,
+        max_retired_items: 1000,
         bytes: 1874645,
         max_items: 1000,
         max_bytes: 67108864,
@@ -237,7 +240,10 @@ fn custody_deferred_warning_reports_only_reason_and_capacity() {
         captured[0],
         BTreeMap::from([
             ("reason".into(), "row_limit".into()),
-            ("rows".into(), "1000".into()),
+            ("rows".into(), "1644".into()),
+            ("active_rows".into(), "1000".into()),
+            ("retired_rows".into(), "644".into()),
+            ("max_retired_items".into(), "1000".into()),
             ("bytes".into(), "1874645".into()),
             ("max_items".into(), "1000".into()),
             ("max_bytes".into(), "67108864".into()),

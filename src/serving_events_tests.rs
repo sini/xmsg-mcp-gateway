@@ -601,3 +601,148 @@ async fn mock_reply_handles_forced_peer_close_and_preserves_live_control() {
         "live mock reply positive control failed"
     );
 }
+
+#[tokio::test]
+async fn production_custody_limits_start_with_retired_default_and_second_profile() {
+    let mut setup = Setup::new();
+    let _bus = start_bus(&mut setup).await;
+    let mut store = Store::open(&setup.provider.store_file).unwrap();
+    store.migrate_profiles().unwrap();
+    store.migrate_authorization_server().unwrap();
+    let mut first = setup
+        .provider
+        .config
+        .as_object_mut()
+        .unwrap()
+        .remove("verifier")
+        .unwrap();
+    first["opaque_default"] = json!(true);
+    let mut second = first.clone();
+    second["opaque_default"] = json!(false);
+    second["issuer"] = json!("https://second-issuer.example/");
+    second["subject"] = json!("second-owner");
+    second["hosted_client"] = json!("second-client");
+    setup.provider.config["verifier_profiles"] = json!([second, first]);
+    let mut credential = setup.provider.binding.clone();
+    credential.issuer = "https://second-issuer.example/".into();
+    credential.subject = "second-owner".into();
+    credential.hosted_client = "second-client".into();
+    setup.provider.config["events"]["custody_limits"] = json!({
+        "max_items": 20000, "max_bytes": 134217728, "max_item_bytes": 262144,
+        "content_retention_secs": 604800, "max_metadata": 1000,
+        "metadata_retention_secs": 604800, "max_gap_intervals": 1000
+    });
+    fixture::private_file(
+        &setup.provider.config_file,
+        &serde_json::to_vec(&setup.provider.config).unwrap(),
+    );
+    store.connection.execute("INSERT INTO custody_items(bus,upstream_id,event_id,grant_id,grant_revision,mailbox,owner,origin,fingerprint,received_at,expires_at,held) VALUES('bus','first','first','grant',1,'gateway@bus','owner','{}','first-hash',0,9999999999,1)", []).unwrap();
+    let serving = Serving::from_owner_file(&setup.provider.config_file)
+        .await
+        .unwrap();
+    let status = call(
+        &serving,
+        "tools/call",
+        json!({"name":"xmsg_identity","arguments":{}}),
+    )
+    .await;
+    let capacity = &status["structuredContent"]["events_status"]["custody_capacity"];
+    assert_eq!(capacity["max_items"], 20000);
+    assert_eq!(capacity["max_bytes"], 134217728);
+    assert_eq!(capacity["max_retired_items"], 1000);
+    assert_eq!(capacity["active_rows"], 1);
+    assert_eq!(capacity["retired_rows"], 0);
+
+    store.enroll("other", &credential).unwrap();
+    let db = &store.connection;
+    db.execute("INSERT INTO custody_items(bus,upstream_id,event_id,grant_id,grant_revision,mailbox,owner,origin,fingerprint,received_at,expires_at,held) VALUES('bus','other','other','other',1,'gateway@bus','second-owner','{}','hash',0,9999999999,1)", []).unwrap();
+    assert!(Serving::from_owner_file(&setup.provider.config_file)
+        .await
+        .is_err());
+    let (_, status, _) = fixture::request(
+        &serving,
+        "good-token",
+        rpc("tools/call", json!({"name":"xmsg_identity","arguments":{}})),
+    )
+    .await;
+    assert!(status["result"]["structuredContent"]["events_status"]["custody_capacity"].is_null());
+}
+
+#[tokio::test]
+async fn serving_and_cutover_reject_invalid_custody_limits_as_configuration_errors() {
+    let mut setup = Setup::new();
+    let _bus = start_bus(&mut setup).await;
+    let mut store = Store::open(&setup.provider.store_file).unwrap();
+    store.migrate_profiles().unwrap();
+    store.migrate_authorization_server().unwrap();
+    let mut next = setup.provider.binding.clone();
+    next.issuer = "https://replacement.example".into();
+    store.enroll("replacement", &next).unwrap();
+    let mut current = setup
+        .provider
+        .config
+        .as_object_mut()
+        .unwrap()
+        .remove("verifier")
+        .unwrap();
+    current["opaque_default"] = json!(true);
+    let mut replacement = current.clone();
+    replacement["opaque_default"] = json!(false);
+    replacement["issuer"] = json!(next.issuer);
+    setup.provider.config["verifier_profiles"] = json!([current, replacement]);
+    store.connection.execute("INSERT INTO custody_items(bus,upstream_id,event_id,grant_id,grant_revision,mailbox,owner,origin,fingerprint,received_at,expires_at,held) VALUES('bus','old','old','grant',1,'gateway@bus','owner','{}','hash',0,9999999999,1)", []).unwrap();
+    let run_cutover = || {
+        cutover_events(
+            &setup.provider.config_file,
+            "grant",
+            "replacement",
+            "owner",
+            "fixture",
+            false,
+        )
+    };
+    let limits = json!({
+        "max_items": 1000, "max_bytes": 67108864, "max_item_bytes": 262144,
+        "content_retention_secs": 604800, "max_metadata": 1000,
+        "metadata_retention_secs": 604800, "max_gap_intervals": 1000,
+        "max_retired_items": 1000
+    });
+    for key in limits.as_object().unwrap().keys() {
+        for invalid in [0, -1] {
+            let mut config = setup.provider.config.clone();
+            config["events"]["custody_limits"] = limits.clone();
+            config["events"]["custody_limits"][key] = json!(invalid);
+            fixture::private_file(
+                &setup.provider.config_file,
+                &serde_json::to_vec(&config).unwrap(),
+            );
+            assert!(
+                matches!(
+                    Serving::from_owner_file(&setup.provider.config_file).await,
+                    Err(StartupError::Configuration(_))
+                ),
+                "{key}={invalid} startup"
+            );
+            assert!(
+                matches!(run_cutover(), Err(StartupError::Configuration(_))),
+                "{key}={invalid} cutover"
+            );
+        }
+    }
+    assert!(store.selected_cutover_grant().unwrap().is_none());
+    let mut no_events = setup.provider.config.clone();
+    no_events.as_object_mut().unwrap().remove("events");
+    fixture::private_file(
+        &setup.provider.config_file,
+        &serde_json::to_vec(&no_events).unwrap(),
+    );
+    assert!(matches!(run_cutover(), Err(StartupError::Configuration(_))));
+    fixture::private_file(
+        &setup.provider.config_file,
+        &serde_json::to_vec(&setup.provider.config).unwrap(),
+    );
+    assert_eq!(
+        run_cutover().unwrap(),
+        crate::authorization_server::Cutover::Complete
+    );
+}

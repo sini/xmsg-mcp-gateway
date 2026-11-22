@@ -12,6 +12,7 @@ use std::sync::Arc;
 pub use clock::{Clock, SystemClock};
 pub use liveness::{Liveness, Outcome};
 pub use store::Cutover;
+pub(crate) use store::{validate_events_authority, CutoverRequest};
 pub const SCHEMA_VERSION: i64 = 5;
 
 #[derive(Debug, thiserror::Error)]

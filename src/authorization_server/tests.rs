@@ -401,7 +401,17 @@ fn cutover_busy_unread_observed_and_abandon_guard() {
     let lease = store.try_operation_lease("gateway").unwrap().unwrap();
     assert_eq!(
         store
-            .cutover_events("old", "local", "owner", "move", false, setup.clock.wall())
+            .cutover_events(crate::authorization_server::CutoverRequest {
+                from: "old",
+                to: "local",
+                operator: "owner",
+                reason: "move",
+                abandon: false,
+                at: setup.clock.wall(),
+                selected: "old",
+                binding: &other,
+                limits: &crate::custody::Limits::default()
+            })
             .unwrap(),
         Cutover::Busy
     );
@@ -409,13 +419,33 @@ fn cutover_busy_unread_observed_and_abandon_guard() {
     setup.db().execute("INSERT INTO custody_items(bus,upstream_id,event_id,grant_id,grant_revision,mailbox,owner,origin,text,envelope,fingerprint,received_at,expires_at,held) VALUES('bus','one','one','old',1,'gateway@bus','owner','{}','text','{}','hash',0,9999999999,1)",[]).unwrap();
     assert_eq!(
         store
-            .cutover_events("old", "local", "owner", "move", false, setup.clock.wall())
+            .cutover_events(crate::authorization_server::CutoverRequest {
+                from: "old",
+                to: "local",
+                operator: "owner",
+                reason: "move",
+                abandon: false,
+                at: setup.clock.wall(),
+                selected: "old",
+                binding: &other,
+                limits: &crate::custody::Limits::default()
+            })
             .unwrap(),
         Cutover::Unread { from: 1, to: 0 }
     );
     assert_eq!(
         store
-            .cutover_events("old", "local", "owner", "move", true, setup.clock.wall())
+            .cutover_events(crate::authorization_server::CutoverRequest {
+                from: "old",
+                to: "local",
+                operator: "owner",
+                reason: "move",
+                abandon: true,
+                at: setup.clock.wall(),
+                selected: "old",
+                binding: &other,
+                limits: &crate::custody::Limits::default()
+            })
             .unwrap(),
         Cutover::Complete
     );
@@ -440,14 +470,17 @@ fn cutover_busy_unread_observed_and_abandon_guard() {
         .unwrap();
     assert_eq!(
         store
-            .cutover_events(
-                "local",
-                "old",
-                "owner",
-                "rollback",
-                false,
-                setup.clock.wall()
-            )
+            .cutover_events(crate::authorization_server::CutoverRequest {
+                from: "local",
+                to: "old",
+                operator: "owner",
+                reason: "rollback",
+                abandon: false,
+                at: setup.clock.wall(),
+                selected: "local",
+                binding: &setup.server.binding,
+                limits: &crate::custody::Limits::default()
+            })
             .unwrap(),
         Cutover::Complete
     );
@@ -3932,10 +3965,12 @@ async fn cutover_acceptance_defers_old_scope_without_ack_then_accepts_same_deliv
     .await
     .unwrap()
     .unwrap();
-    assert!(matches!(
-        accepted,
-        crate::custody::Acceptance::Stored { .. }
-    ));
+    let crate::custody::Acceptance::Stored {
+        event_id: retired_event,
+    } = accepted
+    else {
+        panic!("expected stored custody, got {accepted:?}");
+    };
     assert_eq!(bus.acked.load(Ordering::SeqCst), 1);
     setup
         .db()
@@ -3946,20 +3981,38 @@ async fn cutover_acceptance_defers_old_scope_without_ack_then_accepts_same_deliv
         .unwrap();
     assert_eq!(
         store
-            .cutover_events(
-                "old",
-                "local",
-                "owner",
-                "cutover",
-                false,
-                setup.clock.wall()
-            )
+            .cutover_events(crate::authorization_server::CutoverRequest {
+                from: "old",
+                to: "local",
+                operator: "owner",
+                reason: "cutover",
+                abandon: false,
+                at: setup.clock.wall(),
+                selected: "old",
+                binding: &binding,
+                limits: &crate::custody::Limits::default()
+            })
             .unwrap(),
         Cutover::Complete
     );
     assert!(store.validate_cutover_selection(Some("old")).is_err());
     assert!(store.validate_cutover_selection(None).is_err());
     store.validate_cutover_selection(Some("local")).unwrap();
+    let db = setup.db();
+    db.execute(
+        "WITH RECURSIVE seq(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM seq WHERE i<999)
+         INSERT INTO custody_items(bus, upstream_id, event_id, grant_id, grant_revision,
+            mailbox, owner, origin, text, envelope, fingerprint, received_at, expires_at, held)
+         SELECT 'bus','seed-'||i,'seed-'||i,CASE WHEN i<=643 THEN 'old' ELSE 'local' END,
+            1,'gateway@bus','owner','{}',CASE WHEN i>468 THEN 'seed' END,
+            CASE WHEN i>468 THEN '{}' END,'seed-hash',0,9999999999,1 FROM seq",
+        [],
+    )
+    .unwrap();
+    let limits = crate::custody::Limits {
+        max_retired_items: 640,
+        ..crate::custody::Limits::default()
+    };
     bus.pending
         .lock()
         .unwrap()
@@ -3991,12 +4044,12 @@ async fn cutover_acceptance_defers_old_scope_without_ack_then_accepts_same_deliv
         setup
             .db()
             .query_row(
-                "SELECT COUNT(*) FROM custody_items WHERE grant_id='old'",
+                "SELECT COUNT(*) FROM custody_items WHERE upstream_id='new-after-marker'",
                 [],
                 |r| r.get::<_, i64>(0)
             )
             .unwrap(),
-        1,
+        0,
         "old scope stored a post-cutover item"
     );
     assert!(matches!(
@@ -4004,7 +4057,7 @@ async fn cutover_acceptance_defers_old_scope_without_ack_then_accepts_same_deliv
             &mut store,
             &mut bus.registered,
             &scope("local"),
-            &crate::custody::Limits::default(),
+            &limits,
             at
         )
         .await
@@ -4013,6 +4066,98 @@ async fn cutover_acceptance_defers_old_scope_without_ack_then_accepts_same_deliv
     ));
     assert_eq!(bus.acked.load(Ordering::SeqCst), 2);
     assert!(bus.pending.lock().unwrap().is_empty());
+    let capacity = crate::custody::capacity(&db, &limits, false).unwrap();
+    assert_eq!(
+        (capacity.rows, capacity.active_rows, capacity.retired_rows),
+        (1001, 357, 644)
+    );
+    let active_event: String = db
+        .query_row(
+            "SELECT event_id FROM custody_items WHERE upstream_id='new-after-marker'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let limits = crate::custody::Limits {
+        max_items: 357,
+        max_retired_items: 644,
+        max_metadata: 1,
+        ..limits
+    };
+    for (id, event_id) in [
+        ("old-positive", retired_event),
+        ("new-after-marker", active_event),
+    ] {
+        bus.pending.lock().unwrap().push_back(delivery(id));
+        assert_eq!(
+            crate::custody::receive_one(
+                &mut store,
+                &mut bus.registered,
+                &scope("local"),
+                &limits,
+                at
+            )
+            .await
+            .unwrap(),
+            Some(crate::custody::Acceptance::Duplicate { event_id })
+        );
+    }
+    let refusals: i64 = db
+        .query_row("SELECT COUNT(*) FROM custody_refusal_summaries", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(refusals, 0);
+    assert_eq!(bus.acked.load(Ordering::SeqCst), 4);
+    db.execute("INSERT INTO custody_pending(bus, upstream_id, first_seen, expires_at) VALUES('bus','unaccepted',0,9999999999)", []).unwrap();
+    bus.pending
+        .lock()
+        .unwrap()
+        .push_back(delivery("old-positive"));
+    assert!(matches!(
+        crate::custody::receive_one(
+            &mut store,
+            &mut bus.registered,
+            &scope("local"),
+            &limits,
+            at
+        )
+        .await,
+        Err(crate::custody::Error::MetadataFull)
+    ));
+    assert_eq!(bus.acked.load(Ordering::SeqCst), 4);
+    db.execute("DELETE FROM custody_pending", []).unwrap();
+    bus.pending.lock().unwrap().pop_front().unwrap();
+    let active_bytes: i64 = db.query_row(
+        "SELECT SUM(length(text)+length(envelope)+length(origin)+COALESCE(length(in_reply_to),0))
+         FROM custody_items WHERE grant_id='local'",
+        [], |r| r.get(0),
+    ).unwrap();
+    let limits = crate::custody::Limits {
+        max_items: 358,
+        max_bytes: active_bytes + 256,
+        ..limits
+    };
+    bus.pending
+        .lock()
+        .unwrap()
+        .push_back(delivery("byte-pressure"));
+    assert!(matches!(
+        crate::custody::receive_one(
+            &mut store,
+            &mut bus.registered,
+            &scope("local"),
+            &limits,
+            at
+        )
+        .await
+        .unwrap(),
+        Some(crate::custody::Acceptance::Deferred {
+            reason: crate::custody::DeferredReason::ByteLimit,
+            ..
+        })
+    ));
+    assert_eq!(bus.acked.load(Ordering::SeqCst), 4);
     bus.close().await;
 }
 #[test]
@@ -5831,4 +5976,108 @@ async fn local_as_attachment_union_rechecks_custody_after_bus_read() {
     for scenario in ["post-disable", "post-revision"] {
         local_as_attachment_union_case(scenario).await;
     }
+}
+
+#[test]
+fn custody_cutover_checks_both_buckets_and_rolls_back_expiry_and_audit() {
+    use crate::authorization_server::CutoverRequest;
+    use crate::custody::Limits;
+
+    let setup = Setup::new();
+    let mut store = setup.server.store().unwrap();
+    let mut old = setup.server.binding.clone();
+    old.issuer = "https://old.example".into();
+    store.enroll("old", &old).unwrap();
+    let db = setup.db();
+    let at = setup.clock.wall();
+    for (id, grant, expiry) in [
+        ("live-1", "old", at + 100),
+        ("live-2", "old", at + 100),
+        ("live-3", "old", at + 100),
+        ("other", "local", at + 100),
+        ("expired", "old", at - 1),
+    ] {
+        db.execute("INSERT INTO custody_items(bus,upstream_id,event_id,grant_id,grant_revision,mailbox,owner,origin,text,envelope,fingerprint,received_at,expires_at,held)
+            VALUES('bus',?1,?1,?2,1,'gateway@bus','owner','{}','text','{}',?1,0,?3,1)", rusqlite::params![id, grant, expiry]).unwrap();
+    }
+    let mut limits = Limits {
+        max_items: 5,
+        max_retired_items: 3,
+        ..Limits::default()
+    };
+    let before = crate::custody::capacity(&db, &limits, false).unwrap();
+    assert_eq!((before.active_rows, before.retired_rows), (5, 0));
+    let run = |store: &mut Store, from, to, selected, binding, limits: &Limits| {
+        store.cutover_events(CutoverRequest {
+            from,
+            to,
+            selected,
+            binding,
+            limits,
+            at,
+            operator: "owner",
+            reason: "fixture",
+            abandon: true,
+        })
+    };
+    let check_snapshot = || {
+        db.query_row(
+            "SELECT (SELECT COUNT(*) FROM events_cutover),
+                    (SELECT COUNT(*) FROM event_release_audit),
+                    (SELECT text IS NOT NULL FROM custody_items WHERE event_id='expired')",
+            [],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, bool>(2)?,
+                ))
+            },
+        )
+        .unwrap()
+    };
+    assert!(run(&mut store, "old", "local", "local", &old, &limits).is_err());
+    limits.max_retired_items = 2;
+    assert_eq!(
+        run(&mut store, "old", "local", "old", &old, &limits).unwrap(),
+        Cutover::Capacity
+    );
+    assert_eq!(check_snapshot(), (0, 0, true));
+
+    limits.max_retired_items = 4;
+    assert_eq!(
+        run(&mut store, "old", "local", "old", &old, &limits).unwrap(),
+        Cutover::Complete
+    );
+    assert_eq!(check_snapshot(), (1, 4, false));
+
+    assert!(run(&mut store, "old", "local", "old", &old, &limits).is_err());
+    limits.max_items = 3;
+    limits.max_retired_items = 1;
+    let current = &setup.server.binding;
+    assert_eq!(
+        run(&mut store, "local", "old", "local", current, &limits).unwrap(),
+        Cutover::Capacity
+    );
+    assert_eq!(check_snapshot(), (1, 4, false));
+    limits.max_items = 4;
+    limits.max_bytes = 1;
+    assert_eq!(
+        run(&mut store, "local", "old", "local", current, &limits).unwrap(),
+        Cutover::Complete
+    );
+    assert_eq!(check_snapshot(), (2, 8, false));
+    let capacity = crate::custody::capacity(&db, &limits, false).unwrap();
+    assert_eq!((capacity.active_rows, capacity.retired_rows), (4, 1));
+    assert!(capacity.bytes > limits.max_bytes);
+    let mut unrelated = old.clone();
+    unrelated.hosted_client = "never-selected".into();
+    store.enroll("unrelated", &unrelated).unwrap();
+    db.execute(
+        "UPDATE custody_items SET grant_id='unrelated' WHERE event_id='other'",
+        [],
+    )
+    .unwrap();
+    let capacity = crate::custody::capacity(&db, &limits, false).unwrap();
+    assert_eq!((capacity.active_rows, capacity.retired_rows), (5, 0));
 }

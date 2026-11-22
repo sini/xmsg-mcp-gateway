@@ -99,6 +99,8 @@ pub(crate) fn warn_custody_deferred(
     tracing::warn!(target: "gateway_custody", reason = reason.label(),
         rows = capacity.rows, bytes = capacity.bytes,
         max_items = capacity.max_items, max_bytes = capacity.max_bytes,
+        active_rows = capacity.active_rows, retired_rows = capacity.retired_rows,
+        max_retired_items = capacity.max_retired_items,
         "custody intake deferred");
 }
 

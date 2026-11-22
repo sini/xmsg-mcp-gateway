@@ -130,17 +130,25 @@ The optional `events.custody_limits` defaults to:
 }
 ```
 
-If supplied, all seven positive fields are required. Ingestion and session health
-use this same configuration.
+The seven existing fields remain required when supplying `custody_limits`.
+All limits must be positive. The planned `max_retired_items` field defaults
+to 1,000 even when the object is supplied. Add it to a config only after
+upgrading to a version that understands it.
 
-The planned `xmsg_identity.events_status.custody_capacity` reports store-wide
-`rows`, charged `bytes`, `max_items`, and `max_bytes` for the selected Events
-grant's authenticated caller. A retained tombstone counts as a row. Detached
-attachments contribute their stored reference metadata. `cutover_matches`
-reports whether the running Events grant matches the latest marker, or true if
-there is no marker. The status read shows stored totals without running expiry.
-Intake reports a WARN with aggregate counters and a reason when it defers for the
-row cap, byte cap, or cutover mismatch. The upstream delivery stays unacknowledged.
+With planned retired custody accounting, `max_items` bounds active rows.
+`max_retired_items` bounds rows retired by committed cutovers. Tombstones
+count in either bucket. Both buckets use the same `max_bytes` limit,
+including stored attachment reference metadata.
+
+The authorized `xmsg_identity.events_status.custody_capacity` reports
+store-wide `rows` and `bytes`, `active_rows` against `max_items`,
+`retired_rows` against `max_retired_items`, and `max_bytes`. Use
+`active_rows / max_items` for admission pressure. Usage above a limit
+shows an overage. Status reports stored totals without running expiry.
+`cutover_matches` reports the committed selection check. A stale
+configured grant cannot read Events status after cutover.
+Each intake deferral logs a WARN with both counts, their limits, the
+global byte usage and the reason. The upstream delivery remains unacknowledged.
 
 Relative state, credential, root-certificate and
 Events-key paths resolve against the owner configuration's directory. For example,

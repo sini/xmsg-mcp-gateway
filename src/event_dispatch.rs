@@ -513,22 +513,59 @@ mod tests {
         let mut store = Store::open(&setup.provider.store_file).unwrap();
         store.migrate_profiles().unwrap();
         store.migrate_authorization_server().unwrap();
+        let mut next = setup.provider.binding.clone();
+        next.hosted_client = "new-client".into();
+        store.enroll("new-grant", &next).unwrap();
         let db = setup.db();
-        db.execute(
-            "INSERT INTO events_cutover(from_grant,to_grant,at,operator,reason,abandoned)
-                    VALUES ('grant','new-grant',1,'fixture','fixture',1)",
-            [],
-        )
-        .unwrap();
+        let limits = crate::custody::Limits::default();
+        let at = crate::webhook::signing_time().unwrap();
+        let cutover = |store: &mut Store, from, to, binding| {
+            store
+                .cutover_events(crate::authorization_server::CutoverRequest {
+                    from,
+                    to,
+                    selected: from,
+                    binding,
+                    limits: &limits,
+                    at,
+                    operator: "fixture",
+                    reason: "fixture",
+                    abandon: true,
+                })
+                .unwrap()
+        };
+        assert_eq!(
+            cutover(&mut store, "grant", "new-grant", &setup.provider.binding),
+            crate::authorization_server::Cutover::Complete
+        );
         assert_eq!(
             tick(&setup.runtime(), "bus", "dot@bus").await.unwrap(),
             Tick::Idle
         );
         assert!(setup.callback.events.lock().unwrap().is_empty());
-        db.execute("DELETE FROM events_cutover", []).unwrap();
+        assert_eq!(
+            cutover(&mut store, "new-grant", "grant", &next),
+            crate::authorization_server::Cutover::Complete
+        );
+        assert_eq!(db.query_row(
+            "SELECT (SELECT COUNT(*) FROM custody_outbox), (SELECT COUNT(*) FROM event_observations),
+                    (SELECT COUNT(*) FROM event_release_audit WHERE reason='cutover-abandon')",
+            [], |r| Ok((r.get::<_,i64>(0)?, r.get::<_,i64>(1)?, r.get::<_,i64>(2)?))
+        ).unwrap(), (1, 0, 2));
+        setup.subscribe().await;
         assert_eq!(
             tick(&setup.runtime(), "bus", "dot@bus").await.unwrap(),
             Tick::Accepted
+        );
+        assert_eq!(
+            tick(&setup.runtime(), "bus", "dot@bus").await.unwrap(),
+            Tick::Idle
+        );
+        let delivered = setup.callback.events.lock().unwrap();
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&delivered[0].1).unwrap()["eventId"],
+            "old-event"
         );
     }
 

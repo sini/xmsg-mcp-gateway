@@ -18,6 +18,8 @@ pub struct Scope {
 #[serde(deny_unknown_fields)]
 pub struct Limits {
     pub max_items: i64,
+    #[serde(default = "default_max_retired_items")]
+    pub max_retired_items: i64,
     pub max_bytes: i64,
     pub max_item_bytes: i64,
     pub content_retention_secs: i64,
@@ -25,6 +27,10 @@ pub struct Limits {
     pub metadata_retention_secs: i64,
     pub max_gap_intervals: i64,
 }
+fn default_max_retired_items() -> i64 {
+    1000
+}
+
 struct Windows {
     observed: i64,
     content_expires: i64,
@@ -35,6 +41,7 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             max_items: 1000,
+            max_retired_items: default_max_retired_items(),
             max_bytes: 64 * 1024 * 1024,
             max_item_bytes: 256 * 1024,
             content_retention_secs: 604800,
@@ -52,6 +59,7 @@ impl Limits {
     fn windows(&self, at: SystemTime) -> Result<Windows, Error> {
         if [
             self.max_items,
+            self.max_retired_items,
             self.max_bytes,
             self.max_item_bytes,
             self.content_retention_secs,
@@ -143,6 +151,9 @@ impl DeferredReason {
 #[derive(Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Capacity {
     pub rows: i64,
+    pub active_rows: i64,
+    pub retired_rows: i64,
+    pub max_retired_items: i64,
     pub bytes: i64,
     pub max_items: i64,
     pub max_bytes: i64,
@@ -153,18 +164,38 @@ pub(crate) fn capacity(
     limits: &Limits,
     attachments_ready: bool,
 ) -> rusqlite::Result<Capacity> {
+    capacity_after_cutover(conn, limits, attachments_ready, None)
+}
+
+pub(crate) fn capacity_after_cutover(
+    conn: &Connection,
+    limits: &Limits,
+    attachments_ready: bool,
+    transition: Option<(&str, &str)>,
+) -> rusqlite::Result<Capacity> {
+    let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let retired = if version >= crate::authorization_server::SCHEMA_VERSION {
+        "grant_id <> COALESCE(?2, (SELECT to_grant FROM events_cutover ORDER BY seq DESC LIMIT 1))
+         AND (grant_id = ?1 OR grant_id IN (SELECT from_grant FROM events_cutover))"
+    } else {
+        "?1 IS NOT NULL AND ?2 IS NOT NULL AND 0"
+    };
+    let (from, to) = transition.unzip();
     let stored_refs = if attachments_ready {
         "+CASE WHEN attachments='[]' THEN 0 ELSE length(CAST(attachments AS BLOB)) END"
     } else {
         ""
     };
-    let (rows, bytes) = conn.query_row(
-        &format!("SELECT COUNT(*),COALESCE(SUM(length(CAST(text AS BLOB))+length(CAST(envelope AS BLOB))+length(CAST(origin AS BLOB))+COALESCE(length(CAST(in_reply_to AS BLOB)),0){stored_refs}),0) FROM custody_items"),
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+    let (rows, bytes, retired_rows) = conn.query_row(
+        &format!("SELECT COUNT(*),COALESCE(SUM(length(CAST(text AS BLOB))+length(CAST(envelope AS BLOB))+length(CAST(origin AS BLOB))+COALESCE(length(CAST(in_reply_to AS BLOB)),0){stored_refs}),0),COUNT(*) FILTER (WHERE {retired}) FROM custody_items"),
+        params![from, to],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
     Ok(Capacity {
         rows,
+        active_rows: rows - retired_rows,
+        retired_rows,
+        max_retired_items: limits.max_retired_items,
         bytes,
         max_items: limits.max_items,
         max_bytes: limits.max_bytes,
@@ -329,7 +360,11 @@ fn ensure_link(tx: &rusqlite::Transaction<'_>, bus: &str, limits: &Limits) -> Re
     Ok(())
 }
 
-fn expire(tx: &rusqlite::Transaction<'_>, limits: &Limits, now: i64) -> Result<(), Error> {
+pub(crate) fn expire(
+    tx: &rusqlite::Transaction<'_>,
+    limits: &Limits,
+    now: i64,
+) -> Result<(), Error> {
     let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if version >= crate::grants::EVENTS_SCHEMA_VERSION {
         crate::event_store::record_expiry(tx, now)?;
@@ -709,7 +744,7 @@ impl Store {
         let capacity = capacity(&tx, limits, attachments_ready)?;
         let oversized =
             size as u128 > limits.max_item_bytes as u128 || size as u128 > limits.max_bytes as u128;
-        let reason = if capacity.rows >= limits.max_items {
+        let reason = if capacity.active_rows >= limits.max_items {
             Some(DeferredReason::RowLimit)
         } else if size as u128 + capacity.bytes as u128 > limits.max_bytes as u128 {
             Some(DeferredReason::ByteLimit)
