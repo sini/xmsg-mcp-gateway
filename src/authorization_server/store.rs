@@ -643,6 +643,15 @@ pub(crate) fn validate_events_authority(
     Ok(())
 }
 
+#[cfg(test)]
+type CutoverProbe = Box<dyn FnOnce()>;
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static BEFORE_CUTOVER_LEASE: std::cell::Cell<Option<CutoverProbe>> =
+        const { std::cell::Cell::new(None) };
+}
+
 impl Store {
     pub(crate) fn cutover_events(&mut self, request: CutoverRequest<'_>) -> Result<Cutover, Error> {
         let CutoverRequest {
@@ -665,6 +674,12 @@ impl Store {
         {
             return Err(Error::Configuration);
         }
+        #[cfg(test)]
+        BEFORE_CUTOVER_LEASE.with(|slot| {
+            if let Some(probe) = slot.take() {
+                probe();
+            }
+        });
         let Some(_lease) = self
             .try_operation_lease(&binding.service)
             .map_err(|_| Error::Unavailable)?

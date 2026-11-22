@@ -6081,3 +6081,44 @@ fn custody_cutover_checks_both_buckets_and_rolls_back_expiry_and_audit() {
     let capacity = crate::custody::capacity(&db, &limits, false).unwrap();
     assert_eq!((capacity.active_rows, capacity.retired_rows), (5, 0));
 }
+
+#[test]
+fn cutover_reads_destination_binding_after_acquiring_lease() {
+    let setup = Setup::new();
+    let mut store = setup.server.store().unwrap();
+    let binding = &setup.server.binding;
+    let mut next = binding.clone();
+    next.hosted_client = "replacement".into();
+    store.enroll("next", &next).unwrap();
+    let db = setup.db();
+    let run = |store: &mut Store| {
+        store.cutover_events(crate::authorization_server::CutoverRequest {
+            from: "local",
+            to: "next",
+            selected: "local",
+            binding,
+            limits: &crate::custody::Limits::default(),
+            at: setup.clock.wall(),
+            operator: "owner",
+            reason: "fixture",
+            abandon: false,
+        })
+    };
+    let file = setup.server.file.clone();
+    super::store::BEFORE_CUTOVER_LEASE.with(|slot| {
+        slot.set(Some(Box::new(move || {
+            rusqlite::Connection::open(file)
+                .unwrap()
+                .execute(
+                    "UPDATE grants SET subject='different-owner' WHERE id='next'",
+                    [],
+                )
+                .unwrap();
+        })));
+    });
+    assert!(matches!(run(&mut store), Err(Error::Configuration)));
+    assert!(store.selected_cutover_grant().unwrap().is_none());
+    db.execute("UPDATE grants SET subject='owner' WHERE id='next'", [])
+        .unwrap();
+    assert_eq!(run(&mut store).unwrap(), Cutover::Complete);
+}

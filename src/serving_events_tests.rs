@@ -665,7 +665,8 @@ async fn production_custody_limits_start_with_retired_default_and_second_profile
         rpc("tools/call", json!({"name":"xmsg_identity","arguments":{}})),
     )
     .await;
-    assert!(status["result"]["structuredContent"]["events_status"]["custody_capacity"].is_null());
+    assert_eq!(status["error"]["code"], -32004);
+    assert!(status.get("result").is_none());
 }
 
 #[tokio::test]
