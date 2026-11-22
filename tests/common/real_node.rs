@@ -1,7 +1,7 @@
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -23,9 +23,33 @@ pub struct Node {
 
 impl Drop for Node {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.dump_failure();
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+fn daemon_log(directory: &Path, name: &str) -> Stdio {
+    Stdio::from(
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(directory.join(name))
+            .unwrap(),
+    )
+}
+
+fn log_tail(file: &Path) -> std::io::Result<String> {
+    const MAX_BYTES: u64 = 8192;
+    let mut input = fs::File::open(file)?;
+    let size = input.metadata()?.len();
+    input.seek(SeekFrom::Start(size.saturating_sub(MAX_BYTES)))?;
+    let mut bytes = Vec::new();
+    input.take(MAX_BYTES).read_to_end(&mut bytes)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn private_file(file: &Path, body: &[u8]) {
@@ -316,15 +340,8 @@ fn command(
         .arg(directory.join("node.pem"))
         .arg("--fed-key")
         .arg(directory.join("node-key.pem"))
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .mode(0o600)
-                .open(directory.join("daemon.log"))
-                .unwrap(),
-        ));
+        .stdout(daemon_log(directory, "daemon.stdout.log"))
+        .stderr(daemon_log(directory, "daemon.log"));
     if notify {
         command.env("NOTIFY_SOCKET", run.join("notify.sock"));
     }
@@ -350,6 +367,57 @@ fn command(
 }
 
 impl Node {
+    fn dump_failure(&mut self) {
+        let mut output = std::io::stderr().lock();
+        let state = self.child.try_wait();
+        let endpoint = self
+            .listener
+            .as_ref()
+            .map(std::net::TcpListener::local_addr);
+        let _ = writeln!(
+            output,
+            "fixture daemon failure: pid={} child={state:?} expected_node={} service={} activation_listener={endpoint:?}",
+            self.child.id(),
+            self.config.expected_node,
+            self.config.service,
+        );
+        let http = self._temp.path().join("run/http.sock");
+        let notify = self._temp.path().join("run/notify.sock");
+        for (label, socket) in [
+            ("agent", self.config.agent_socket.as_path()),
+            ("register", self.config.register_socket.as_path()),
+            ("http", http.as_path()),
+            ("notify", notify.as_path()),
+        ] {
+            match fs::symlink_metadata(socket) {
+                Ok(metadata) => {
+                    let _ = writeln!(
+                        output,
+                        "  {label} {}: socket={} mode={:o} uid={} inode={}",
+                        socket.display(),
+                        metadata.file_type().is_socket(),
+                        metadata.permissions().mode() & 0o7777,
+                        metadata.uid(),
+                        metadata.ino(),
+                    );
+                }
+                Err(error) => {
+                    let _ = writeln!(output, "  {label} {}: {error}", socket.display());
+                }
+            }
+        }
+        for (label, name) in [("stdout", "daemon.stdout.log"), ("stderr", "daemon.log")] {
+            match log_tail(&self._temp.path().join(name)) {
+                Ok(tail) => {
+                    let _ = writeln!(output, "  {label} tail (up to 8192 bytes):\n{tail}");
+                }
+                Err(error) => {
+                    let _ = writeln!(output, "  {label} tail unavailable: {error}");
+                }
+            }
+        }
+    }
+
     #[allow(dead_code)]
     pub fn diagnostics(&self) -> String {
         std::fs::read_to_string(self._temp.path().join("daemon.log")).unwrap_or_default()
