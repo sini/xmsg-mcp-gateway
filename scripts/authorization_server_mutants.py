@@ -310,7 +310,7 @@ CASES += [
         "cutover-acceptance",
         "cutover_acceptance_defers_old_scope_without_ack_then_accepts_same_delivery_on_new_scope",
         Edit(
-            "src/custody.rs", "selected.is_some_and(|id| id != scope.grant_id)", "false"
+            "src/custody.rs", "!cutover_matches(&tx, &scope.grant_id)?", "false"
         ),
     ),
     case(

@@ -1629,7 +1629,7 @@
         "^g5-events RED 120-union\\-attachment\\-post\\-revision-red:",
         "^g5-events GREEN 120-union\\-attachment\\-post\\-revision-restored$"
       ],
-      "script_sha256": "e5a2a56d7524d3d95e51c0ff3b923367ce1a3936531497761a6b5ed091f36823"
+      "script_sha256": "7a3701abd791c8f616c184deec6d6bfa7fc2133a9ec77739a873e9f85ee7bf46"
     },
     {
       "id": "store_recovery",
