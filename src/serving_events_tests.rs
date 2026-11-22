@@ -636,6 +636,11 @@ async fn production_custody_limits_start_with_retired_default_and_second_profile
         &setup.provider.config_file,
         &serde_json::to_vec(&setup.provider.config).unwrap(),
     );
+    drop(
+        Serving::from_owner_file(&setup.provider.config_file)
+            .await
+            .unwrap(),
+    );
     store.connection.execute("INSERT INTO custody_items(bus,upstream_id,event_id,grant_id,grant_revision,mailbox,owner,origin,fingerprint,received_at,expires_at,held) VALUES('bus','first','first','grant',1,'gateway@bus','owner','{}','first-hash',0,9999999999,1)", []).unwrap();
     store.enroll("retired", &setup.provider.binding).unwrap();
     store.connection.execute_batch(
@@ -675,6 +680,59 @@ async fn production_custody_limits_start_with_retired_default_and_second_profile
     .await;
     assert_eq!(status["error"]["code"], -32004);
     assert!(status.get("result").is_none());
+    db.execute("DELETE FROM custody_items WHERE grant_id='other'", [])
+        .unwrap();
+
+    db.execute(
+        "UPDATE custody_items SET grant_id='missing' WHERE event_id='first'",
+        [],
+    )
+    .unwrap();
+    assert!(matches!(
+        Serving::from_owner_file(&setup.provider.config_file).await,
+        Err(StartupError::Configuration(_))
+    ));
+    db.execute(
+        "UPDATE custody_items SET grant_id='grant' WHERE event_id='first'",
+        [],
+    )
+    .unwrap();
+    db.execute("UPDATE events_cutover SET from_grant='missing'", [])
+        .unwrap();
+    assert!(matches!(
+        Serving::from_owner_file(&setup.provider.config_file).await,
+        Err(StartupError::Configuration(_))
+    ));
+    db.execute("UPDATE events_cutover SET from_grant='retired'", [])
+        .unwrap();
+
+    use base64::Engine as _;
+    store.set_enabled("other", 1, true).unwrap();
+    let mut claims = setup.provider.tokens.lock().unwrap()["good-token"].clone();
+    claims["iss"] = json!(credential.issuer);
+    claims["sub"] = json!(credential.subject);
+    claims["client_id"] = json!(credential.hosted_client);
+    let token = format!(
+        "e30.{}.signature",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string())
+    );
+    setup
+        .provider
+        .tokens
+        .lock()
+        .unwrap()
+        .insert(token.clone(), claims);
+    let events = serving.state.events.as_ref().unwrap();
+    let other_identity = events.verifier.verify(&token).await.unwrap();
+    assert!(matches!(
+        events.health(
+            &other_identity,
+            "bus",
+            "gateway@bus",
+            &custody::Limits::default()
+        ),
+        Err(events::Error::Authority(GrantError::Denied))
+    ));
 }
 
 #[tokio::test]
