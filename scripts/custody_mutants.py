@@ -67,8 +67,8 @@ CASES = [
 CASES += [
     (
         "transient-ack",
-        "Self::Deferred => false,",
-        "Self::Deferred => true,",
+        "Self::Deferred { .. } => false,",
+        "Self::Deferred { .. } => true,",
         "transient_capacity_and_failed_refusal_persistence_keep_redelivery",
         "transient capacity refusal ACKed upstream",
     ),
@@ -192,7 +192,7 @@ CASES += [
 CASES += [
     (
         "transient-refusal-row",
-        "if !conflict && refused && !oversized {",
+        "if !conflict && !oversized {",
         "if false {",
         "transient_capacity_and_failed_refusal_persistence_keep_redelivery",
         "transient deferral became a refusal",

@@ -753,7 +753,7 @@
         "^floor\\-content: GREEN baseline / RED intended$",
         "^floor\\-tombstone\\-anchor: GREEN baseline / RED intended$"
       ],
-      "script_sha256": "e23190b8bf12c86766c4db63b6760833c84cf3cf7248f1623cffce2a1e2b8b8e"
+      "script_sha256": "203e8d13476fad62effdc85aeffa3d5cd04e5c16b0a0532fe8e51dc0fa890efb"
     },
     {
       "id": "outbound",

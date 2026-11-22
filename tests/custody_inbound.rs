@@ -959,21 +959,24 @@ async fn transient_capacity_and_failed_refusal_persistence_keep_redelivery() {
         )
         .await
         .unwrap();
-    assert!(matches!(
-        xmsg_mcp_gateway::custody::receive_one(
-            &mut store,
-            &mut service,
-            &scope,
-            &limits,
-            custody_time::at(101)
-        )
-        .await
-        .unwrap(),
-        Some(Acceptance::Deferred {
-            reason: DeferredReason::RowLimit,
-            ..
-        })
-    ));
+    assert!(
+        matches!(
+            xmsg_mcp_gateway::custody::receive_one(
+                &mut store,
+                &mut service,
+                &scope,
+                &limits,
+                custody_time::at(101)
+            )
+            .await
+            .unwrap(),
+            Some(Acceptance::Deferred {
+                reason: DeferredReason::RowLimit,
+                ..
+            })
+        ),
+        "transient deferral became a refusal"
+    );
     drop(service);
     node.restart(&binary).await;
     let mut service = node.config.register().await.unwrap();
