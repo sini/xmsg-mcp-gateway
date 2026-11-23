@@ -173,10 +173,26 @@ class MutationGatesTests(unittest.TestCase):
         )
 
     def test_complete_inventory_and_execution_modes(self):
-        self.assertEqual(len(self.suites), 23)
-        self.assertEqual(sum(s["count"] for s in self.suites), 444)
+        self.assertEqual(len(self.suites), 24)
+        self.assertEqual(sum(s["count"] for s in self.suites), 473)
         modes = {(s["script"], tuple(s["args"])) for s in self.suites}
         self.assertIn(("scripts/reservation_lifetime_mutants.py", ("--live",)), modes)
+
+    def test_migration_recovery_requires_all_pairs_and_completion(self):
+        suite = next(s for s in self.suites if s["id"] == "migration_recovery")
+        self.assertEqual(suite["count"], 29)
+        lines = [
+            f"{label}-{phase}: exit={status} nonce={'a' * 32}"
+            for label in suite["labels"]
+            for phase, status in [("red", 101), ("green", 0)]
+        ] + [suite["completion"]]
+        output = "\n".join(lines) + "\n"
+        gates.validate_output(suite, output)
+        for line in lines:
+            with self.subTest(missing=line), self.assertRaises(ValueError):
+                gates.validate_output(suite, output.replace(line + "\n", ""))
+        for filename in suite["dependencies"]:
+            self.assertIn("migration_recovery", gates.select(self.suites, [filename]))
 
     def test_store_recovery_requires_all_eight_named_results_and_completion(self):
         suite = next(s for s in self.suites if s["id"] == "store_recovery")
@@ -308,7 +324,7 @@ class MutationGatesTests(unittest.TestCase):
         self.assertIn("dispatch_logging", gates.select(self.suites, ["src/serving.rs"]))
         self.assertIn("broker", gates.select(self.suites, ["tests/broker_bridge.rs"]))
         self.assertEqual(
-            len(gates.select(self.suites, ["tests/common/provider.rs"])), 23
+            len(gates.select(self.suites, ["tests/common/provider.rs"])), 24
         )
         self.assertEqual(gates.select(self.suites, ["phase1/worker.py"]), ["python"])
 

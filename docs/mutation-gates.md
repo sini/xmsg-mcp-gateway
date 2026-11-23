@@ -5,19 +5,22 @@ Clippy, Python reference tests, timeout diagnostics, real-daemon transport profi
 and the packaged broker integration. Rust completion counts live in
 `ci/ordinary-counts.json`; updating that census alone does not select mutation suites.
 
-`ci/mutation-suites.json` registers each whole execution suite: 22 Rust executions
-with 431 named mutants, plus the Python reference suite with 13. Reservation units
+`ci/mutation-suites.json` registers each whole execution suite: 23 Rust executions
+with 460 named mutants, plus the Python reference suite with 13. Reservation units
 and live acceptance are separate modes. Each matrix job runs its unchanged script,
 including that script's baselines, cached-artifact controls, nonces, source hashes,
 mutant arms and restoration controls. Fixture-dependent jobs build the existing
-revision-verified daemon fixtures. There is no dependency cache or shared target.
+revision-verified daemon fixtures. There is no cache shared across jobs. The migration-recovery suite warms dependencies
+in its own temporary seed, then uses a separate target for each arm. Its selected
+package/test/CLI executables must still be freshly compiled with the unique nonce
+and pass cache-refusal controls; no seed executable qualifies an arm.
 
 Pull requests select suites whose registered source anchors or named test files
 changed. Common helpers, build manifests, toolchains, workflows and mutation scripts
 select the full inventory. Unknown file classification also selects everything;
 this deliberately prefers unnecessary work to an omitted gate. Documentation-only
 and ordinary-census changes can select no mutation suite. Every main push, manual
-workflow dispatch, and pull request carrying the `full-gates` label selects all 444
+workflow dispatch, and pull request carrying the `full-gates` label selects all 473
 named mutants. Label changes trigger a new run; later commits retain full selection
 while the label remains present. Manual dispatch uses the workflow available on the
 default branch, so a new workflow must land before it can be dispatched. See
@@ -36,7 +39,7 @@ and script digest together. The digest records the reviewed inventory; it is not
 binary cache key. Keep mutation execution modes together with their existing
 controls. Timeout diagnostic mutants and profile missing-fixture, wrong-revision,
 cached-artifact, early-return and missing-case controls remain ordinary checks,
-outside the 444 named-mutant count.
+outside the 473 named-mutant count.
 
 The `store_recovery` suite covers read-only fast paths, hot-journal recovery,
 live-writer non-interference, private directory permissions, preserved forensic copies, journal magic, copy
@@ -54,3 +57,12 @@ custody, clock faults, and secret censuses. Its full invocation is
 and `--preflight` verifies unique source anchors and named tests without compiling.
 A `--case` invocation reports partial completion and cannot satisfy the registered
 full-suite completion marker.
+
+The `migration_recovery` suite registers all 29 bootstrap, exact-enrollment,
+CLI hot-journal and backup publication/retention faults. Its no-argument CI entrypoint
+runs the same isolated controller, with a 10-minute dependency-warmup bound and a
+70-minute flight bound inside the existing 90-minute job. Each named RED and restored
+GREEN line is required. Atomic arm records, compiler logs, CLI hash receipts and
+bootstrap metadata are copied into the existing mutation-receipt artifact; temporary
+executables are not uploaded. Unsupported-lock simulation is classifier-level and
+is not qualification of a filesystem without directory-lock support.

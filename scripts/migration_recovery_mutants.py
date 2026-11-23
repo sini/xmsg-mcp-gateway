@@ -10,6 +10,8 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -207,6 +209,112 @@ def validate(cases):
             and (ROOT / relative).read_bytes().count(CLI_RUN) != 1
         ):
             raise ValueError("CLI invocation helper must be unique")
+
+
+def ci_main():
+    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    destination = ROOT / ".artifacts/mutation-receipts/migration_recovery"
+    destination.mkdir(parents=True, exist_ok=False)
+    receipt = {"commands": [], "status": "running"}
+    environment = {**os.environ, "CARGO_NET_OFFLINE": "true", "CARGO_BUILD_JOBS": "8"}
+
+    def run(argv, budget, log=None):
+        item = {"argv": argv, "budget_seconds": budget, "status": "starting"}
+        receipt["commands"].append(item)
+        atomic_json(destination / "ci-bootstrap.json", receipt)
+        output = log.open("wb") if log else None
+        process = None
+        started = time.monotonic()
+        try:
+            process = subprocess.Popen(
+                argv,
+                cwd=ROOT,
+                env=environment,
+                stdout=output,
+                stderr=subprocess.STDOUT if output else None,
+                start_new_session=os.name == "posix",
+            )
+            item.update({"pid": process.pid, "status": "running"})
+            atomic_json(destination / "ci-bootstrap.json", receipt)
+            status = process.wait(timeout=budget)
+            item.update({"exit": status, "status": "completed"})
+            if status:
+                raise RuntimeError("CI migration command failed: " + str(status))
+        except BaseException as error:
+            if process is not None and process.poll() is None:
+                if os.name == "posix":
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.kill()
+                process.wait(timeout=5)
+            item["error"] = type(error).__name__ + ": " + str(error)
+            raise
+        finally:
+            if output:
+                output.flush()
+                os.fsync(output.fileno())
+                output.close()
+                item["log_sha256"] = sha(log.read_bytes())
+            item["elapsed_seconds"] = time.monotonic() - started
+            atomic_json(destination / "ci-bootstrap.json", receipt)
+
+    with tempfile.TemporaryDirectory(prefix="gateway-migration-ci-") as temporary:
+        scratch = Path(temporary)
+        evidence = scratch / "evidence"
+        try:
+            run(
+                [
+                    "cargo",
+                    "test",
+                    "--manifest-path",
+                    str(ROOT / "Cargo.toml"),
+                    "--locked",
+                    "--offline",
+                    "-j4",
+                    "--no-run",
+                    "--target-dir",
+                    str(scratch / "seed"),
+                ],
+                600,
+                destination / "dependency-warmup.log",
+            )
+            run(
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "--manifest",
+                    str(ROOT / "scripts/migration_recovery_mutants.json"),
+                    "--evidence",
+                    str(evidence),
+                    "--work-root",
+                    str(scratch / "work"),
+                    "--seed-target",
+                    str(scratch / "seed"),
+                ],
+                4200,
+            )
+        except BaseException as error:
+            receipt["status"] = "failed"
+            receipt["error"] = type(error).__name__ + ": " + str(error)
+            raise
+        finally:
+            if evidence.exists():
+                for entry in evidence.iterdir():
+                    if entry.is_symlink() or not entry.is_file():
+                        raise RuntimeError("unexpected CI evidence entry")
+                    with (destination / entry.name).open("wb") as output:
+                        output.write(entry.read_bytes())
+                        output.flush()
+                        os.fsync(output.fileno())
+                    if sha(entry.read_bytes()) != sha(
+                        (destination / entry.name).read_bytes()
+                    ):
+                        raise RuntimeError("CI evidence copy changed")
+            receipt["temporary_executables_not_uploaded"] = True
+            atomic_json(destination / "ci-bootstrap.json", receipt)
+    receipt["status"] = "passed"
+    receipt["temporary_build_trees_removed"] = True
+    atomic_json(destination / "ci-bootstrap.json", receipt)
 
 
 def main():
@@ -724,7 +832,11 @@ def main():
             raise
         finally:
             persist()
+    print("migration-recovery-mutants-complete:" + str(len(cases)), flush=True)
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) == 1:
+        ci_main()
+    else:
+        main()

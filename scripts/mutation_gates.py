@@ -55,7 +55,7 @@ def load_registry(root=ROOT):
         raise ValueError("unknown mutation registry version")
     suites = value["suites"]
     ids = [s["id"] for s in suites]
-    if len(ids) != len(set(ids)) or len(suites) != 23:
+    if len(ids) != len(set(ids)) or len(suites) != 24:
         raise ValueError("mutation suite inventory drift")
     registered = {s["script"] for s in suites}
     discovered = {
@@ -71,7 +71,7 @@ def load_registry(root=ROOT):
     if not required <= modes or len(modes) != len(suites):
         raise ValueError("mutation execution mode drift")
     if (
-        sum(s["count"] for s in suites if not s["python"]) != 431
+        sum(s["count"] for s in suites if not s["python"]) != 460
         or sum(s["count"] for s in suites if s["python"]) != 13
     ):
         raise ValueError("mutation case inventory drift")
