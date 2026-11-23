@@ -65,13 +65,13 @@ store:
   #   policy: {send: {targets: ["*@node.example"], required_scope: "xmsg:send"},
   #            reply: {targets: ["*@node.example"], required_scope: "xmsg:reply"}}
   bootstrap:
-    # Planned CLI: init --if-needed and enroll --if-needed directly on the real
+    # init --if-needed and enroll --if-needed operate directly on the real
     # store. Existing exact bindings and enablement are preserved; a new grant stays
-    # disabled. Requires an image containing these commands. Never runs enable.
+    # disabled. Requires a gateway image built from this release or later. Never runs enable.
     enabled: false
   # Extra initContainers run after init and before the real store's migrations.
   # For example: backup-if-pending --backup-dir /var/lib/xmsg-mcp-gateway/backups
-  # --keep 3 (planned CLI; pin an image containing it). Each is rendered verbatim;
+  # --keep 3 (requires a gateway image built from this release or later). Each is rendered verbatim;
   # mount `data` at /var/lib/xmsg-mcp-gateway. No automatic backup is configured.
   preMigrate: []
 

@@ -110,8 +110,8 @@ own entrypoint, `--state <store> <command>`, with no shell:
 
 The chart never runs `enable`. Enabling a grant is a deliberate owner step.
 
-**Planned CLI integration.** Pin a gateway image containing `init --if-needed`,
-`enroll --if-needed`, and `backup-if-pending` before using the updated chain. There
+Use a gateway image built from this release or later for `init --if-needed`,
+`enroll --if-needed`, and `backup-if-pending` in the updated chain. There
 is no staging store or shell install step. A restart resumes the idempotent chain;
 initialization never resets an existing store.
 
