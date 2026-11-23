@@ -15,8 +15,8 @@ image:
   digest: ""
   pullPolicy: IfNotPresent
 
-# A small image with a POSIX shell, used by `prepare` (and by `store-install` when
-# store.bootstrap is on). The gateway image itself has no shell.
+# A small image with a POSIX shell, used by `prepare`.
+# The gateway image itself has no shell.
 helperImage:
   repository: docker.io/library/busybox
   tag: "1.37"
@@ -65,17 +65,14 @@ store:
   #   policy: {send: {targets: ["*@node.example"], required_scope: "xmsg:send"},
   #            reply: {targets: ["*@node.example"], required_scope: "xmsg:reply"}}
   bootstrap:
-    # Build a fresh store when none exists: init, every migration and enroll on a
-    # staging copy, then move it into place only if the real store is absent. Never
-    # overwrites an existing store. A new grant stays disabled; `enable` is an owner
-    # step this chart never runs.
-    # shortcut: staging + a shell step, because init and enroll have no --if-needed
-    # yet; switch to direct idempotent steps once the gateway CLI has them.
+    # Planned CLI: init --if-needed and enroll --if-needed directly on the real
+    # store. Existing exact bindings and enablement are preserved; a new grant stays
+    # disabled. Requires an image containing these commands. Never runs enable.
     enabled: false
-  # Extra initContainers run after install and before the real store's migrations:
-  # the slot for a pre-migration backup (for example a `backup-if-pending` step once
-  # the gateway CLI has one). Each is rendered verbatim; mount `data` at
-  # /var/lib/xmsg-mcp-gateway.
+  # Extra initContainers run after init and before the real store's migrations.
+  # For example: backup-if-pending --backup-dir /var/lib/xmsg-mcp-gateway/backups
+  # --keep 3 (planned CLI; pin an image containing it). Each is rendered verbatim;
+  # mount `data` at /var/lib/xmsg-mcp-gateway. No automatic backup is configured.
   preMigrate: []
 
 xmsg:

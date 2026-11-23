@@ -67,6 +67,7 @@ MUTANTS = [
      '(list "migrate-profiles")\n  (concat (list "migrate-events") $key)'),
     ("migration-order", "_helpers.tpl", '(list (first .) "--if-needed")', "(list (first .))"),
     ("migration-order", "deployment.yaml", '"--policy" (printf', '"--enabled" "--policy" (printf'),
+    ("migration-order", "deployment.yaml", '(list "init" "--if-needed")', '(list "init")'),
     ("migration-order", "deployment.yaml", "{{- with .Values.store.preMigrate }}\n        {{- toYaml . | nindent 8 }}\n        {{- end }}\n", ""),
     ("bind", "_helpers.tpl", '(ternary "0.0.0.0" "127.0.0.1" $v.gateway.podNetwork)', '"0.0.0.0"'),
     ("bind", "_helpers.tpl", '{{- $_ := set $owned "allow_non_loopback_bind" true -}}', ""),
@@ -149,17 +150,23 @@ def assertions(docs, vals):
     migs = MIGRATIONS + (["migrate-authorization-server"] if store.get("authorizationServer") else [])
     want = ["prepare"]
     if store.get("bootstrap", {}).get("enabled"):
-        want += ["staged-init"] + [f"staged-{m}" for m in migs]
-        want += [f"staged-enroll-{g}" for g in grants] + ["store-install"]
+        want += ["store-init"]
     want += [c["name"] for c in store.get("preMigrate", [])]
-    want += [f"store-{m}" for m in migs] + [f"store-apply-{g}" for g in grants]
+    want += [f"store-{m}" for m in migs]
+    if store.get("bootstrap", {}).get("enabled"):
+        want += [f"store-enroll-{g}" for g in grants]
+    want += [f"store-apply-{g}" for g in grants]
     names = [c["name"] for c in inits]
     yield "migration-order", names == want, names
     for c in inits:
         args = c.get("args", [])
-        if any(a.startswith("migrate-") for a in args):
+        if any(a.startswith("migrate-") or a in {"init", "enroll"} for a in args):
             yield "migration-order", "--if-needed" in args, (c["name"], args)
         yield "migration-order", not ENABLEMENT & set(args + c.get("command", [])), (c["name"], args)
+        if c["name"].startswith("store-"):
+            yield "migration-order", not c.get("command") and not c.get("env"), c["name"]
+            yield "migration-order", len(args) >= 3 and args[:2] == ["--state", serving["grant_store"]], (c["name"], args)
+    yield "migration-order", not any("staging" in str(c) for c in inits), names
 
     # 4. bind
     bind = serving.get("bind", "")
@@ -195,7 +202,7 @@ def run(chart):
         for name, ok, detail in assertions(render(chart, values), values_of(values)):
             if not ok:
                 failed.setdefault(name, []).append(f"{values.name}: {detail}")
-    # The preMigrate slot (where a pre-migration backup goes) sits between install
+    # The preMigrate slot (where a pre-migration backup goes) sits between init
     # and the real store's migrations.
     vals = values_of(files[0])
     vals.setdefault("store", {})["preMigrate"] = [HOOK]

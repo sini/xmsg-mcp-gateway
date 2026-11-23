@@ -4,7 +4,6 @@
 {{- $config := include "gw.configDir" . -}}
 {{- $run := include "gw.runtimeDir" . -}}
 {{- $store := include "gw.grantStore" . -}}
-{{- $staged := include "gw.stagedStore" . -}}
 {{- $port := int .Values.gateway.port -}}
 {{- $bootstrap := .Values.store.bootstrap.enabled -}}
 apiVersion: apps/v1
@@ -70,10 +69,6 @@ spec:
               umask 077
               mkdir -p {{ $data }}/state {{ dir (include "gw.leafDb" .) }} {{ $keys }}
               chmod 0700 {{ $data }}/state {{ dir (include "gw.leafDb" .) }} {{ $keys }}
-              rm -rf {{ $data }}/staging
-              {{- if $bootstrap }}
-              mkdir {{ $data }}/staging
-              {{- end }}
               {{- range .Values.secrets.items }}
               rm -f {{ $keys }}/{{ .key }}
               {{- if .base64Decode }}
@@ -90,35 +85,17 @@ spec:
             - {name: keys, mountPath: {{ dir $keys }}}
             - {name: secrets, mountPath: {{ $secrets }}, readOnly: true}
         {{- if $bootstrap }}
-        # A fresh store, built on staging and kept only if the real store is absent.
-        {{- include "gw.storeStep" (dict "ctx" . "name" "staged-init" "store" $staged "args" (list "init")) | nindent 8 }}
-        {{- include "gw.migrations" (dict "ctx" . "prefix" "staged" "store" $staged) | trim | nindent 8 }}
-        {{- range .Values.store.grants }}
-        {{- include "gw.storeStep" (dict "ctx" $ "name" (printf "staged-enroll-%s" .id) "store" $staged "args" (list "enroll" .id (printf "%s/binding-%s.json" $config .id))) | nindent 8 }}
-        {{- end }}
-        - name: store-install
-          image: {{ include "gw.image" .Values.helperImage | quote }}
-          command:
-            - /bin/sh
-            - -c
-            - |
-              set -eu
-              if [ -e {{ $store }} ]; then
-                echo "{{ $store }} present: left unchanged"
-              else
-                mv {{ $staged }} {{ $store }}
-                echo "{{ $store }} created; new grants are disabled"
-              fi
-              rm -rf {{ $data }}/staging
-          securityContext:
-            {{- include "gw.hardened" . | nindent 12 }}
-          volumeMounts:
-            - {name: data, mountPath: {{ $data }}}
+        {{- include "gw.storeStep" (dict "ctx" . "name" "store-init" "store" $store "args" (list "init" "--if-needed")) | nindent 8 }}
         {{- end }}
         {{- with .Values.store.preMigrate }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
         {{- include "gw.migrations" (dict "ctx" . "prefix" "store" "store" $store) | trim | nindent 8 }}
+        {{- if $bootstrap }}
+        {{- range .Values.store.grants }}
+        {{- include "gw.storeStep" (dict "ctx" $ "name" (printf "store-enroll-%s" .id) "store" $store "args" (list "enroll" .id (printf "%s/binding-%s.json" $config .id) "--if-needed")) | nindent 8 }}
+        {{- end }}
+        {{- end }}
         {{- range .Values.store.grants }}
         # Enablement is unchanged: no --enabled or --disabled.
         {{- include "gw.storeStep" (dict "ctx" $ "name" (printf "store-apply-%s" .id) "store" $store "args" (list "apply" "--id" .id "--policy" (printf "%s/policy-%s.json" $config .id))) | nindent 8 }}

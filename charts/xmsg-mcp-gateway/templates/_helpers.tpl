@@ -36,7 +36,6 @@ capabilities:
 {{/* In-pod paths. The chart owns them so every container agrees. */}}
 {{- define "gw.dataDir" -}}/var/lib/xmsg-mcp-gateway{{- end -}}
 {{- define "gw.grantStore" -}}{{ include "gw.dataDir" . }}/state/grants.db{{- end -}}
-{{- define "gw.stagedStore" -}}{{ include "gw.dataDir" . }}/staging/grants.db{{- end -}}
 {{- define "gw.leafDb" -}}{{ include "gw.dataDir" . }}/xmsg/xmsg.db{{- end -}}
 {{- define "gw.keysDir" -}}/run/xmsg-mcp-gateway/keys{{- end -}}
 {{- define "gw.secretsDir" -}}/run/secrets/xmsg-mcp-gateway{{- end -}}

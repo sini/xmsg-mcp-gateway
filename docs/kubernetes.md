@@ -91,11 +91,8 @@ The init containers run in this order. Each store step is the gateway image with
 own entrypoint, `--state <store> <command>`, with no shell:
 
 1. `prepare`.
-2. With `store.bootstrap.enabled`: `staged-init`, then every migration below on a
-   staging store, then `staged-enroll-<id>` per grant, then `store-install`. The
-   install step moves the staged store into place only if the real one is absent,
-   and discards it otherwise. A crash mid-build therefore never leaves a half-built
-   real store. A newly enrolled grant is disabled.
+2. With `store.bootstrap.enabled`: `store-init` runs `init --if-needed` on the real
+   store. A valid existing store is preserved; corrupt or incompatible state refuses.
 3. `store.preMigrate`: your own init containers, verbatim. This is the slot for a
    pre-migration backup.
 4. `store-migrate-*` on the real store, in the gateway's order, each with
@@ -104,17 +101,42 @@ own entrypoint, `--state <store> <command>`, with no shell:
    `store.eventsKey` is set), `migrate-profiles`, `migrate-attachments`, and
    `migrate-authorization-server` when `store.authorizationServer` is set. Run that
    last one only in a maintenance window (see the [authorization server](authorization-server.md) guide).
-5. `store-apply-<id>` per grant: `apply --id <id> --policy policy-<id>.json`. It
+5. With `store.bootstrap.enabled`: `store-enroll-<id>` runs `enroll --if-needed`
+   after migrations. An exact existing binding preserves revision and enablement;
+   a different binding refuses without replacement. A newly enrolled grant is disabled.
+6. `store-apply-<id>` per grant: `apply --id <id> --policy policy-<id>.json`. It
    passes no `--enabled` or `--disabled`, so enablement is unchanged. An unchanged
    policy writes nothing.
 
 The chart never runs `enable`. Enabling a grant is a deliberate owner step.
 
-**Planned.** Two gateway CLI additions will simplify this chain: idempotent
-`init`/`enroll` (which will replace the staging store and the shell step), and a
-pre-migration backup command (which will fill `store.preMigrate`). Until they ship,
-back up the volume before an image upgrade that adds a migration. Rolling back to an
-older image means restoring that backup.
+**Planned CLI integration.** Pin a gateway image containing `init --if-needed`,
+`enroll --if-needed`, and `backup-if-pending` before using the updated chain. There
+is no staging store or shell install step. A restart resumes the idempotent chain;
+initialization never resets an existing store.
+
+`store.preMigrate` remains an explicit owner-configured slot. For example, add a
+same-UID gateway container with these arguments and a `data` volume mount at
+`/var/lib/xmsg-mcp-gateway`:
+
+```yaml
+args:
+  - --state
+  - /var/lib/xmsg-mcp-gateway/state/grants.db
+  - backup-if-pending
+  - --backup-dir
+  - /var/lib/xmsg-mcp-gateway/backups
+  - --keep
+  - "3"
+```
+
+Use the same pinned gateway image and hardened security context as the other store
+steps; do not override its command or pass credentials through environment variables.
+The command publishes a private consistent snapshot before pruning only completed
+backups of this store. It creates nothing and prunes nothing when no migration is
+pending. The chart does not configure backups automatically. Rolling back an image
+that changed the schema means restoring a compatible backup; see
+[store maintenance](serving.md#snapshot-before-a-pending-migration).
 
 ## Exposure and probes
 
