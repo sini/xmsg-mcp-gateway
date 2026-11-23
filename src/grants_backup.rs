@@ -173,8 +173,25 @@ fn ensure_root(path: &Path, owner: &Metadata) -> Result<(), BackupError> {
     validate_directory(path, owner)?;
     Ok(())
 }
-fn lock_directory(root: &Path, owner: &Metadata, wait: Duration) -> Result<File, BackupError> {
-    lock_directory_with(root, owner, wait, File::try_lock)
+struct DirectoryLock(File);
+impl std::ops::Deref for DirectoryLock {
+    type Target = File;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl Drop for DirectoryLock {
+    fn drop(&mut self) {
+        // A forked child can retain the open description after this handle closes.
+        let _ = self.0.unlock();
+    }
+}
+fn lock_directory(
+    root: &Path,
+    owner: &Metadata,
+    wait: Duration,
+) -> Result<DirectoryLock, BackupError> {
+    lock_directory_with(root, owner, wait, File::try_lock).map(DirectoryLock)
 }
 fn lock_directory_with(
     root: &Path,

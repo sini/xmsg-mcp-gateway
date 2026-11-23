@@ -174,13 +174,13 @@ class MutationGatesTests(unittest.TestCase):
 
     def test_complete_inventory_and_execution_modes(self):
         self.assertEqual(len(self.suites), 24)
-        self.assertEqual(sum(s["count"] for s in self.suites), 473)
+        self.assertEqual(sum(s["count"] for s in self.suites), 474)
         modes = {(s["script"], tuple(s["args"])) for s in self.suites}
         self.assertIn(("scripts/reservation_lifetime_mutants.py", ("--live",)), modes)
 
     def test_migration_recovery_requires_all_pairs_and_completion(self):
         suite = next(s for s in self.suites if s["id"] == "migration_recovery")
-        self.assertEqual(suite["count"], 29)
+        self.assertEqual(suite["count"], 30)
         lines = [
             f"{label}-{phase}: exit={status} nonce={'a' * 32}"
             for label in suite["labels"]

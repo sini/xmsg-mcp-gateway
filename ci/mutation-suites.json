@@ -1674,10 +1674,10 @@
       "id": "migration_recovery",
       "script": "scripts/migration_recovery_mutants.py",
       "args": [],
-      "count": 29,
+      "count": 30,
       "fixture": false,
       "python": false,
-      "completion": "migration-recovery-mutants-complete:29",
+      "completion": "migration-recovery-mutants-complete:30",
       "dependencies": [
         "scripts/migration_recovery_mutants.py",
         "scripts/migration_recovery_mutants.json",
@@ -1721,7 +1721,8 @@
         "backup-retention-name-binding",
         "backup-retention-checksum",
         "backup-retention-exact-inventory",
-        "backup-private-directory-mode"
+        "backup-private-directory-mode",
+        "backup-explicit-unlock-before-close"
       ],
       "required_output": [
         "^hot\\-journal\\-cli\\-readonly-red: exit=101 nonce=[0-9a-f]{32}$",
@@ -1781,7 +1782,9 @@
         "^backup\\-retention\\-exact\\-inventory-red: exit=101 nonce=[0-9a-f]{32}$",
         "^backup\\-retention\\-exact\\-inventory-green: exit=0 nonce=[0-9a-f]{32}$",
         "^backup\\-private\\-directory\\-mode-red: exit=101 nonce=[0-9a-f]{32}$",
-        "^backup\\-private\\-directory\\-mode-green: exit=0 nonce=[0-9a-f]{32}$"
+        "^backup\\-private\\-directory\\-mode-green: exit=0 nonce=[0-9a-f]{32}$",
+        "^backup\\-explicit\\-unlock\\-before\\-close-red: exit=101 nonce=[0-9a-f]{32}$",
+        "^backup\\-explicit\\-unlock\\-before\\-close-green: exit=0 nonce=[0-9a-f]{32}$"
       ],
       "script_sha256": "72461dd2311e5761cfbc57dfdbefd91f417d6e102a583d329397110511ba4489"
     }

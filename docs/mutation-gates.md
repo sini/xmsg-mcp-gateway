@@ -6,7 +6,7 @@ and the packaged broker integration. Rust completion counts live in
 `ci/ordinary-counts.json`; updating that census alone does not select mutation suites.
 
 `ci/mutation-suites.json` registers each whole execution suite: 23 Rust executions
-with 460 named mutants, plus the Python reference suite with 13. Reservation units
+with 461 named mutants, plus the Python reference suite with 13. Reservation units
 and live acceptance are separate modes. Each matrix job runs its unchanged script,
 including that script's baselines, cached-artifact controls, nonces, source hashes,
 mutant arms and restoration controls. Fixture-dependent jobs build the existing
@@ -20,7 +20,7 @@ changed. Common helpers, build manifests, toolchains, workflows and mutation scr
 select the full inventory. Unknown file classification also selects everything;
 this deliberately prefers unnecessary work to an omitted gate. Documentation-only
 and ordinary-census changes can select no mutation suite. Every main push, manual
-workflow dispatch, and pull request carrying the `full-gates` label selects all 473
+workflow dispatch, and pull request carrying the `full-gates` label selects all 474
 named mutants. Label changes trigger a new run; later commits retain full selection
 while the label remains present. Manual dispatch uses the workflow available on the
 default branch, so a new workflow must land before it can be dispatched. See
@@ -39,7 +39,7 @@ and script digest together. The digest records the reviewed inventory; it is not
 binary cache key. Keep mutation execution modes together with their existing
 controls. Timeout diagnostic mutants and profile missing-fixture, wrong-revision,
 cached-artifact, early-return and missing-case controls remain ordinary checks,
-outside the 473 named-mutant count.
+outside the 474 named-mutant count.
 
 The `store_recovery` suite covers read-only fast paths, hot-journal recovery,
 live-writer non-interference, private directory permissions, preserved forensic copies, journal magic, copy
@@ -58,7 +58,7 @@ and `--preflight` verifies unique source anchors and named tests without compili
 A `--case` invocation reports partial completion and cannot satisfy the registered
 full-suite completion marker.
 
-The `migration_recovery` suite registers all 29 bootstrap, exact-enrollment,
+The `migration_recovery` suite registers all 30 bootstrap, exact-enrollment,
 CLI hot-journal and backup publication/retention faults. Its no-argument CI entrypoint
 runs the same isolated controller, with a 10-minute dependency-warmup bound and a
 70-minute flight bound inside the existing 90-minute job. Each named RED and restored
@@ -66,3 +66,9 @@ GREEN line is required. Atomic arm records, compiler logs, CLI hash receipts and
 bootstrap metadata are copied into the existing mutation-receipt artifact; temporary
 executables are not uploaded. Unsupported-lock simulation is classifier-level and
 is not qualification of a filesystem without directory-lock support.
+
+The backup directory guard explicitly unlocks before closing its File. A safe
+`File::try_clone` fixture retains the same open description across success/error
+returns, modeling the fork/exec inheritance window; removing the explicit unlock
+must fail immediate independent-descriptor reacquisition while that duplicate
+remains alive. Production's unsafe-code prohibition is unchanged.

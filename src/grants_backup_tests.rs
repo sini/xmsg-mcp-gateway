@@ -590,3 +590,37 @@ fn final_complete_recheck_never_publishes_or_prunes_after_waiting() {
     );
     assert_eq!(result.unwrap(), BackupResult::NoPendingMigrations);
 }
+
+#[test]
+fn directory_guard_unlocks_with_retained_open_description_on_success_and_error() {
+    fn return_from_operation(_guard: DirectoryLock, fail: bool) -> Result<(), BackupError> {
+        if fail {
+            return Err(BackupError::Publication);
+        }
+        Ok(())
+    }
+    let (dir, file, _) = fixture();
+    let root = dir.path().join("backups");
+    let owner = fs::metadata(&file).unwrap();
+    ensure_root(&root, &owner).unwrap();
+    for fail in [false, true] {
+        let guard = lock_directory(&root, &owner, Duration::ZERO).unwrap();
+        assert!(matches!(
+            File::open(&root).unwrap().try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        // A retained duplicate models the shared description in a fork/exec window.
+        let inherited = guard.try_clone().unwrap();
+        let result = return_from_operation(guard, fail);
+        let probe = File::open(&root).unwrap();
+        let released = probe.try_lock();
+        assert!(
+            released.is_ok(),
+            "guard must explicitly unlock while a retained open description remains alive"
+        );
+        assert_eq!(result.is_err(), fail);
+        assert!(inherited.metadata().unwrap().is_dir());
+        probe.unlock().unwrap();
+        drop(inherited);
+    }
+}

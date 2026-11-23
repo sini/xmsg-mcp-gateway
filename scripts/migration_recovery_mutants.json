@@ -317,5 +317,16 @@
     "test": "pending_backup_refuses_nonprivate_directory_without_repair",
     "qualified_test": "grants::backup::tests::pending_backup_refuses_nonprivate_directory_without_repair",
     "assertion": "nonprivate backup directory was modified or repaired"
+  },
+  {
+    "id": "backup-explicit-unlock-before-close",
+    "file": "src/grants_backup.rs",
+    "needle": "        let _ = self.0.unlock();",
+    "replacement": "        let _ = &self.0;",
+    "target": "lib",
+    "test_file": "src/grants_backup_tests.rs",
+    "test": "directory_guard_unlocks_with_retained_open_description_on_success_and_error",
+    "qualified_test": "grants::backup::tests::directory_guard_unlocks_with_retained_open_description_on_success_and_error",
+    "assertion": "guard must explicitly unlock while a retained open description remains alive"
   }
 ]
