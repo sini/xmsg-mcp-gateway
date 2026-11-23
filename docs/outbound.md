@@ -111,7 +111,14 @@ as complete without disclosing how many unauthorized targets exist. For `xmsg_se
 `svc` services; `*@<node>` entries resolve `<instance-id or label>@<node>`,
 `<parent>/<child>@<node>` and `<service>@<node>` through the leaf's live
 `xmsg list` view on healthy `<node>`, refusing ambiguous labels (`> 1` live
-matches). Reply targets come from an owned, attested inbound correlation in
+matches). When `*@<node>` is admitted and the sidecar's `list` refuses
+`<node>` specifically as unknown (`not_found`, e.g., a peer reachable only
+through the leaf's `default_route` hub), exact canonical targets
+(`<instance-uuid>@<node>`, fully qualified `<uuid>/<child_id>@<node>`, or
+`<service>@<node>`) skip the `list` check (`hub_routed_unverified`) and let
+the send's own outcome decide, while labels, bare names, and subaddress
+parent lookups fail closed (`not_verifiable_via_hub`). Other `list` errors and
+non-`*` policy entries still fail closed. Reply targets come from an owned, attested inbound correlation in
 this store, rather than caller-selected reply addresses: an inbound service
 origin (`origin.service` set, `origin.id` unset) is admitted by either exact
 `<service>@<origin.node>` or `*@<origin.node>` in `reply.targets`, whereas an

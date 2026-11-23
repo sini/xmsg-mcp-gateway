@@ -1510,9 +1510,11 @@ async fn messaging_call(
             &id,
             tool_result(json!({"state":"confirmed","request_id":request_id,"receipt":receipt})),
         ),
-        Err(outbound::Error::Denied | outbound::Error::Authority(GrantError::Denied)) => {
-            StatusCode::FORBIDDEN.into_response()
-        }
+        Err(
+            outbound::Error::Denied
+            | outbound::Error::NotVerifiableViaHub
+            | outbound::Error::Authority(GrantError::Denied),
+        ) => StatusCode::FORBIDDEN.into_response(),
         Err(outbound::Error::Authentication(auth::Error::InvalidToken)) => {
             auth_response(auth::Error::InvalidToken, &app.challenge)
         }
@@ -1938,7 +1940,9 @@ async fn mcp_request(
                 return match result {
                     Ok(value) => rpc_result(&id, tool_result(value)),
                     Err(
-                        outbound::Error::Denied | outbound::Error::Authority(GrantError::Denied),
+                        outbound::Error::Denied
+                        | outbound::Error::NotVerifiableViaHub
+                        | outbound::Error::Authority(GrantError::Denied),
                     ) => StatusCode::FORBIDDEN.into_response(),
                     Err(outbound::Error::Authentication(auth::Error::InvalidToken)) => {
                         auth_response(auth::Error::InvalidToken, &app.challenge)
@@ -2055,7 +2059,9 @@ async fn mcp_request(
                         }
                     },
                     Err(
-                        outbound::Error::Denied | outbound::Error::Authority(GrantError::Denied),
+                        outbound::Error::Denied
+                        | outbound::Error::NotVerifiableViaHub
+                        | outbound::Error::Authority(GrantError::Denied),
                     ) => StatusCode::FORBIDDEN.into_response(),
                     Err(outbound::Error::Authentication(auth::Error::InvalidToken)) => {
                         auth_response(auth::Error::InvalidToken, &app.challenge)

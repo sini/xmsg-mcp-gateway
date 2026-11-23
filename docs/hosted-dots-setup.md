@@ -618,6 +618,22 @@ clients with a supported secure bearer entry, but the observed ChatGPT form does
 
 1. Unsubscribe in the dot, then delete the plugin.
 2. Stop `tunnel-client` and the example, and delete `.state/` from the test checkout.
+
+## 9. Troubleshooting: hub-routed targets
+
+When the gateway's leaf sidecar only peers with a hub (`default_route = true`)
+and a dot sends to a node behind that hub, the sidecar's `list` view does not
+include the remote node (`not_found` / unknown node). If the grant's
+`send.targets` includes `*@<node>`, `xmsg_send` falls through
+(`hub_routed_unverified`) only for **exact canonical addresses**:
+
+- `<instance-uuid>@<node>`
+- `<uuid>/<child_id>@<node>` (already-qualified subagent ID, no parent lookup)
+- `<service>@<node>`
+
+Labels, bare names, and subaddresses requiring parent lookup cannot be verified
+through `list` and are refused with `not_verifiable_via_hub`. Non-`*` grants
+and non-`not_found` `list` errors continue to fail closed.
 3. Revoke the runtime key, and delete the tunnel if it won't be reused.
 
 ## 9. Report

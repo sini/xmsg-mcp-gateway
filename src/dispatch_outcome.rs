@@ -70,6 +70,7 @@ pub(crate) fn outbound(error: &outbound::Error) -> (&'static str, &'static str) 
     use outbound::Error;
     let class = match error {
         Error::Denied
+        | Error::NotVerifiableViaHub
         | Error::Authority(grants::Error::Denied)
         | Error::Authentication(auth::Error::InvalidToken) => "denied",
         Error::Conflict => "conflict",
@@ -79,6 +80,7 @@ pub(crate) fn outbound(error: &outbound::Error) -> (&'static str, &'static str) 
     let kind = match error {
         Error::MigrationRequired => "migration_required",
         Error::Denied => "denied",
+        Error::NotVerifiableViaHub => "not_verifiable_via_hub",
         Error::Conflict => "conflict",
         Error::Oversized => "oversized",
         Error::Configuration => "configuration",
@@ -99,6 +101,7 @@ pub(crate) fn broker(error: &outbound::Error, confirmed: bool) -> (&'static str,
     let exception = matches!(
         error,
         outbound::Error::Denied
+            | outbound::Error::NotVerifiableViaHub
             | outbound::Error::Authority(grants::Error::Denied)
             | outbound::Error::Authentication(auth::Error::InvalidToken)
             | outbound::Error::Conflict

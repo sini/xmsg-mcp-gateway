@@ -18,6 +18,8 @@ pub enum Error {
     MigrationRequired,
     #[error("outbound operation denied")]
     Denied,
+    #[error("target not verifiable via hub without a canonical address")]
+    NotVerifiableViaHub,
     #[error("request_id already reserved for a different payload")]
     Conflict,
     #[error("outbound text exceeds the complete framed byte bound")]
@@ -909,6 +911,46 @@ fn node_scoped_send_admitted(
     label_matches.next().is_some() && label_matches.next().is_none()
 }
 
+fn is_uuid_shaped(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() != 36 {
+        return false;
+    }
+    bytes.iter().enumerate().all(|(i, &b)| {
+        if matches!(i, 8 | 13 | 18 | 23) {
+            b == b'-'
+        } else {
+            b.is_ascii_hexdigit()
+        }
+    })
+}
+
+fn is_qualified_subagent_id(s: &str) -> bool {
+    if is_uuid_shaped(s) {
+        return true;
+    }
+    if s.len() == 17 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return true;
+    }
+    if let Some((prefix, hex)) = s.rsplit_once('-') {
+        return prefix.starts_with('a')
+            && prefix.len() > 1
+            && hex.len() == 16
+            && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    }
+    false
+}
+
+fn is_exact_hub_routed_target(name: &str) -> bool {
+    if is_uuid_shaped(name) {
+        return true;
+    }
+    if let Some((parent, child)) = name.split_once('/') {
+        return is_uuid_shaped(parent) && is_qualified_subagent_id(child);
+    }
+    xmsg::client::validate_service_name(name).is_ok()
+}
+
 pub async fn list(
     store: &mut Store,
     service: &Endpoint,
@@ -1446,7 +1488,7 @@ async fn submit(
     };
     if permission.admits_node(node) {
         if matches!(request, Request::Send(_)) {
-            let recipients = service
+            match service
                 .client
                 .list(xmsg::client::ListQuery {
                     name: None,
@@ -1455,9 +1497,25 @@ async fn submit(
                     status: Some("live".into()),
                     ..Default::default()
                 })
-                .await?;
-            if !node_scoped_send_admitted(&recipients, &target, name, node) {
-                return Err(Error::Denied);
+                .await
+            {
+                Ok(recipients) => {
+                    if !node_scoped_send_admitted(&recipients, &target, name, node) {
+                        return Err(Error::Denied);
+                    }
+                }
+                Err(xmsg::client::ClientError::Refused { code }) if code == "not_found" => {
+                    if !is_exact_hub_routed_target(name) {
+                        return Err(Error::NotVerifiableViaHub);
+                    }
+                    tracing::info!(
+                        target: "gateway_dispatch",
+                        operation = "xmsg_send",
+                        path = "hub_routed_unverified",
+                        "admitted node unknown to leaf list; routing exact canonical target via hub"
+                    );
+                }
+                Err(error) => return Err(error.into()),
             }
         }
     } else {
