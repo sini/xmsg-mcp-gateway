@@ -245,7 +245,7 @@ fn retention_preserves_unknown_extra_entries_and_symlinks() {
     let before = tree(&altered);
     let target_before = tree(&target);
     let link_before = tree(&link);
-    backup(&store, &root, 1);
+    let result = store.backup_if_pending(&root, keep(1));
     assert_eq!(
         tree(&altered),
         before,
@@ -253,6 +253,7 @@ fn retention_preserves_unknown_extra_entries_and_symlinks() {
     );
     assert_eq!(tree(&target), target_before);
     assert_eq!(tree(&link), link_before);
+    assert_eq!(result.unwrap(), BackupResult::Published);
 }
 
 #[test]
