@@ -116,6 +116,20 @@
                 python3 ${./nix/check_image.py} ${packages.${pkgs.stdenv.hostPlatform.system}.image}
                 touch $out
               '';
+          # The reference Helm chart's structural invariants, each with a mutant it must catch.
+          k8s =
+            pkgs.runCommand "check-k8s-chart"
+              {
+                nativeBuildInputs = [
+                  pkgs.kubernetes-helm
+                  (pkgs.python3.withPackages (ps: [ ps.pyyaml ]))
+                ];
+              }
+              ''
+                export HOME="$TMPDIR"
+                python3 ${./nix/check_k8s.py} ${./charts/xmsg-mcp-gateway}
+                touch $out
+              '';
         }
       );
 

@@ -1,0 +1,274 @@
+{{- $data := include "gw.dataDir" . -}}
+{{- $keys := include "gw.keysDir" . -}}
+{{- $secrets := include "gw.secretsDir" . -}}
+{{- $config := include "gw.configDir" . -}}
+{{- $run := include "gw.runtimeDir" . -}}
+{{- $store := include "gw.grantStore" . -}}
+{{- $staged := include "gw.stagedStore" . -}}
+{{- $port := int .Values.gateway.port -}}
+{{- $bootstrap := .Values.store.bootstrap.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "gw.fullname" . }}
+  labels:
+    {{- include "gw.labels" . | nindent 4 }}
+spec:
+  # One SQLite writer on a ReadWriteOnce volume.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "gw.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "gw.selectorLabels" . | nindent 8 }}
+      annotations:
+        # The gateway and the leaf read their configuration only at start.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "gw.fullname" . }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: {{ int .Values.uid }}
+        runAsGroup: {{ int .Values.uid }}
+        runAsNonRoot: true
+        fsGroup: {{ int .Values.uid }}
+        # Never re-chmod the 0700 state directories on a later mount.
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        # Secret files are root-owned and group-readable; the gateway refuses that. Copy
+        # them owner-private into a memory emptyDir, and make the state dirs 0700 (the
+        # leaf requires an owner-only directory for its database).
+        - name: prepare
+          image: {{ include "gw.image" .Values.helperImage | quote }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              umask 077
+              mkdir -p {{ $data }}/state {{ dir (include "gw.leafDb" .) }} {{ $keys }}
+              chmod 0700 {{ $data }}/state {{ dir (include "gw.leafDb" .) }} {{ $keys }}
+              rm -rf {{ $data }}/staging
+              {{- if $bootstrap }}
+              mkdir {{ $data }}/staging
+              {{- end }}
+              {{- range .Values.secrets.items }}
+              rm -f {{ $keys }}/{{ .key }}
+              {{- if .base64Decode }}
+              base64 -d {{ $secrets }}/{{ .key }} > {{ $keys }}/{{ .key }}
+              {{- else }}
+              cp {{ $secrets }}/{{ .key }} {{ $keys }}/{{ .key }}
+              {{- end }}
+              chmod {{ .mode | default "0400" }} {{ $keys }}/{{ .key }}
+              {{- end }}
+          securityContext:
+            {{- include "gw.hardened" . | nindent 12 }}
+          volumeMounts:
+            - {name: data, mountPath: {{ $data }}}
+            - {name: keys, mountPath: {{ dir $keys }}}
+            - {name: secrets, mountPath: {{ $secrets }}, readOnly: true}
+        {{- if $bootstrap }}
+        # A fresh store, built on staging and kept only if the real store is absent.
+        {{- include "gw.storeStep" (dict "ctx" . "name" "staged-init" "store" $staged "args" (list "init")) | nindent 8 }}
+        {{- include "gw.migrations" (dict "ctx" . "prefix" "staged" "store" $staged) | trim | nindent 8 }}
+        {{- range .Values.store.grants }}
+        {{- include "gw.storeStep" (dict "ctx" $ "name" (printf "staged-enroll-%s" .id) "store" $staged "args" (list "enroll" .id (printf "%s/binding-%s.json" $config .id))) | nindent 8 }}
+        {{- end }}
+        - name: store-install
+          image: {{ include "gw.image" .Values.helperImage | quote }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              if [ -e {{ $store }} ]; then
+                echo "{{ $store }} present: left unchanged"
+              else
+                mv {{ $staged }} {{ $store }}
+                echo "{{ $store }} created; new grants are disabled"
+              fi
+              rm -rf {{ $data }}/staging
+          securityContext:
+            {{- include "gw.hardened" . | nindent 12 }}
+          volumeMounts:
+            - {name: data, mountPath: {{ $data }}}
+        {{- end }}
+        {{- with .Values.store.preMigrate }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- include "gw.migrations" (dict "ctx" . "prefix" "store" "store" $store) | trim | nindent 8 }}
+        {{- range .Values.store.grants }}
+        # Enablement is unchanged: no --enabled or --disabled.
+        {{- include "gw.storeStep" (dict "ctx" $ "name" (printf "store-apply-%s" .id) "store" $store "args" (list "apply" "--id" .id "--policy" (printf "%s/policy-%s.json" $config .id))) | nindent 8 }}
+        {{- end }}
+      containers:
+        - name: xmsg
+          image: {{ include "gw.image" .Values.xmsg.image | quote }}
+          args:
+            - serve
+            - --leaf
+            - --leaf-principal
+            - {{ .Values.xmsg.principal | quote }}
+            # Required by --leaf; loopback in the pod's own network namespace.
+            - --listen
+            - 127.0.0.1:7787
+            - --leaf-register-sock
+            - {{ $run }}/xmsg/register.sock
+            - --agent-sock
+            - {{ $run }}/xmsg/agent.sock
+            - --db-path
+            - {{ include "gw.leafDb" . }}
+            - --peers-file
+            - /etc/xmsg/peers/peers.json
+            - --fed-cert
+            - /etc/xmsg/tls/tls.crt
+            - --fed-key
+            - /etc/xmsg/tls/tls.key
+            - --reply-ttl
+            - {{ int .Values.xmsg.limits.replyTtl | quote }}
+            - --idempotency-ttl
+            - {{ int .Values.xmsg.limits.idempotencyTtl | quote }}
+            - --svc-queue-cap
+            - {{ int .Values.xmsg.limits.svcQueueCap | quote }}
+            - --max-body
+            - {{ int .Values.xmsg.limits.maxBody | quote }}
+            {{- range .Values.xmsg.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          env:
+            - name: XDG_RUNTIME_DIR
+              value: {{ $run }}
+          securityContext:
+            {{- include "gw.hardened" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.xmsg.resources | nindent 12 }}
+          volumeMounts:
+            - {name: run, mountPath: {{ $run }}}
+            - {name: tmp, mountPath: /tmp}
+            - {name: data, mountPath: {{ $data }}}
+            - {name: tls, mountPath: /etc/xmsg/tls, readOnly: true}
+            - {name: peers, mountPath: /etc/xmsg/peers, readOnly: true}
+        - name: gateway
+          image: {{ include "gw.image" .Values.image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: [serve, --config, {{ $config }}/serving.json]
+          ports:
+            - name: http
+              containerPort: {{ $port }}
+          {{- if .Values.gateway.podNetwork }}
+          # The image has no shell, and kubelet reaches only the pod network: probes
+          # exist only with podNetwork. Protected-resource metadata is unauthenticated.
+          readinessProbe:
+            httpGet:
+              path: /.well-known/oauth-protected-resource
+              port: http
+              httpHeaders:
+                - {name: Host, value: "127.0.0.1"}
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          {{- end }}
+          securityContext:
+            {{- include "gw.hardened" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
+          volumeMounts:
+            - {name: run, mountPath: {{ $run }}}
+            - {name: tmp, mountPath: /tmp}
+            - {name: data, mountPath: {{ $data }}}
+            - {name: keys, mountPath: {{ dir $keys }}, readOnly: true}
+            - {name: config, mountPath: {{ $config }}, readOnly: true}
+        {{- if .Values.tunnel.enabled }}
+        - name: tunnel-client
+          image: {{ include "gw.image" .Values.tunnel.image | quote }}
+          args:
+            {{- range .Values.tunnel.oauthOrigins }}
+            - --mcp.oauth-trusted-origin
+            - {{ . | quote }}
+            - --harpoon.oauth-forward-origin
+            - {{ . | quote }}
+            {{- end }}
+            # The MCP target is the gateway on loopback, plain HTTP.
+            - --harpoon.allow-plaintext-http
+            {{- range .Values.tunnel.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          env:
+            - name: CONTROL_PLANE_TUNNEL_ID
+              value: {{ required "tunnel.id is required with tunnel.enabled" .Values.tunnel.id | quote }}
+            - name: CONTROL_PLANE_BASE_URL
+              value: {{ .Values.tunnel.controlPlaneBaseUrl | quote }}
+            - name: MCP_SERVER_URL
+              value: {{ printf "http://127.0.0.1:%d/mcp" $port | quote }}
+            # The gateway may bind after the sidecar starts.
+            - name: MCP_STARTUP_WAIT_TIMEOUT
+              value: 60s
+            - name: HOME
+              value: /tmp
+            - name: CONTROL_PLANE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "tunnel.apiKeySecret.name is required with tunnel.enabled" .Values.tunnel.apiKeySecret.name | quote }}
+                  key: {{ .Values.tunnel.apiKeySecret.key | quote }}
+          securityContext:
+            {{- include "gw.hardened" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.tunnel.resources | nindent 12 }}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+        {{- end }}
+      volumes:
+        - name: run
+          emptyDir: {medium: Memory}
+        - name: keys
+          emptyDir: {medium: Memory}
+        - name: tmp
+          emptyDir: {}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim | default (include "gw.fullname" .) | quote }}
+        - name: tls
+          secret:
+            secretName: {{ required "xmsg.tls.existingSecret is required" .Values.xmsg.tls.existingSecret | quote }}
+            defaultMode: 0440
+        - name: peers
+          configMap:
+            name: {{ include "gw.fullname" . }}-peers
+        - name: config
+          configMap:
+            name: {{ include "gw.fullname" . }}-config
+            defaultMode: 0444
+        # Read only by prepare (through fsGroup), which copies the items owner-private.
+        - name: secrets
+          secret:
+            secretName: {{ required "secrets.existingSecret is required" .Values.secrets.existingSecret | quote }}
+            defaultMode: 0440
+            items:
+              {{- range .Values.secrets.items }}
+              - {key: {{ .key | quote }}, path: {{ .key | quote }}}
+              {{- end }}

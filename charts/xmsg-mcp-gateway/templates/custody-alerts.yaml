@@ -1,0 +1,48 @@
+{{- if .Values.custodyAlerts.enabled }}
+{{- /* LogQL over the gateway's own log lines: "custody intake deferred" (each
+       deferral) and "custody capacity" (logged periodically). A deferral is the
+       outage itself, 80% is the warning before it, and a missing capacity line means
+       the other rules are blind. */ -}}
+{{- $sel := .Values.custodyAlerts.selector | default (printf "{namespace=%q, container=\"gateway\"}" .Release.Namespace) -}}
+{{- $field := dict -}}
+{{- range list "active_rows" "max_items" "retired_rows" "max_retired_items" -}}
+{{- $_ := set $field . (printf "max(max_over_time(%s |= \"custody capacity\" | regexp `%s=(?P<v>\\d+)` | unwrap v [15m]))" $sel .) -}}
+{{- end -}}
+{{- $rules := list
+  (dict "alert" "XmsgGatewayCustodyDeferred"
+    "expr" (printf "sum by (reason) (count_over_time(%s |= \"custody intake deferred\" | regexp `reason=(?P<reason>[a-z_]+)` [5m])) > 0" $sel)
+    "labels" (dict "severity" "critical")
+    "annotations" (dict
+      "summary" "xmsg gateway custody is deferring intake ({{ $labels.reason }})"
+      "description" "New messages are not stored or acked, so the hubs' queues for the gateway leaf grow. Raise serving.events.custody_limits or clear the cause."))
+  (dict "alert" "XmsgGatewayCustodyUnavailable"
+    "expr" (printf "sum(count_over_time(%s |~ \"custody (store )?unavailable\" [5m])) > 0" $sel)
+    "labels" (dict "severity" "critical")
+    "annotations" (dict "summary" "xmsg gateway custody store is unavailable"))
+  (dict "alert" "XmsgGatewayCustodyNearFull"
+    "expr" (printf "%s / %s >= 0.8" $field.active_rows $field.max_items)
+    "labels" (dict "severity" "warning")
+    "annotations" (dict "summary" "xmsg gateway custody active rows at {{ $value | humanizePercentage }} of max_items"))
+  (dict "alert" "XmsgGatewayCustodyRetiredNearFull"
+    "expr" (printf "%s / %s >= 0.8" $field.retired_rows $field.max_retired_items)
+    "labels" (dict "severity" "warning")
+    "annotations" (dict "summary" "xmsg gateway retired-grant custody rows at {{ $value | humanizePercentage }} of max_retired_items"))
+  (dict "alert" "XmsgGatewayCustodyCapacityLogMissing"
+    "expr" (printf "absent_over_time(%s |= \"custody capacity\" [20m])" $sel)
+    "labels" (dict "severity" "warning")
+    "annotations" (dict "summary" "no xmsg gateway custody capacity line in 20 minutes; the custody alerts are blind"))
+-}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "gw.fullname" . }}-custody-alerts
+  namespace: {{ .Values.custodyAlerts.namespace | default .Release.Namespace | quote }}
+  labels:
+    {{- include "gw.labels" . | nindent 4 }}
+    {{- with .Values.custodyAlerts.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+data:
+  xmsg-mcp-gateway-custody.yaml: |
+    {{- dict "groups" (list (dict "name" "xmsg-mcp-gateway-custody" "rules" $rules)) | toYaml | nindent 4 }}
+{{- end }}

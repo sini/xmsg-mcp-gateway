@@ -1,0 +1,155 @@
+# Reference values for one gateway pod: the gateway, its `xmsg --leaf` sidecar and an
+# optional tunnel-client. Every value here is a placeholder; adapt it to your cluster.
+# The chart owns the in-pod paths (sockets, store, keys) and writes them into
+# serving.json itself, so they always agree across containers.
+
+# One uid on every container. The leaf admits register.sock and agent.sock callers by
+# peer uid, and the gateway's messaging.xmsg.daemon_uid must equal the leaf's. 10001 is
+# the gateway image's own user.
+uid: 10001
+
+image:
+  repository: ghcr.io/sini/xmsg-mcp-gateway
+  tag: latest
+  # A sha256 digest takes precedence over tag. Pin one for production.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+# A small image with a POSIX shell, used by `prepare` (and by `store-install` when
+# store.bootstrap is on). The gateway image itself has no shell.
+helperImage:
+  repository: docker.io/library/busybox
+  tag: "1.37"
+  digest: ""
+
+gateway:
+  port: 8787
+  # false: the listener binds 127.0.0.1 only (the tunnel-client reaches it over
+  # loopback). true: it binds 0.0.0.0 for an in-cluster proxy, writes
+  # allow_non_loopback_bind into serving.json, and renders the Service and probes.
+  # Restrict ingress to your proxy with a NetworkPolicy when you turn it on.
+  podNetwork: false
+  resources: {}
+
+# serving.json without the pod-owned fields (bind, allow_non_loopback_bind,
+# grant_store, messaging.xmsg.{service,daemon_uid,register_socket,agent_socket} and
+# messaging.manifest's node-limit fields), which the chart sets. Field reference:
+# docs/serving.md. Key files live under /run/xmsg-mcp-gateway/keys/<secrets item key>.
+# Required: the gateway refuses to start without a verifier and messaging.
+serving: {}
+
+# Kubernetes Secret files are root-owned and group-readable; the gateway refuses
+# group-accessible credentials. `prepare` copies each item into a memory emptyDir at
+# /run/xmsg-mcp-gateway/keys/<key> with the given mode.
+secrets:
+  # Required: an existing Secret. The chart never creates credentials.
+  existingSecret: ""
+  items: []
+  # - key: lookup-secret
+  #   mode: "0400"
+  # - key: events-key          # stored base64; the gateway wants 32 raw bytes, 0600
+  #   mode: "0600"
+  #   base64Decode: true
+
+store:
+  # Secret item key of the Events key, for migrate-events. Empty: no --key-file.
+  eventsKey: ""
+  # Adds migrate-authorization-server to the chain, after the base migrations. Turn it
+  # on in a maintenance window only (docs/authorization-server.md).
+  authorizationServer: false
+  # Grants the chain applies (`apply --id <id> --policy`, enablement unchanged: no
+  # --enabled/--disabled), and, with bootstrap on, enrolls into a fresh store.
+  grants: []
+  # - id: owner
+  #   binding: {service: "...", issuer: "...", resource: "...", subject: "...", hosted_client: "..."}
+  #   policy: {send: {targets: ["*@node.example"], required_scope: "xmsg:send"},
+  #            reply: {targets: ["*@node.example"], required_scope: "xmsg:reply"}}
+  bootstrap:
+    # Build a fresh store when none exists: init, every migration and enroll on a
+    # staging copy, then move it into place only if the real store is absent. Never
+    # overwrites an existing store. A new grant stays disabled; `enable` is an owner
+    # step this chart never runs.
+    # shortcut: staging + a shell step, because init and enroll have no --if-needed
+    # yet; switch to direct idempotent steps once the gateway CLI has them.
+    enabled: false
+  # Extra initContainers run after install and before the real store's migrations:
+  # the slot for a pre-migration backup (for example a `backup-if-pending` step once
+  # the gateway CLI has one). Each is rendered verbatim; mount `data` at
+  # /var/lib/xmsg-mcp-gateway.
+  preMigrate: []
+
+xmsg:
+  image:
+    repository: ghcr.io/sini/xmsg
+    tag: latest
+    digest: ""
+  # Required: the leaf principal, which is also serving.messaging.xmsg.service.
+  principal: ""
+  tls:
+    # Required: a kubernetes.io/tls Secret carrying the leaf's federation identity
+    # (for example a cert-manager Certificate with a SPIFFE URI SAN).
+    existingSecret: ""
+  # Written inside {"peers": ...}: the leaf's hubs (xmsg hubs-and-leaves docs).
+  peers: {}
+  # Node limits, passed to the leaf and copied into serving.json's messaging.manifest
+  # so both sides agree. These are xmsg's defaults.
+  limits:
+    replyTtl: 604800
+    idempotencyTtl: 86400
+    svcQueueCap: 100
+    maxBody: 65536
+  extraArgs: []
+  resources: {}
+
+tunnel:
+  # OpenAI tunnel-client sidecar, on the gateway's loopback listener.
+  enabled: false
+  image:
+    repository: ghcr.io/openai/tunnel-client
+    tag: ""
+    digest: ""
+  # Required with enabled: the Platform tunnel id (tunnel_...).
+  id: ""
+  controlPlaneBaseUrl: https://api.openai.com
+  # The Secret and key holding the tunnel runtime API key.
+  apiKeySecret:
+    name: ""
+    key: tunnel-runtime-key
+  # Origins tunnel-client may fetch OAuth metadata from and forward harpoon OAuth to:
+  # your authorization server's origin and the gateway's public origin.
+  oauthOrigins: []
+  extraArgs: []
+  resources: {}
+
+persistence:
+  # Empty creates a ReadWriteOnce claim. One writer: never share it with another pod.
+  existingClaim: ""
+  size: 1Gi
+  storageClassName: ""
+  labels: {}
+
+# Gateway API routes carrying only the public OAuth paths: protected-resource and
+# authorization-server discovery and /oauth. /oauth/authorize gets its own route so a
+# rate-limit policy can target it. Needs gateway.podNetwork.
+httpRoute:
+  enabled: false
+  hostnames: []
+  parentRefs: []
+  # Also route /mcp (direct HTTPS MCP for a gateway-owned authorization server). Off:
+  # MCP is reachable only through the tunnel.
+  mcp: false
+
+# The five custody alert rules (LogQL) for a Loki ruler that loads rule ConfigMaps.
+custodyAlerts:
+  enabled: false
+  # Empty: the release namespace.
+  namespace: ""
+  # The labels your ruler's sidecar selects, for example {loki_rule: "true"}.
+  labels: {}
+  # Stream selector for the gateway container's log. Empty: namespace and container.
+  selector: ""
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

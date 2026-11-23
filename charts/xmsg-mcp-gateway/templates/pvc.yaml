@@ -1,0 +1,21 @@
+{{- if not .Values.persistence.existingClaim }}
+# The grant store, custody and the leaf's database. The Events key encrypts the
+# store's secrets: back the claim up together with that key.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "gw.fullname" . }}
+  labels:
+    {{- include "gw.labels" . | nindent 4 }}
+    {{- with .Values.persistence.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with .Values.persistence.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size | quote }}
+{{- end }}

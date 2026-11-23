@@ -1,0 +1,28 @@
+{{- if .Values.httpRoute.enabled }}
+{{- $routes := dict
+  "" (list (list "PathPrefix" "/.well-known/oauth-protected-resource") (list "Exact" "/.well-known/oauth-authorization-server") (list "PathPrefix" "/oauth"))
+  "-authorize" (list (list "PathPrefix" "/oauth/authorize")) -}}
+{{- if .Values.httpRoute.mcp }}{{ $_ := set $routes "-mcp" (list (list "PathPrefix" "/mcp")) }}{{ end -}}
+{{- range $suffix, $paths := $routes }}
+---
+# Only the public OAuth paths (and /mcp when httpRoute.mcp); every other path on the
+# host stays unrouted at the proxy.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "gw.fullname" $ }}{{ $suffix }}
+  labels:
+    {{- include "gw.labels" $ | nindent 4 }}
+spec:
+  hostnames: {{ required "httpRoute.hostnames is required" $.Values.httpRoute.hostnames | toJson }}
+  parentRefs: {{ required "httpRoute.parentRefs is required" $.Values.httpRoute.parentRefs | toJson }}
+  rules:
+    - matches:
+        {{- range $paths }}
+        - path: {type: {{ index . 0 }}, value: {{ index . 1 | quote }}}
+        {{- end }}
+      backendRefs:
+        - name: {{ include "gw.fullname" $ }}
+          port: {{ int $.Values.gateway.port }}
+{{- end }}
+{{- end }}

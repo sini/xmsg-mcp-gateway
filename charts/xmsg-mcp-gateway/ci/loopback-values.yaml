@@ -1,0 +1,56 @@
+# Example (reference; adapt): tunnel-only, loopback listener, fresh-store bootstrap.
+image: {digest: "sha256:0000000000000000000000000000000000000000000000000000000000000001"}
+xmsg:
+  image: {digest: "sha256:0000000000000000000000000000000000000000000000000000000000000002"}
+  principal: xmsg-mcp-gateway
+  tls: {existingSecret: gateway-xmsg-tls}
+  peers:
+    owner.hub:
+      address: hub.example.com:7788
+      ca: /etc/xmsg/tls/ca.crt
+      identities: ["spiffe://example.com/host/hub/user/owner"]
+      allow: [send, reply, list]
+secrets:
+  existingSecret: gateway
+  items:
+    - {key: lookup-secret, mode: "0400"}
+    - {key: events-key, mode: "0600", base64Decode: true}
+store:
+  eventsKey: events-key
+  bootstrap: {enabled: true}
+  grants:
+    - id: owner
+      binding:
+        service: xmsg-mcp-gateway
+        issuer: https://auth.example.com/oauth2/openid/gateway
+        resource: https://gateway.example.com/mcp
+        subject: 00000000-0000-4000-8000-000000000001
+        hosted_client: gateway
+      policy:
+        send: {targets: ["*@owner.hub"], required_scope: "xmsg:send"}
+        reply: {targets: ["*@owner.hub"], required_scope: "xmsg:reply"}
+serving:
+  request_timeout_ms: 60000
+  allowed_hosts: ["127.0.0.1", "localhost"]
+  allowed_origins: []
+  verifier:
+    service: xmsg-mcp-gateway
+    issuer: https://auth.example.com/oauth2/openid/gateway
+    resource: https://gateway.example.com/mcp
+    subject: 00000000-0000-4000-8000-000000000001
+    hosted_client: gateway
+    audience: gateway
+    introspection_url: https://auth.example.com/oauth2/token/introspect
+    introspection_client: gateway-lookup
+    client_secret_file: /run/xmsg-mcp-gateway/keys/lookup-secret
+    required_scopes: ["identity:read", "events:subscribe", "xmsg:send", "xmsg:reply"]
+    timeout_ms: 5000
+  messaging:
+    xmsg:
+      expected_node: gateway.example
+      operation_timeout_ms: 15000
+    submission_timeout_ms: 20000
+  events:
+    key_file: /run/xmsg-mcp-gateway/keys/events-key
+    grant_id: owner
+    dispatch_timeout_ms: 16000

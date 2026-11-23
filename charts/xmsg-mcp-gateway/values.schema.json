@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "definitions": {
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "tag": {"type": "string"},
+        "digest": {"type": "string", "pattern": "^(|sha256:[0-9a-f]{64})$"},
+        "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]}
+      },
+      "required": ["repository"]
+    },
+    "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+    "positive": {"type": "integer", "minimum": 1}
+  },
+  "properties": {
+    "uid": {"type": "integer", "minimum": 1},
+    "image": {"$ref": "#/definitions/image"},
+    "helperImage": {"$ref": "#/definitions/image"},
+    "gateway": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "port": {"$ref": "#/definitions/port"},
+        "podNetwork": {"type": "boolean"},
+        "resources": {"type": "object"}
+      }
+    },
+    "serving": {"type": "object"},
+    "secrets": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "existingSecret": {"type": "string"},
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "key": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+              "mode": {"enum": ["0400", "0600"]},
+              "base64Decode": {"type": "boolean"}
+            },
+            "required": ["key"]
+          }
+        }
+      }
+    },
+    "store": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "eventsKey": {"type": "string"},
+        "authorizationServer": {"type": "boolean"},
+        "grants": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "id": {"type": "string", "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"},
+              "binding": {"type": "object"},
+              "policy": {"type": "object"}
+            },
+            "required": ["id", "binding", "policy"]
+          }
+        },
+        "bootstrap": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {"enabled": {"type": "boolean"}}
+        },
+        "preMigrate": {"type": "array", "items": {"type": "object", "required": ["name"]}}
+      }
+    },
+    "xmsg": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "image": {"$ref": "#/definitions/image"},
+        "principal": {"type": "string"},
+        "tls": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {"existingSecret": {"type": "string"}}
+        },
+        "peers": {"type": "object"},
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "replyTtl": {"$ref": "#/definitions/positive"},
+            "idempotencyTtl": {"type": "integer", "minimum": 2},
+            "svcQueueCap": {"$ref": "#/definitions/positive"},
+            "maxBody": {"$ref": "#/definitions/positive"}
+          }
+        },
+        "extraArgs": {"type": "array", "items": {"type": "string"}},
+        "resources": {"type": "object"}
+      }
+    },
+    "tunnel": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "image": {"$ref": "#/definitions/image"},
+        "id": {"type": "string", "pattern": "^(|tunnel_[A-Za-z0-9]+)$"},
+        "controlPlaneBaseUrl": {"type": "string", "pattern": "^https://"},
+        "apiKeySecret": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {"name": {"type": "string"}, "key": {"type": "string", "minLength": 1}}
+        },
+        "oauthOrigins": {"type": "array", "items": {"type": "string", "pattern": "^https://"}},
+        "extraArgs": {"type": "array", "items": {"type": "string"}},
+        "resources": {"type": "object"}
+      }
+    },
+    "persistence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "existingClaim": {"type": "string"},
+        "size": {"type": "string"},
+        "storageClassName": {"type": "string"},
+        "labels": {"type": "object"}
+      }
+    },
+    "httpRoute": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "hostnames": {"type": "array", "items": {"type": "string"}},
+        "parentRefs": {"type": "array", "items": {"type": "object"}},
+        "mcp": {"type": "boolean"}
+      }
+    },
+    "custodyAlerts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "namespace": {"type": "string"},
+        "labels": {"type": "object"},
+        "selector": {"type": "string"}
+      }
+    },
+    "podAnnotations": {"type": "object"},
+    "nodeSelector": {"type": "object"},
+    "tolerations": {"type": "array"},
+    "affinity": {"type": "object"}
+  }
+}

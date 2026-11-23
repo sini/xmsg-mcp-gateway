@@ -25,7 +25,8 @@ configured scopes and owner-set grant policy. An invalid profile refuses startup
 instead of falling back to identity-only use.
 Local acceptance does not authorize a hosted deployment: the
 [deployment and exposure requirements](docs/serving.md#deployment-boundaries)
-still apply.
+still apply. A reference Helm chart for the gateway, its xmsg leaf and an optional
+tunnel sidecar is in `charts/xmsg-mcp-gateway/`; see [Kubernetes](docs/kubernetes.md).
 
 ## Rust grant-store foundation
 

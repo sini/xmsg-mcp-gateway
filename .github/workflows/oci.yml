@@ -46,6 +46,10 @@ jobs:
         run: |
           nix build -L --no-link --print-out-paths .#checks.x86_64-linux.image
 
+      - name: Run Kubernetes chart check
+        run: |
+          nix build -L --no-link --print-out-paths .#checks.x86_64-linux.k8s
+
       - name: Push image to GHCR
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         run: |

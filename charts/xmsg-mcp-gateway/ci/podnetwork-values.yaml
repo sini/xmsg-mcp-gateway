@@ -1,0 +1,58 @@
+# Example (reference; adapt): pod-network listener behind a Gateway API proxy, the
+# tunnel sidecar, the authorization-server migration and the custody alerts.
+image: {digest: "sha256:0000000000000000000000000000000000000000000000000000000000000001"}
+xmsg:
+  image: {digest: "sha256:0000000000000000000000000000000000000000000000000000000000000002"}
+  principal: xmsg-mcp-gateway
+  tls: {existingSecret: gateway-xmsg-tls}
+  peers:
+    owner.hub:
+      address: hub.example.com:7788
+      ca: /etc/xmsg/tls/ca.crt
+      identities: ["spiffe://example.com/host/hub/user/owner"]
+      allow: [send, reply, list]
+gateway: {podNetwork: true}
+secrets:
+  existingSecret: gateway
+  items:
+    - {key: lookup-secret}
+    - {key: events-key, mode: "0600", base64Decode: true}
+store:
+  eventsKey: events-key
+  authorizationServer: true
+  grants:
+    - id: owner
+      binding: {service: xmsg-mcp-gateway, issuer: https://auth.example.com/oauth2/openid/gateway, resource: https://gateway.example.com/mcp, subject: 00000000-0000-4000-8000-000000000001, hosted_client: gateway}
+      policy:
+        send: {targets: ["*@owner.hub"], required_scope: "xmsg:send"}
+        reply: {targets: ["*@owner.hub"], required_scope: "xmsg:reply"}
+tunnel:
+  enabled: true
+  image: {digest: "sha256:0000000000000000000000000000000000000000000000000000000000000003"}
+  id: tunnel_0123456789abcdef0123456789abcdef
+  apiKeySecret: {name: gateway}
+  oauthOrigins: ["https://auth.example.com", "https://gateway.example.com"]
+httpRoute:
+  enabled: true
+  hostnames: [gateway.example.com]
+  parentRefs: [{name: public-gateway, namespace: gateways}]
+custodyAlerts:
+  enabled: true
+  labels: {loki_rule: "true"}
+serving:
+  request_timeout_ms: 60000
+  allowed_hosts: ["127.0.0.1", "localhost", "gateway.example.com"]
+  allowed_origins: []
+  verifier:
+    service: xmsg-mcp-gateway
+    issuer: https://auth.example.com/oauth2/openid/gateway
+    resource: https://gateway.example.com/mcp
+    subject: 00000000-0000-4000-8000-000000000001
+    hosted_client: gateway
+    timeout_ms: 5000
+  messaging:
+    xmsg: {expected_node: gateway.example}
+  events:
+    key_file: /run/xmsg-mcp-gateway/keys/events-key
+    grant_id: owner
+    dispatch_timeout_ms: 16000

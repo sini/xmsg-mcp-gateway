@@ -1,0 +1,23 @@
+{{- include "gw.checkBudgets" . -}}
+# Nonsecret owner configuration: world-readable, never writable (docs/serving.md).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "gw.fullname" . }}-config
+  labels:
+    {{- include "gw.labels" . | nindent 4 }}
+data:
+  serving.json: {{ include "gw.serving" . | quote }}
+  {{- range .Values.store.grants }}
+  {{ printf "binding-%s.json" .id }}: {{ required "store.grants[].binding is required" .binding | toJson | quote }}
+  {{ printf "policy-%s.json" .id }}: {{ required "store.grants[].policy is required" .policy | toJson | quote }}
+  {{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "gw.fullname" . }}-peers
+  labels:
+    {{- include "gw.labels" . | nindent 4 }}
+data:
+  peers.json: {{ dict "peers" .Values.xmsg.peers | toJson | quote }}
