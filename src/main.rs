@@ -66,7 +66,10 @@ enum Command {
         #[arg(long)]
         reason: String,
     },
-    Init,
+    Init {
+        #[arg(long)]
+        if_needed: bool,
+    },
     MigrationsPending,
     MigrateAttachments {
         #[arg(long)]
@@ -120,6 +123,8 @@ enum Command {
     Enroll {
         id: String,
         binding: PathBuf,
+        #[arg(long)]
+        if_needed: bool,
     },
     Enable {
         id: String,
@@ -278,9 +283,21 @@ async fn run(cli: Cli) -> Result<(), CommandError> {
                 std::process::exit(10);
             }
         }
-        (Some(state), Command::Init) => {
-            Store::initialize(&state)?;
-            println!("authority store initialized");
+        (Some(state), Command::Init { if_needed }) => {
+            let created = if if_needed {
+                Store::initialize_if_needed(&state)?
+            } else {
+                Store::initialize(&state)?;
+                true
+            };
+            println!(
+                "{}",
+                if created {
+                    "authority store initialized"
+                } else {
+                    "authority store already initialized"
+                }
+            );
         }
         (Some(state), Command::MigrateAttachments { if_needed }) => {
             let mut store = Store::open(&state)?;
@@ -413,12 +430,37 @@ async fn run(cli: Cli) -> Result<(), CommandError> {
                 println!("unchanged at revision {}", result.revision);
             }
         }
-        (Some(state), Command::Enroll { id, binding }) => {
+        (
+            Some(state),
+            Command::Enroll {
+                id,
+                binding,
+                if_needed,
+            },
+        ) => {
             let document = std::fs::read(binding).map_err(CommandError::ReadBinding)?;
             let binding: Binding =
                 serde_json::from_slice(&document).map_err(CommandError::InvalidDocument)?;
-            Store::open(&state)?.enroll(&id, &binding)?;
-            println!("grant enrolled disabled at revision 1");
+            let mut store = Store::open(&state)?;
+            if if_needed {
+                let result = store.enroll_if_needed(&id, &binding)?;
+                if result.created {
+                    println!("grant enrolled disabled at revision 1");
+                } else {
+                    println!(
+                        "grant unchanged at revision {} ({})",
+                        result.revision,
+                        if result.enabled {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        }
+                    );
+                }
+            } else {
+                store.enroll(&id, &binding)?;
+                println!("grant enrolled disabled at revision 1");
+            }
         }
         (Some(state), Command::Enable { id, revision }) => {
             let next = Store::open(&state)?.set_enabled(&id, revision, true)?;

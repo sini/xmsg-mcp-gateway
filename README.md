@@ -68,10 +68,19 @@ The owner supplies `binding.json` with exactly these fields:
 
 The subject and hosted client refer to the intended verified token recipient,
 separate from any introspection caller. Enrollment starts disabled at revision 1;
-each state change advances the revision. Unknown, stale and unchanged IDs fail
-with a nonzero exit and no success output. An enabled-binding conflict has a
+each state change advances the revision. Revision-guarded enable/disable commands
+reject unknown, stale or unchanged state with a nonzero exit and no success output. An enabled-binding conflict has a
 specific diagnostic, distinct from an unavailable store. Missing or unrecognized state fails
 closed; initialization is explicit and never overwrites an existing store.
+
+For repeatable owner bootstrap, `init --if-needed` creates a missing store or
+validates an existing recognized store without resetting it. It does not migrate
+or repair general corruption. `enroll --if-needed grant-id binding.json` creates
+a missing grant disabled at revision 1; an existing ID succeeds only when all five
+binding fields match exactly. That no-op preserves its current enabled state,
+revision, policies, callback and history data. A different binding is a typed
+conflict, never an overwrite or an implicit enable. Without the flags, the
+existing strict init/enroll behavior remains.
 
 The Rust token-verification boundary is described in [verified-token foundation](docs/verified-identity.md). The identity listener consumes this boundary.
 Optional `verifier.audience` selects the exact token audience, defaulting to the

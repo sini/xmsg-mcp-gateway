@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::auth::VerifiedIdentity;
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use rusqlite::{
+    params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
+};
 use serde::Deserialize;
 use serde_json::Value;
 use thiserror::Error;
@@ -34,6 +36,13 @@ pub struct Authorization {
     pub revision: i64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnrollmentResult {
+    pub created: bool,
+    pub revision: i64,
+    pub enabled: bool,
+}
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("grant denied")]
@@ -44,6 +53,8 @@ pub enum Error {
     Conflict,
     #[error("invalid empty grant binding")]
     InvalidBinding,
+    #[error("grant id is already enrolled for a different exact binding")]
+    EnrollmentConflict,
     #[error("unrecognized authority store")]
     InvalidStore,
     #[error("authority store belongs to a different service, resource or owner profile")]
@@ -114,6 +125,17 @@ impl Store {
             connection,
             file: file.canonicalize()?,
         })
+    }
+
+    pub fn initialize_if_needed(file: &Path) -> Result<bool, Error> {
+        match Self::initialize(file) {
+            Ok(_) => Ok(true),
+            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                Self::open_readonly(file)?;
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub fn open(file: &Path) -> Result<Self, Error> {
@@ -368,7 +390,7 @@ impl Store {
         Ok(())
     }
 
-    pub fn enroll(&mut self, id: &str, binding: &Binding) -> Result<(), Error> {
+    fn validate_binding(id: &str, binding: &Binding) -> Result<(), Error> {
         if [
             id,
             &binding.service,
@@ -382,7 +404,10 @@ impl Store {
         {
             return Err(Error::InvalidBinding);
         }
-        let tx = self.connection.transaction()?;
+        Ok(())
+    }
+
+    fn insert_enrollment(tx: &Transaction<'_>, id: &str, binding: &Binding) -> Result<(), Error> {
         tx.execute(
             "INSERT INTO grants (id, service, issuer, resource, subject, hosted_client, revision, enabled)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, 0)",
@@ -395,8 +420,48 @@ impl Store {
                 [id],
             )?;
         }
+        Ok(())
+    }
+
+    pub fn enroll(&mut self, id: &str, binding: &Binding) -> Result<(), Error> {
+        Self::validate_binding(id, binding)?;
+        let tx = self.connection.transaction()?;
+        Self::insert_enrollment(&tx, id, binding)?;
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn enroll_if_needed(
+        &mut self,
+        id: &str,
+        binding: &Binding,
+    ) -> Result<EnrollmentResult, Error> {
+        Self::validate_binding(id, binding)?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing = tx.query_row(
+            "SELECT service,issuer,resource,subject,hosted_client,revision,enabled FROM grants WHERE id=?1",
+            [id], |row| Ok((Binding { service: row.get(0)?, issuer: row.get(1)?, resource: row.get(2)?, subject: row.get(3)?, hosted_client: row.get(4)? }, row.get::<_, i64>(5)?, row.get::<_, bool>(6)?)),
+        ).optional()?;
+        if let Some((existing, revision, enabled)) = existing {
+            if existing != *binding {
+                return Err(Error::EnrollmentConflict);
+            }
+            tx.commit()?;
+            return Ok(EnrollmentResult {
+                created: false,
+                revision,
+                enabled,
+            });
+        }
+        Self::insert_enrollment(&tx, id, binding)?;
+        tx.commit()?;
+        Ok(EnrollmentResult {
+            created: true,
+            revision: 1,
+            enabled: false,
+        })
     }
 
     pub fn set_enabled(&mut self, id: &str, revision: i64, enabled: bool) -> Result<i64, Error> {

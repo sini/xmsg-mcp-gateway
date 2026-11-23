@@ -559,6 +559,20 @@ status/ack plus same-key client retry; an autonomous resubmission worker is sepa
 
 ## Repeatable migrations in a shell-less init chain
 
+The owner can repeat `--state /state/grants.db init --if-needed`: it creates a
+missing store or validates an existing one without resetting authority. Enrollment
+also accepts `--if-needed`:
+
+```sh
+xmsg-mcp-gateway --state /state/grants.db enroll --if-needed grant-id /config/binding.json
+```
+
+A new ID starts disabled at revision 1. An existing ID must match every binding
+field exactly; success preserves enabled state, revision, policies, callbacks and
+history. A different binding is refused, including when the old grant is disabled.
+Neither command repairs an unrecognized store or enables authority. Keep explicit
+owner enablement separate from routine restarts.
+
 Each existing `migrate-*` command accepts `--if-needed`. It performs a needed
 migration normally, or prints `already migrated` and exits 0 without writing an
 already-migrated database. Without that flag, existing strict refusal behavior
@@ -576,7 +590,7 @@ existing entrypoint; no shell, conditional command or scratch database is needed
 | Retirement | `["--state", "/state/grants.db", "migrate-retirement", "--if-needed"]` |
 | Custody summaries | `["--state", "/state/grants.db", "migrate-custody-summaries", "--if-needed"]` |
 | Events, when used | `["--state", "/state/grants.db", "migrate-events", "--if-needed", "--key-file", "/config/events-key"]` |
-| Owner policy | `["--state", "/state/grants.db", "apply", "--id", "grant-id", "--policy", "/config/policy.json", "--enabled"]` |
+| Owner policy | `["--state", "/state/grants.db", "apply", "--id", "grant-id", "--policy", "/config/policy.json"]` |
 
 For example, this init container preserves the OCI entrypoint:
 
@@ -593,7 +607,10 @@ initContainers:
 Use the same pinned gateway image and state mount for every step and for the main
 container; mount the policy and optional Events key where the args specify. Add
 one init container per remaining row. Initial database creation and enrollment
-remain explicit owner actions. Stop all gateway processes and take a backup before
+remain explicit owner actions, with the idempotent flags above available for a
+repeatable owner bootstrap. The policy row deliberately omits `--enabled` to
+preserve the existing enabled state; enable new grants only as an explicit owner
+action at their current revision. Stop all gateway processes and take a backup before
 running migrations; follow the existing backup/rollback requirements. This recipe
 is a deployment example, not an instruction to change a running service.
 

@@ -34,7 +34,7 @@ fn authority(error: &grants::Error) -> &'static str {
     match error {
         grants::Error::Denied => "store_denied",
         grants::Error::NoChange => "store_no_change",
-        grants::Error::Conflict => "store_conflict",
+        grants::Error::Conflict | grants::Error::EnrollmentConflict => "store_conflict",
         grants::Error::InvalidBinding => "store_invalid_binding",
         grants::Error::InvalidStore => "store_invalid",
         grants::Error::ProfileMismatch => "store_profile_mismatch",
