@@ -82,6 +82,14 @@ revision, policies, callback and history data. A different binding is a typed
 conflict, never an overwrite or an implicit enable. Without the flags, the
 existing strict init/enroll behavior remains.
 
+Before a needed migration, run
+`--state .state/grants.db backup-if-pending --backup-dir .state/backups --keep 5`.
+It exits 0 for either no pending work or a published consistent SQLite snapshot.
+A complete store causes no backup creation or pruning; retention only follows
+successful durable publication and only touches matching completed backups for
+the canonical store path. See [snapshot and recovery behavior](docs/serving.md#snapshot-before-a-pending-migration)
+for private permissions, identity scope, retained evidence and rollback rules.
+
 The Rust token-verification boundary is described in [verified-token foundation](docs/verified-identity.md). The identity listener consumes this boundary.
 Optional `verifier.audience` selects the exact token audience, defaulting to the
 canonical resource URL. An override does not change resource metadata or the

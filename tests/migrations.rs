@@ -528,3 +528,553 @@ fn enroll_if_needed_preserves_enabled_revision_and_outbound_policy() {
         String::from_utf8_lossy(&result.stderr)
     );
 }
+
+#[test]
+fn backup_if_pending_complete_store_has_no_backup_effects() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("state.db");
+    complete(&file, &key(dir.path()));
+    let backups = dir.path().join("backups");
+    let before = authority_digest(&file);
+    let result = run(
+        &file,
+        &[
+            "backup-if-pending",
+            "--backup-dir",
+            backups.to_str().unwrap(),
+            "--keep",
+            "1",
+        ],
+    );
+    assert!(
+        !backups.exists(),
+        "a complete store must not create a backup directory"
+    );
+    assert_eq!(
+        authority_digest(&file),
+        before,
+        "a complete backup check must not write authority"
+    );
+    assert!(
+        result.status.success(),
+        "complete backup check must exit zero: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn backup_if_pending_captures_committed_wal_state_with_private_snapshot() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("state.db");
+    let mut store = Store::initialize(&file).unwrap();
+    store
+        .enroll(
+            "grant",
+            &xmsg_mcp_gateway::grants::Binding {
+                service: "service".into(),
+                issuer: "issuer".into(),
+                resource: "resource".into(),
+                subject: "subject".into(),
+                hosted_client: "client".into(),
+            },
+        )
+        .unwrap();
+    drop(store);
+    let writer = rusqlite::Connection::open(&file).unwrap();
+    writer.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; UPDATE grants SET revision=7 WHERE id='grant';").unwrap();
+    let control = dir.path().join("bare-copy.db");
+    std::fs::copy(&file, &control).unwrap();
+    let bare = rusqlite::Connection::open(&control).unwrap();
+    assert_eq!(
+        bare.query_row("SELECT revision FROM grants WHERE id='grant'", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1,
+        "fixture must distinguish a bare file copy from the committed WAL snapshot"
+    );
+    drop(bare);
+    let source_before = authority_digest(&file);
+    let backups = dir.path().join("backups");
+    let result = run(
+        &file,
+        &[
+            "backup-if-pending",
+            "--backup-dir",
+            backups.to_str().unwrap(),
+            "--keep",
+            "1",
+        ],
+    );
+    assert!(
+        backups.exists(),
+        "pending migration backup must publish a completed snapshot"
+    );
+    let completed: Vec<_> = std::fs::read_dir(&backups)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.join("database").is_file() && p.join("manifest.json").is_file())
+        .collect();
+    assert_eq!(
+        completed.len(),
+        1,
+        "pending backup must publish exactly one completed pair"
+    );
+    let database = completed[0].join("database");
+    let snapshot = rusqlite::Connection::open_with_flags(
+        &database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    assert_eq!(
+        snapshot
+            .query_row("SELECT revision FROM grants WHERE id='grant'", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        7,
+        "backup must include committed WAL authority, not just main-file bytes"
+    );
+    assert_eq!(
+        snapshot
+            .query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+    assert_eq!(
+        authority_digest(&file),
+        source_before,
+        "backup must not modify the source database"
+    );
+    assert_eq!(
+        writer
+            .query_row("SELECT revision FROM grants WHERE id='grant'", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        7
+    );
+    for p in [&backups, &completed[0]] {
+        assert_eq!(
+            std::fs::metadata(p).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+    for p in [&database, &completed[0].join("manifest.json")] {
+        assert_eq!(
+            std::fs::metadata(p).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn init_if_needed_rejects_corrupt_incompatible_and_dangling_state_without_reset() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, kind) in [("garbage.db", 0), ("foreign.db", 1), ("future.db", 2)] {
+        let file = dir.path().join(name);
+        if kind == 0 {
+            std::fs::write(&file, b"not an authority database").unwrap();
+        } else if kind == 1 {
+            rusqlite::Connection::open(&file)
+                .unwrap()
+                .execute_batch("PRAGMA application_id=42; CREATE TABLE unrelated(value TEXT);")
+                .unwrap();
+        } else {
+            Store::initialize(&file).unwrap();
+            rusqlite::Connection::open(&file)
+                .unwrap()
+                .pragma_update(None, "user_version", 99)
+                .unwrap();
+        }
+        let before = authority_digest(&file);
+        let result = run(&file, &["init", "--if-needed"]);
+        assert_eq!(
+            authority_digest(&file),
+            before,
+            "invalid existing state was reset"
+        );
+        assert_eq!(
+            result.status.code(),
+            Some(1),
+            "invalid existing state was accepted: {name}"
+        );
+    }
+    let target = dir.path().join("absent.db");
+    let dangling = dir.path().join("dangling.db");
+    std::os::unix::fs::symlink(&target, &dangling).unwrap();
+    let result = run(&dangling, &["init", "--if-needed"]);
+    assert!(
+        !target.exists(),
+        "dangling initialization must never create the symlink target"
+    );
+    assert!(std::fs::symlink_metadata(&dangling)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(result.status.code(), Some(1));
+    let valid = dir.path().join("valid.db");
+    Store::initialize(&valid).unwrap();
+    let alias = dir.path().join("alias.db");
+    std::os::unix::fs::symlink(&valid, &alias).unwrap();
+    let before = authority_digest(&valid);
+    let result = run(&alias, &["init", "--if-needed"]);
+    assert_eq!(authority_digest(&valid), before);
+    assert!(std::fs::symlink_metadata(&alias)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(
+        result.status.success(),
+        "a valid existing alias must retain the existing readonly-open behavior"
+    );
+}
+
+#[test]
+fn enroll_if_needed_inserts_disabled_once_and_refuses_binding_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("state.db");
+    Store::initialize(&file).unwrap();
+    let document = dir.path().join("binding.json");
+    let original = serde_json::json!({"service":"service","issuer":"issuer","resource":"resource","subject":"subject","hosted_client":"client"});
+    std::fs::write(&document, serde_json::to_vec(&original).unwrap()).unwrap();
+    let result = run(
+        &file,
+        &["enroll", "--if-needed", "grant", document.to_str().unwrap()],
+    );
+    let c = rusqlite::Connection::open(&file).unwrap();
+    assert_eq!(
+        c.query_row(
+            "SELECT revision,enabled FROM grants WHERE id='grant'",
+            [],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?))
+        )
+        .unwrap(),
+        (1, false),
+        "new enrollment must remain disabled at revision one"
+    );
+    drop(c);
+    assert!(result.status.success());
+    let before = authority_digest(&file);
+    for field in ["service", "issuer", "resource", "subject", "hosted_client"] {
+        let mut changed = original.clone();
+        changed[field] = serde_json::json!(format!("other-{field}"));
+        std::fs::write(&document, serde_json::to_vec(&changed).unwrap()).unwrap();
+        let result = run(
+            &file,
+            &["enroll", "--if-needed", "grant", document.to_str().unwrap()],
+        );
+        assert_eq!(
+            authority_digest(&file),
+            before,
+            "binding mismatch {field} changed authority"
+        );
+        assert_eq!(
+            result.status.code(),
+            Some(1),
+            "binding mismatch {field} was silently accepted"
+        );
+    }
+}
+
+#[test]
+fn strict_duplicate_enrollment_preserves_legacy_enabled_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("state.db");
+    let mut store = Store::initialize(&file).unwrap();
+    store
+        .enroll(
+            "grant",
+            &xmsg_mcp_gateway::grants::Binding {
+                service: "service".into(),
+                issuer: "issuer".into(),
+                resource: "resource".into(),
+                subject: "subject".into(),
+                hosted_client: "client".into(),
+            },
+        )
+        .unwrap();
+    drop(store);
+    rusqlite::Connection::open(&file)
+        .unwrap()
+        .execute("UPDATE grants SET revision=7,enabled=1", [])
+        .unwrap();
+    let document = dir.path().join("binding.json");
+    std::fs::write(&document, br#"{"service":"other","issuer":"issuer","resource":"resource","subject":"subject","hosted_client":"client"}"#).unwrap();
+    let before = authority_digest(&file);
+    let result = run(&file, &["enroll", "grant", document.to_str().unwrap()]);
+    assert_eq!(
+        authority_digest(&file),
+        before,
+        "strict duplicate enrollment clobbered legacy authority"
+    );
+    assert_eq!(result.status.code(), Some(1));
+}
+
+#[test]
+#[ignore = "test-only SQLite crash writer; parent supplies private fixture and kills/reaps it"]
+fn hot_journal_writer_for_migrations_cli() {
+    let file = std::env::var_os("UNIT5_HOT_DB").expect("crash helper requires fixture database");
+    let ready = std::env::var_os("UNIT5_HOT_READY").unwrap();
+    let c = rusqlite::Connection::open(file).unwrap();
+    c.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA cache_size=1; PRAGMA cache_spill=ON; BEGIN IMMEDIATE; UPDATE crash_marker SET value='uncommitted' WHERE id=1; UPDATE grants SET revision=99,enabled=0; INSERT INTO crash_marker SELECT value+2,zeroblob(8192) FROM json_each('[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]');").unwrap();
+    std::fs::write(ready, b"READY").unwrap();
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+}
+
+#[test]
+fn migrations_pending_cli_preserves_hot_journal_before_rollback_and_reports_pending() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::ExitStatusExt;
+    struct Writer(std::process::Child);
+    impl Drop for Writer {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("state.db");
+    Store::initialize(&file).unwrap();
+    rusqlite::Connection::open(&file).unwrap().execute_batch("CREATE TABLE crash_marker(id INTEGER PRIMARY KEY,value BLOB); INSERT INTO crash_marker VALUES(1,'committed'); INSERT INTO grants VALUES('grant','service','issuer','resource','subject','client',1,1);").unwrap();
+    let committed = authority_digest(&file);
+    let ready = dir.path().join("ready");
+    let mut writer = Writer(
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "hot_journal_writer_for_migrations_cli",
+                "--nocapture",
+            ])
+            .env("UNIT5_HOT_DB", &file)
+            .env("UNIT5_HOT_READY", &ready)
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !ready.exists() {
+        assert!(
+            writer.0.try_wait().unwrap().is_none(),
+            "crash writer exited before READY"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "crash writer READY deadline"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    writer.0.kill().unwrap();
+    assert_eq!(writer.0.wait().unwrap().signal(), Some(9));
+    let raw_database = std::fs::read(&file).unwrap();
+    assert_ne!(
+        authority_digest(&file),
+        committed,
+        "dirty pages must spill before the crash"
+    );
+    let journal = dir.path().join("state.db-journal");
+    let raw_journal = std::fs::read(&journal).unwrap();
+    assert!(raw_journal.len() > 512);
+    assert_eq!(
+        &raw_journal[..8],
+        &[0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7]
+    );
+    let result = run(&file, &["migrations-pending"]);
+    let recovery = dir.path().join("state.db.recovery");
+    assert!(
+        recovery.is_dir(),
+        "migrations-pending must preserve crash evidence before rollback"
+    );
+    let pairs: Vec<_> = std::fs::read_dir(&recovery)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(
+        pairs.len(),
+        1,
+        "migrations-pending must preserve one crash pair"
+    );
+    use sha2::Digest;
+    assert_eq!(
+        authority_digest(&pairs[0].join("database")),
+        <[u8; 32]>::from(sha2::Sha256::digest(&raw_database))
+    );
+    assert_eq!(
+        authority_digest(&pairs[0].join("journal")),
+        <[u8; 32]>::from(sha2::Sha256::digest(&raw_journal))
+    );
+    for item in [&recovery, &pairs[0]] {
+        assert_eq!(
+            std::fs::metadata(item).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+    for item in [pairs[0].join("database"), pairs[0].join("journal")] {
+        assert_eq!(
+            std::fs::metadata(item).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    assert_eq!(
+        result.status.code(),
+        Some(10),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(result.stdout, b"migrate-custody\nmigrate-outbound\nmigrate-retirement\nmigrate-custody-summaries\nmigrate-events\nmigrate-profiles\nmigrate-attachments\nmigrate-authorization-server\n");
+    let c =
+        rusqlite::Connection::open_with_flags(&file, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    assert_eq!(
+        c.query_row("SELECT value FROM crash_marker WHERE id=1", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        "committed"
+    );
+    assert_eq!(
+        c.query_row(
+            "SELECT revision,enabled FROM grants WHERE id='grant'",
+            [],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?))
+        )
+        .unwrap(),
+        (1, true)
+    );
+}
+
+#[test]
+fn backup_if_pending_resolves_relative_directory_in_cli_working_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("state.db");
+    Store::initialize(&file).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_xmsg-mcp-gateway"))
+        .current_dir(dir.path())
+        .arg("--state")
+        .arg(&file)
+        .args([
+            "backup-if-pending",
+            "--backup-dir",
+            "backups",
+            "--keep",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    let root = dir.path().join("backups");
+    let complete = std::fs::read_dir(&root)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().join("manifest.json").is_file())
+        .count();
+    assert_eq!(
+        complete, 1,
+        "relative backup directory must receive a completed snapshot"
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn backup_if_pending_complete_store_does_not_prune_existing_snapshots() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("state.db");
+    Store::initialize(&file).unwrap();
+    let root = dir.path().join("backups");
+    for _ in 0..3 {
+        assert!(run(
+            &file,
+            &[
+                "backup-if-pending",
+                "--backup-dir",
+                root.to_str().unwrap(),
+                "--keep",
+                "10"
+            ]
+        )
+        .status
+        .success());
+    }
+    let event_key = key(dir.path());
+    for command in COMMANDS {
+        let mut args = vec![command, "--if-needed"];
+        if command == "migrate-events" {
+            args.extend(["--key-file", event_key.to_str().unwrap()]);
+        }
+        let result = run(&file, &args);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    assert!(run(&file, &["migrations-pending"]).status.success());
+    let inventory = || {
+        let mut found: Vec<_> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| {
+                let artifact = entry.unwrap().path();
+                (
+                    artifact.file_name().unwrap().to_owned(),
+                    authority_digest(&artifact.join("database")),
+                    authority_digest(&artifact.join("manifest.json")),
+                )
+            })
+            .collect();
+        found.sort();
+        found
+    };
+    let before = inventory();
+    assert_eq!(before.len(), 3);
+    let authority = authority_digest(&file);
+    let result = run(
+        &file,
+        &[
+            "backup-if-pending",
+            "--backup-dir",
+            root.to_str().unwrap(),
+            "--keep",
+            "1",
+        ],
+    );
+    assert_eq!(
+        inventory(),
+        before,
+        "a complete store must not prune its existing rollback snapshots"
+    );
+    assert_eq!(authority_digest(&file), authority);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn backup_if_pending_rejects_zero_retention_before_filesystem_effects() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("state.db");
+    Store::initialize(&file).unwrap();
+    let root = dir.path().join("backups");
+    let before = authority_digest(&file);
+    let result = run(
+        &file,
+        &[
+            "backup-if-pending",
+            "--backup-dir",
+            root.to_str().unwrap(),
+            "--keep",
+            "0",
+        ],
+    );
+    assert!(!root.exists());
+    assert_eq!(authority_digest(&file), before);
+    assert_eq!(result.status.code(), Some(2));
+}

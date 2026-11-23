@@ -71,6 +71,12 @@ enum Command {
         if_needed: bool,
     },
     MigrationsPending,
+    BackupIfPending {
+        #[arg(long)]
+        backup_dir: PathBuf,
+        #[arg(long)]
+        keep: std::num::NonZeroUsize,
+    },
     MigrateAttachments {
         #[arg(long)]
         if_needed: bool,
@@ -148,6 +154,8 @@ enum CommandError {
     UnexpectedState,
     #[error(transparent)]
     Configuration(#[from] xmsg_mcp_gateway::serving::StartupError),
+    #[error(transparent)]
+    Backup(#[from] xmsg_mcp_gateway::grants::BackupError),
     #[error("MCP server failed")]
     Serve(#[source] std::io::Error),
     #[error(transparent)]
@@ -273,6 +281,18 @@ async fn run(cli: Cli) -> Result<(), CommandError> {
                 events.replay(&id, generation, cursor.as_deref(), &operator, &reason)?
             };
             println!("{result}");
+        }
+        (Some(state), Command::BackupIfPending { backup_dir, keep }) => {
+            let result = Store::open_readonly(&state)?.backup_if_pending(&backup_dir, keep)?;
+            println!(
+                "{}",
+                match result {
+                    xmsg_mcp_gateway::grants::BackupResult::NoPendingMigrations =>
+                        "no migrations pending",
+                    xmsg_mcp_gateway::grants::BackupResult::Published =>
+                        "authority store backup completed",
+                }
+            );
         }
         (Some(state), Command::MigrationsPending) => {
             let pending = Store::open_readonly(&state)?.pending_migrations()?;
