@@ -425,3 +425,106 @@ fn attachment_marker_and_as_migrations_work_in_both_orders_and_preserve_metadata
             .is_empty());
     }
 }
+
+fn authority_digest(file: &Path) -> [u8; 32] {
+    use sha2::Digest;
+    sha2::Sha256::digest(std::fs::read(file).unwrap()).into()
+}
+
+#[test]
+fn init_if_needed_creates_missing_store_then_preserves_existing_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("state.db");
+    let created = run(&file, &["init", "--if-needed"]);
+    assert!(
+        file.exists(),
+        "init --if-needed must create the missing authority store"
+    );
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let binding = xmsg_mcp_gateway::grants::Binding {
+        service: "service".into(),
+        issuer: "issuer".into(),
+        resource: "resource".into(),
+        subject: "subject".into(),
+        hosted_client: "client".into(),
+    };
+    let mut store = Store::open(&file).unwrap();
+    store.enroll("grant", &binding).unwrap();
+    drop(store);
+    rusqlite::Connection::open(&file)
+        .unwrap()
+        .execute(
+            "UPDATE grants SET revision=7, enabled=1 WHERE id='grant'",
+            [],
+        )
+        .unwrap();
+    let before = authority_digest(&file);
+    let result = run(&file, &["init", "--if-needed"]);
+    assert_eq!(
+        authority_digest(&file),
+        before,
+        "existing initialization must not reset authority"
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn enroll_if_needed_preserves_enabled_revision_and_outbound_policy() {
+    use xmsg_mcp_gateway::grants::Binding;
+    use xmsg_mcp_gateway::outbound::{Permission, Policy};
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("state.db");
+    complete(&file, &key(dir.path()));
+    let binding = Binding {
+        service: "service".into(),
+        issuer: "issuer".into(),
+        resource: "resource".into(),
+        subject: "subject".into(),
+        hosted_client: "client".into(),
+    };
+    let mut store = Store::open(&file).unwrap();
+    store.enroll("grant", &binding).unwrap();
+    let revision = store.set_enabled("grant", 1, true).unwrap();
+    assert_eq!(
+        store
+            .set_outbound_policy(
+                "grant",
+                revision,
+                &Policy {
+                    send: Some(Permission {
+                        targets: ["receiver@peer".into()].into(),
+                        required_scope: "messages:send".into()
+                    }),
+                    reply: None,
+                }
+            )
+            .unwrap(),
+        3
+    );
+    drop(store);
+    let document = dir.path().join("binding.json");
+    std::fs::write(&document, br#"{"service":"service","issuer":"issuer","resource":"resource","subject":"subject","hosted_client":"client"}"#).unwrap();
+    let before = authority_digest(&file);
+    let result = run(
+        &file,
+        &["enroll", "--if-needed", "grant", document.to_str().unwrap()],
+    );
+    assert_eq!(
+        authority_digest(&file),
+        before,
+        "an exact enrollment must preserve every authority byte"
+    );
+    assert!(
+        result.status.success(),
+        "enroll --if-needed must accept the exact existing binding: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
