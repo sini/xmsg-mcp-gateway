@@ -948,7 +948,7 @@ fn is_exact_hub_routed_target(name: &str) -> bool {
     if let Some((parent, child)) = name.split_once('/') {
         return is_uuid_shaped(parent) && is_qualified_subagent_id(child);
     }
-    xmsg::client::validate_service_name(name).is_ok()
+    false
 }
 
 pub async fn list(

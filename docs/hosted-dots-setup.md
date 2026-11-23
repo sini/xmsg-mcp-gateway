@@ -625,15 +625,16 @@ When the gateway's leaf sidecar only peers with a hub (`default_route = true`)
 and a dot sends to a node behind that hub, the sidecar's `list` view does not
 include the remote node (`not_found` / unknown node). If the grant's
 `send.targets` includes `*@<node>`, `xmsg_send` falls through
-(`hub_routed_unverified`) only for **exact canonical addresses**:
+(`hub_routed_unverified`) only for **exact instance or subagent IDs**:
 
 - `<instance-uuid>@<node>`
 - `<uuid>/<child_id>@<node>` (already-qualified subagent ID, no parent lookup)
-- `<service>@<node>`
 
-Labels, bare names, and subaddresses requiring parent lookup cannot be verified
-through `list` and are refused with `not_verifiable_via_hub`. Non-`*` grants
-and non-`not_found` `list` errors continue to fail closed.
+Labels, bare names, subaddresses requiring parent lookup, and service names
+cannot be distinguished from labels without a `list` view and are refused with
+`not_verifiable_via_hub` (services on hub-routed nodes are not reachable from
+a dot until list forwarding exists). Non-`*` grants and non-`not_found` `list`
+errors continue to fail closed.
 3. Revoke the runtime key, and delete the tunnel if it won't be reused.
 
 ## 9. Report

@@ -213,7 +213,6 @@ async fn admitted_hub_routed_node_exact_address_proceeds_to_send() {
             "req-sub",
             "0199cecf-a11c-7000-8000-0000000a11ce/0199cecf-b0b0-7000-8000-00000000b0b0@sini.patch",
         ),
-        ("req-svc", "agy-patch@sini.patch"),
     ];
     for (req_id, target) in cases {
         let out = dispatch(
@@ -236,14 +235,13 @@ async fn admitted_hub_routed_node_exact_address_proceeds_to_send() {
             }))
         );
     }
-    assert_eq!(h.list_calls.load(Ordering::SeqCst), 3);
-    assert_eq!(h.send_calls.load(Ordering::SeqCst), 3);
+    assert_eq!(h.list_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(h.send_calls.load(Ordering::SeqCst), 2);
     assert_eq!(
         *seen_targets.lock().unwrap(),
         vec![
             "0199cecf-a11c-7000-8000-0000000a11ce@sini.patch",
             "0199cecf-a11c-7000-8000-0000000a11ce/0199cecf-b0b0-7000-8000-00000000b0b0@sini.patch",
-            "agy-patch@sini.patch",
         ]
     );
     h.server.abort();
@@ -262,6 +260,8 @@ async fn admitted_hub_routed_node_label_or_parent_lookup_refused() {
     .await;
 
     let cases = [
+        ("req-lbl-agy", "agy@sini.patch"),
+        ("req-lbl-svc-shaped", "xmsg-codex-b@sini.patch"),
         ("req-lbl-dot", "foo.bar@sini.patch"),
         ("req-lbl-reserved", "xmsg@sini.patch"),
         (
@@ -287,7 +287,7 @@ async fn admitted_hub_routed_node_label_or_parent_lookup_refused() {
             "expected NotVerifiableViaHub for {target}, got {err:?}"
         );
     }
-    assert_eq!(h.list_calls.load(Ordering::SeqCst), 4);
+    assert_eq!(h.list_calls.load(Ordering::SeqCst), 6);
     assert_eq!(h.send_calls.load(Ordering::SeqCst), 0);
     h.server.abort();
 }
