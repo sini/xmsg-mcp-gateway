@@ -650,7 +650,12 @@ unrecognized or corrupt stores fail instead of creating a replacement database.
 The existing conditional hot-journal recovery described below still applies before
 inspection can determine the committed migration state.
 
-The pending decision and backup share one SQLite read snapshot. The implementation
+An initial read-only complete-store check returns without creating or locking the
+backup root. For pending work, directory coordination precedes a fresh read-only
+store open and final pending check; the final decision and backup share that new
+SQLite snapshot. Work that became complete while waiting publishes and prunes
+nothing. Both read-only opens retain the conditional hot-journal recovery below.
+The backup API itself does not write the source. The implementation
 uses the [SQLite online backup API](https://www.sqlite.org/backup.html), so committed
 WAL data is included rather than copying only the main file. The command does not
 migrate, enroll, enable a grant or change authority. Stop gateway writers before

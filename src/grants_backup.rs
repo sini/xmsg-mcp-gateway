@@ -351,22 +351,29 @@ impl Store {
         root: &Path,
         keep: NonZeroUsize,
     ) -> Result<BackupResult, BackupError> {
-        // Pin the migration decision and copied pages to the same SQLite snapshot.
-        let snapshot_guard = self.connection.unchecked_transaction()?;
-        let pending_migrations = self.pending_migrations_snapshot()?;
-        if pending_migrations.is_empty() {
+        if self.pending_migrations()?.is_empty() {
             return Ok(BackupResult::NoPendingMigrations);
         }
-        let owner = fs::metadata(&self.file)?;
-        ensure_root(root, &owner)?;
+        let initial_owner = fs::metadata(&self.file)?;
+        ensure_root(root, &initial_owner)?;
+        before_coordination(root);
+        let directory_lock = lock_directory(root, &initial_owner, Duration::from_secs(30))?;
+        let source = Store::open_readonly(&self.file)?;
+        // Recheck and copy one fresh SQLite snapshot only after coordination.
+        let snapshot_guard = source.connection.unchecked_transaction()?;
+        if source.pending_migrations_snapshot()?.is_empty() {
+            return Ok(BackupResult::NoPendingMigrations);
+        }
+        let owner = fs::metadata(&source.file)?;
+        validate_directory(root, &owner)?;
         let store = base64::engine::general_purpose::STANDARD
-            .encode(self.file.as_os_str().as_encoded_bytes());
+            .encode(source.file.as_os_str().as_encoded_bytes());
         let mut random = [0u8; 16];
         getrandom::fill(&mut random).map_err(|_| BackupError::Metadata)?;
         let nonce = hex(&random);
         let pending = root.join(format!(".gateway-backup-pending-{nonce}"));
         create_directory(&pending)?;
-        snapshot(&self.connection, &pending.join("database"))?;
+        snapshot(&source.connection, &pending.join("database"))?;
         drop(snapshot_guard);
         let created_ns = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -386,7 +393,6 @@ impl Store {
         document.write_all(&serde_json::to_vec(&manifest).map_err(|_| BackupError::Metadata)?)?;
         document.sync_all()?;
         File::open(&pending)?.sync_all()?;
-        let directory_lock = lock_directory(root, &owner, Duration::from_secs(30))?;
         let final_path = root.join(name(&manifest).ok_or(BackupError::Metadata)?);
         // Rename may replace only the empty destination reserved by this operation.
         before_reserve(&final_path);
@@ -436,3 +442,14 @@ fn before_prune(_path: &Path) {
 }
 #[cfg(test)]
 thread_local! { static BEFORE_PRUNE: std::cell::RefCell<Option<PublishHook>> = const { std::cell::RefCell::new(None) }; }
+
+fn before_coordination(_root: &Path) {
+    #[cfg(test)]
+    BEFORE_COORDINATION.with(|hook| {
+        if let Some(callback) = hook.borrow_mut().take() {
+            callback(_root);
+        }
+    });
+}
+#[cfg(test)]
+thread_local! { static BEFORE_COORDINATION: std::cell::RefCell<Option<PublishHook>> = const { std::cell::RefCell::new(None) }; }

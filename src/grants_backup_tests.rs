@@ -490,3 +490,98 @@ fn concurrent_publishers_retain_a_completed_rollback_point() {
         1
     );
 }
+
+#[test]
+fn waiting_publisher_resnapshots_after_coordination_and_retains_revision_two() {
+    use std::sync::mpsc::channel;
+    let (dir, file, store) = fixture();
+    drop(store);
+    let root = dir.path().join("backups");
+    std::thread::scope(|scope| {
+        let (entered, reached) = channel();
+        let (resume, released) = channel();
+        let file_a = file.clone();
+        let root_a = root.clone();
+        let first = scope.spawn(move || {
+            BEFORE_COORDINATION.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move |_| {
+                    entered.send(()).unwrap();
+                    released
+                        .recv_timeout(Duration::from_secs(15))
+                        .expect("publisher coordination release deadline");
+                }))
+            });
+            Store::open_readonly(&file_a)
+                .unwrap()
+                .backup_if_pending(&root_a, keep(1))
+        });
+        reached
+            .recv_timeout(Duration::from_secs(15))
+            .expect("publisher did not reach coordination boundary");
+        Connection::open(&file)
+            .unwrap()
+            .execute("UPDATE grants SET revision=2", [])
+            .unwrap();
+        backup(&Store::open_readonly(&file).unwrap(), &root, 1);
+        resume.send(()).unwrap();
+        assert_eq!(first.join().unwrap().unwrap(), BackupResult::Published);
+    });
+    let retained = entries(&root);
+    assert_eq!(retained.len(), 1);
+    let c = Connection::open_with_flags(
+        retained[0].join("database"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    assert_eq!(c.query_row("SELECT revision FROM grants", [], |row| row.get::<_,i64>(0)).unwrap(), 2,
+        "waiting publisher must resnapshot after coordination instead of restoring stale revision one");
+}
+
+#[test]
+fn final_complete_recheck_never_publishes_or_prunes_after_waiting() {
+    use std::io::Write;
+    let (dir, file, store) = fixture();
+    let root = dir.path().join("backups");
+    for _ in 0..3 {
+        backup(&store, &root, 10);
+    }
+    let previous: Vec<_> = entries(&root)
+        .into_iter()
+        .map(|p| {
+            let before = tree(&p);
+            (p, before)
+        })
+        .collect();
+    let key_file = dir.path().join("events-key");
+    let mut key_output = create_private_file(&key_file).unwrap();
+    key_output.write_all(&[7; 32]).unwrap();
+    key_output.sync_all().unwrap();
+    drop(key_output);
+    let event_key = crate::event_store::EventKey::load(&key_file).unwrap();
+    BEFORE_COORDINATION.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move |_| {
+            let mut migrated = Store::open(&file).unwrap();
+            migrated.migrate_custody().unwrap();
+            migrated.migrate_outbound().unwrap();
+            migrated.migrate_retirement().unwrap();
+            migrated.migrate_events(&event_key).unwrap();
+            migrated.migrate_profiles().unwrap();
+            migrated.migrate_attachments().unwrap();
+            migrated.migrate_authorization_server().unwrap();
+        }))
+    });
+    let result = store.backup_if_pending(&root, keep(1));
+    for (p, before) in previous {
+        assert_eq!(
+            tree(&p),
+            before,
+            "final complete recheck pruned a prior snapshot"
+        );
+    }
+    assert_eq!(
+        entries(&root).len(),
+        3,
+        "final complete recheck published an unnecessary snapshot"
+    );
+    assert_eq!(result.unwrap(), BackupResult::NoPendingMigrations);
+}
