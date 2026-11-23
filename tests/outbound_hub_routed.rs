@@ -265,6 +265,14 @@ async fn admitted_hub_routed_node_label_or_parent_lookup_refused() {
         ("req-lbl-dot", "foo.bar@sini.patch"),
         ("req-lbl-reserved", "xmsg@sini.patch"),
         (
+            "req-nonhex-uuid",
+            "zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz@sini.patch",
+        ),
+        (
+            "req-nonhex-sub-parent",
+            "zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz/0199cecf-b0b0-7000-8000-00000000b0b0@sini.patch",
+        ),
+        (
             "req-sub-lbl-child",
             "0199cecf-a11c-7000-8000-0000000a11ce/researcher@sini.patch",
         ),
@@ -287,7 +295,7 @@ async fn admitted_hub_routed_node_label_or_parent_lookup_refused() {
             "expected NotVerifiableViaHub for {target}, got {err:?}"
         );
     }
-    assert_eq!(h.list_calls.load(Ordering::SeqCst), 6);
+    assert_eq!(h.list_calls.load(Ordering::SeqCst), 8);
     assert_eq!(h.send_calls.load(Ordering::SeqCst), 0);
     h.server.abort();
 }
