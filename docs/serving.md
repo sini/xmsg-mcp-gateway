@@ -634,7 +634,60 @@ If exit 10 reports work, stop every gateway process, back up the database, then
 run the existing shellless init chain above. Restart only after migration succeeds;
 rollback requires the pre-migration backup. Ordinary inspection itself needs no backup.
 
-### Crash recovery during inspection (planned)
+### Snapshot before a pending migration
+
+The owner CLI can back up a store without shell conditionals:
+
+```sh
+xmsg-mcp-gateway --state /state/grants.db backup-if-pending --backup-dir /state/backups --keep 5
+```
+
+`--keep` is required and must be at least 1. Exit 0 means either no migration is
+pending or a completed backup was published and retention finished. A normal
+complete-store check does not create or enumerate the backup directory, publish a
+snapshot or prune old backups, even if the requested retention is smaller. Missing,
+unrecognized or corrupt stores fail instead of creating a replacement database.
+The existing conditional hot-journal recovery described below still applies before
+inspection can determine the committed migration state.
+
+The pending decision and backup share one SQLite read snapshot. The implementation
+uses the [SQLite online backup API](https://www.sqlite.org/backup.html), so committed
+WAL data is included rather than copying only the main file. The command does not
+migrate, enroll, enable a grant or change authority. Stop gateway writers before
+the backup/migration chain and follow the existing rollback procedure.
+
+Run as the store owner and choose an owner-controlled backup directory. It must
+have private permission bits `0700` and the store's UID; existing unsafe directories
+are refused, not repaired. Each completed private directory contains `database`
+and `manifest.json`, both mode `0600`. A pending snapshot is synced before atomic
+publication into an exclusively reserved destination; a changed destination is
+refused. Publication and its parent-directory sync finish before any pruning.
+Failure retains available incomplete evidence and never prunes preexisting
+completed backups before successful publication.
+
+An exclusive advisory lock on the backup directory coordinates publication through
+retention across concurrent CLI publishers; no lock file or authority-store write
+is needed. Waiting is bounded to 30 seconds. Unsupported locking and other lock
+errors refuse before publication or pruning, with no unsafe fallback. The normal
+no-pending path does not create the directory or acquire this lock.
+
+Retention recognizes only completed directories whose versioned name, private
+regular files, exact inventory, database checksum and manifest match. Identity is
+the exact canonical store path, recorded as encoded bytes in the manifest and a
+SHA256 namespace in the name; it is not a permanent database UUID or inode.
+Another canonical path has a different namespace. Replacing a store at the same
+canonical path reuses that identity: choose a different backup directory first if
+its earlier incarnation's history must be retained separately.
+
+The current publication is always retained as the newest rollback point, even if
+a previous host clock was ahead. Remaining slots among the newest `N` are selected
+by recorded creation time, with `N` at least 1. Unknown, foreign-store,
+checksum/name/inventory-mismatched, legacy or incomplete entries are left alone, including files that merely share the prefix. Crash-recovery pairs below
+`<store>.recovery/` are a separate forensic record and are not managed by this
+retention. Inspect incomplete records manually while maintenance is stopped;
+this command does not delete them automatically.
+
+### Crash recovery during inspection
 
 A killed writer can leave a hot SQLite rollback journal. A read-only connection cannot roll it
 back, so `migrations-pending` previously failed with `authority store unavailable`. Read-only

@@ -275,6 +275,10 @@ impl Store {
 
     pub fn pending_migrations(&self) -> Result<Vec<&'static str>, crate::outbound::Error> {
         let _snapshot = self.connection.unchecked_transaction()?;
+        self.pending_migrations_snapshot()
+    }
+
+    fn pending_migrations_snapshot(&self) -> Result<Vec<&'static str>, crate::outbound::Error> {
         Self::validate_connection(&self.connection)?;
         tracing::debug!(target:"gateway_migrations_snapshot", "read-only migration snapshot pinned");
         let mut pending = Vec::new();
@@ -562,3 +566,11 @@ mod recovery;
 #[cfg(all(test, unix))]
 #[path = "grants_recovery_tests.rs"]
 mod recovery_tests;
+
+#[path = "grants_backup.rs"]
+mod backup;
+pub use backup::{BackupError, BackupResult};
+
+#[cfg(test)]
+#[path = "grants_bootstrap_tests.rs"]
+mod bootstrap_tests;
