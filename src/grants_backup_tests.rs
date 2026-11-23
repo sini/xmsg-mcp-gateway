@@ -355,7 +355,11 @@ fn pending_backup_refuses_nonprivate_directory_without_repair() {
     let before = tree(&root);
     let source_before = tree(&file);
     let result = store.backup_if_pending(&root, keep(1));
-    assert_eq!(tree(&root), before);
+    assert_eq!(
+        tree(&root),
+        before,
+        "nonprivate backup directory was modified or repaired"
+    );
     assert_eq!(tree(&file), source_before);
     assert!(matches!(result, Err(BackupError::Directory)));
 }
