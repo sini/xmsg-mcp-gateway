@@ -8,6 +8,13 @@
 # the gateway image's own user.
 uid: 10001
 
+# Optional override for the generated resource name prefix (defaults to <release>-xmsg-mcp-gateway).
+fullnameOverride: ""
+
+serviceAccount:
+  # Optional ServiceAccount name override (defaults to gw.fullname).
+  name: ""
+
 image:
   repository: ghcr.io/sini/xmsg-mcp-gateway
   tag: latest
@@ -150,3 +157,5 @@ podAnnotations: {}
 nodeSelector: {}
 tolerations: []
 affinity: {}
+# Extra pod volumes (for example, volumes mounted by store.preMigrate hooks).
+extraVolumes: []

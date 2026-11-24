@@ -117,7 +117,8 @@ initialization never resets an existing store.
 
 `store.preMigrate` remains an explicit owner-configured slot. For example, add a
 same-UID gateway container with these arguments and a `data` volume mount at
-`/var/lib/xmsg-mcp-gateway`:
+`/var/lib/xmsg-mcp-gateway` (use top-level `extraVolumes` if a `store.preMigrate`
+hook needs additional pod volumes):
 
 ```yaml
 args:
@@ -137,6 +138,11 @@ backups of this store. It creates nothing and prunes nothing when no migration i
 pending. The chart does not configure backups automatically. Rolling back an image
 that changed the schema means restoring a compatible backup; see
 [store maintenance](serving.md#snapshot-before-a-pending-migration).
+
+To preserve an existing workload's object names and SPIFFE `sa/<name>` identity, set
+`fullnameOverride` (which overrides the `<release>-xmsg-mcp-gateway` prefix on every
+rendered resource) and optionally `serviceAccount.name` (which overrides the
+ServiceAccount name and `pod.serviceAccountName` independently).
 
 ## Exposure and probes
 

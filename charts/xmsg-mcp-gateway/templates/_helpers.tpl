@@ -1,5 +1,17 @@
 {{- define "gw.fullname" -}}
+{{- if .Values.fullnameOverride -}}
+{{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
 {{- printf "%s-xmsg-mcp-gateway" .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "gw.serviceAccountName" -}}
+{{- if and .Values.serviceAccount .Values.serviceAccount.name -}}
+{{- .Values.serviceAccount.name -}}
+{{- else -}}
+{{- include "gw.fullname" . -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "gw.selectorLabels" -}}

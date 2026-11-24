@@ -31,7 +31,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
-      serviceAccountName: {{ include "gw.fullname" . }}
+      serviceAccountName: {{ include "gw.serviceAccountName" . }}
       automountServiceAccountToken: false
       enableServiceLinks: false
       securityContext:
@@ -249,3 +249,6 @@ spec:
               {{- range .Values.secrets.items }}
               - {key: {{ .key | quote }}, path: {{ .key | quote }}}
               {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}

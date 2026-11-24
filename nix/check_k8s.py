@@ -76,6 +76,9 @@ MUTANTS = [
     ("envelope", "deployment.yaml", "type: Recreate", "type: RollingUpdate"),
     ("envelope", "deployment.yaml", "fsGroupChangePolicy: OnRootMismatch", "fsGroupChangePolicy: Always"),
     ("budgets", "configmap.yaml", '{{- include "gw.checkBudgets" . -}}', ""),
+    ("naming", "_helpers.tpl", "{{- if .Values.fullnameOverride -}}", "{{- if false -}}"),
+    ("naming", "serviceaccount.yaml", 'name: {{ include "gw.serviceAccountName" . }}', 'name: {{ include "gw.fullname" . }}'),
+    ("extra-volumes", "deployment.yaml", "{{- with .Values.extraVolumes }}\n        {{- toYaml . | nindent 8 }}\n        {{- end }}\n", ""),
 ]
 
 
@@ -216,6 +219,61 @@ def run(chart):
     r = helm(chart, files[0], "--set", "serving.request_timeout_ms=30000")
     if r.returncode == 0 or "request_timeout_ms" not in r.stderr:
         failed.setdefault("budgets", []).append("a 30 s request budget rendered")
+
+    # 8. naming: default unchanged; fullnameOverride and serviceAccount.name reach every object.
+    def check_naming(docs, label, expected_full, expected_sa):
+        by_kind = {}
+        for d in docs:
+            by_kind.setdefault(d["kind"], []).append(d)
+        dep = by_kind["Deployment"][0]
+        pod = dep["spec"]["template"]["spec"]
+        vols = {v["name"]: v for v in pod.get("volumes", [])}
+        checks = [
+            ("Deployment", dep["metadata"]["name"] == expected_full, dep["metadata"]["name"]),
+            ("ServiceAccount", [s["metadata"]["name"] for s in by_kind.get("ServiceAccount", [])] == [expected_sa], by_kind.get("ServiceAccount", [])),
+            ("pod.serviceAccountName", pod.get("serviceAccountName") == expected_sa, pod.get("serviceAccountName")),
+            ("Service", [s["metadata"]["name"] for s in by_kind.get("Service", [])] == [expected_full], by_kind.get("Service", [])),
+            ("PVC", [p["metadata"]["name"] for p in by_kind.get("PersistentVolumeClaim", [])] == [expected_full], by_kind.get("PersistentVolumeClaim", [])),
+            ("volume.data.claimName", vols.get("data", {}).get("persistentVolumeClaim", {}).get("claimName") == expected_full, vols.get("data")),
+            ("volume.peers", vols.get("peers", {}).get("configMap", {}).get("name") == f"{expected_full}-peers", vols.get("peers")),
+            ("volume.config", vols.get("config", {}).get("configMap", {}).get("name") == f"{expected_full}-config", vols.get("config")),
+            ("ConfigMaps", all(c["metadata"]["name"].startswith(f"{expected_full}-") for c in by_kind.get("ConfigMap", [])), [c["metadata"]["name"] for c in by_kind.get("ConfigMap", [])]),
+            ("HTTPRoutes", all(
+                hr["metadata"]["name"] == expected_full or hr["metadata"]["name"].startswith(f"{expected_full}-")
+                for hr in by_kind.get("HTTPRoute", [])
+            ), [hr["metadata"]["name"] for hr in by_kind.get("HTTPRoute", [])]),
+            ("HTTPRoute.backendRefs", all(
+                b["name"] == expected_full
+                for hr in by_kind.get("HTTPRoute", [])
+                for rule in hr["spec"]["rules"]
+                for b in rule.get("backendRefs", [])
+            ), "backendRefs"),
+        ]
+        for what, ok, detail in checks:
+            if not ok:
+                failed.setdefault("naming", []).append(f"{label} ({what}): {detail}")
+
+    check_naming(render(chart, files[1]), "default", "t-xmsg-mcp-gateway", "t-xmsg-mcp-gateway")
+    for label, sets, exp_full, exp_sa in [
+        ("fullnameOverride", ["--set", "fullnameOverride=xmsg-gateway"], "xmsg-gateway", "xmsg-gateway"),
+        ("fullnameOverride+serviceAccount.name", ["--set", "fullnameOverride=xmsg-gateway", "--set", "serviceAccount.name=xmsg-gateway-sa"], "xmsg-gateway", "xmsg-gateway-sa"),
+    ]:
+        r = helm(chart, files[1], *sets)
+        if r.returncode != 0:
+            failed.setdefault("naming", []).append(f"{label} render failed: {r.stderr.strip()}")
+        else:
+            check_naming([d for d in yaml.safe_load_all(r.stdout) if d], label, exp_full, exp_sa)
+
+    # 9. extraVolumes: additional pod volumes render on the Deployment pod spec.
+    r = helm(chart, files[0], "--set-json", 'extraVolumes=[{"name":"hook-vol","emptyDir":{}}]')
+    if r.returncode != 0:
+        failed.setdefault("extra-volumes", []).append(f"render failed: {r.stderr.strip()}")
+    else:
+        docs = [d for d in yaml.safe_load_all(r.stdout) if d]
+        pod_vols = {v["name"] for d in docs if d["kind"] == "Deployment" for v in d["spec"]["template"]["spec"].get("volumes", [])}
+        if "hook-vol" not in pod_vols:
+            failed.setdefault("extra-volumes", []).append(f"hook-vol missing from {sorted(pod_vols)}")
+
     return failed
 
 
