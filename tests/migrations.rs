@@ -827,9 +827,13 @@ fn hot_journal_writer_for_migrations_cli() {
     }
 }
 
-#[test]
-fn migrations_pending_cli_preserves_hot_journal_before_rollback_and_reports_pending() {
-    use std::os::unix::fs::PermissionsExt;
+struct HotJournalFixture {
+    dir: tempfile::TempDir,
+    file: std::path::PathBuf,
+    raw_database: Vec<u8>,
+    raw_journal: Vec<u8>,
+}
+fn hot_journal_fixture() -> HotJournalFixture {
     use std::os::unix::process::ExitStatusExt;
     struct Writer(std::process::Child);
     impl Drop for Writer {
@@ -884,6 +888,23 @@ fn migrations_pending_cli_preserves_hot_journal_before_rollback_and_reports_pend
         &raw_journal[..8],
         &[0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7]
     );
+    HotJournalFixture {
+        dir,
+        file,
+        raw_database,
+        raw_journal,
+    }
+}
+
+#[test]
+fn migrations_pending_cli_preserves_hot_journal_before_rollback_and_reports_pending() {
+    use std::os::unix::fs::PermissionsExt;
+    let HotJournalFixture {
+        dir,
+        file,
+        raw_database,
+        raw_journal,
+    } = hot_journal_fixture();
     let result = run(&file, &["migrations-pending"]);
     let recovery = dir.path().join("state.db.recovery");
     assert!(
@@ -1077,4 +1098,138 @@ fn backup_if_pending_rejects_zero_retention_before_filesystem_effects() {
     assert!(!root.exists());
     assert_eq!(authority_digest(&file), before);
     assert_eq!(result.status.code(), Some(2));
+}
+
+#[test]
+fn backup_cli_error_stops_the_next_migration() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("state.db");
+    Store::initialize(&file).unwrap();
+    let root = dir.path().join("unsafe-backups");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(root.join("operator-note"), b"untouched").unwrap();
+    let before = std::fs::read(&file).unwrap();
+    let modified = std::fs::metadata(&file).unwrap().modified().unwrap();
+    let pending = Store::open_readonly(&file)
+        .unwrap()
+        .pending_migrations()
+        .unwrap();
+    assert!(!pending.is_empty());
+    let output = run(
+        &file,
+        &[
+            "backup-if-pending",
+            "--backup-dir",
+            root.to_str().unwrap(),
+            "--keep",
+            "1",
+        ],
+    );
+    let next = if output.status.success() {
+        Some(run(&file, &["migrate-custody", "--if-needed"]))
+    } else {
+        None
+    };
+    assert_eq!(
+        std::fs::read(&file).unwrap(),
+        before,
+        "backup failure must stop the next actual migration"
+    );
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().modified().unwrap(),
+        modified
+    );
+    assert_eq!(
+        Store::open_readonly(&file)
+            .unwrap()
+            .pending_migrations()
+            .unwrap(),
+        pending
+    );
+    assert_eq!(
+        std::fs::read(root.join("operator-note")).unwrap(),
+        b"untouched"
+    );
+    assert_eq!(
+        std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+    assert!(
+        !output.status.success(),
+        "backup refusal must not exit successfully"
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("no migrations pending"),
+        "backup refusal must not claim a complete store"
+    );
+    assert!(
+        next.is_none(),
+        "a failed init-container step must stop its successor"
+    );
+}
+
+#[test]
+fn init_if_needed_preserves_as_found_hot_journal_before_recovery() {
+    let HotJournalFixture {
+        dir,
+        file,
+        raw_database,
+        raw_journal,
+    } = hot_journal_fixture();
+    let output = run(&file, &["init", "--if-needed"]);
+    let recovery = dir.path().join("state.db.recovery");
+    assert!(
+        recovery.is_dir(),
+        "init-if-needed must preserve the as-found hot DB and journal before recovery"
+    );
+    let pairs: Vec<_> = std::fs::read_dir(&recovery)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(pairs.len(), 1);
+    assert_eq!(
+        std::fs::read(pairs[0].join("database")).unwrap(),
+        raw_database
+    );
+    assert_eq!(
+        std::fs::read(pairs[0].join("journal")).unwrap(),
+        raw_journal
+    );
+    assert!(output.status.success());
+    let connection =
+        rusqlite::Connection::open_with_flags(&file, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT revision,enabled FROM grants WHERE id='grant'",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?))
+            )
+            .unwrap(),
+        (1, true)
+    );
+    drop(connection);
+    let before = std::fs::read(&file).unwrap();
+    let modified = std::fs::metadata(&file).unwrap().modified().unwrap();
+    let journal = std::fs::read(dir.path().join("state.db-journal")).ok();
+    let repeat = run(&file, &["init", "--if-needed"]);
+    assert_eq!(
+        std::fs::read(&file).unwrap(),
+        before,
+        "quiescent initialization must preserve bytes"
+    );
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().modified().unwrap(),
+        modified,
+        "quiescent initialization must preserve mtime"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("state.db-journal")).ok(),
+        journal
+    );
+    assert_eq!(std::fs::read_dir(&recovery).unwrap().count(), 1);
+    assert!(repeat.status.success());
 }

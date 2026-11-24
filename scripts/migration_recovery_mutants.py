@@ -168,6 +168,23 @@ def verify_artifacts(artifacts):
             raise RuntimeError("artifact identity guard failed")
 
 
+def production_scope(source, start, end):
+    section = re.search(r"(?m)^#\[cfg\(test\)\]", source)
+    boundary = section.start() if section else len(source)
+    if end > boundary:
+        raise ValueError("test-only mutation refused")
+    for attribute in re.finditer(
+        r"(?m)^[ \t]+#\[cfg\(test\)\][ \t]*\n", source[:boundary]
+    ):
+        stop = source.find("\n", attribute.end())
+        stop = len(source) if stop == -1 else stop + 1
+        statement = source[attribute.end() : stop]
+        if not re.fullmatch(r"[ \t]+[A-Za-z_][A-Za-z0-9_]*\([^;\n]*\);\s*", statement):
+            raise ValueError("unrecognized inline test-only instrumentation")
+        if start < stop and end > attribute.start():
+            raise ValueError("test-only mutation refused")
+
+
 def validate(cases):
     names = [case["id"] for case in cases]
     if len(names) != len(set(names)) or any(
@@ -183,9 +200,7 @@ def validate(cases):
                 "production anchor missing, ambiguous or no-op: " + case["id"]
             )
         offset = source.index(case["needle"])
-        boundary = source.find("#[cfg(test)]")
-        if boundary != -1 and offset >= boundary:
-            raise ValueError("test-only mutation refused")
+        production_scope(source, offset, offset + len(case["needle"]))
         if case["target"] not in {"lib", "migrations"}:
             raise ValueError("unknown witness target")
         relative = Path(case["test_file"])

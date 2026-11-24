@@ -624,3 +624,155 @@ fn directory_guard_unlocks_with_retained_open_description_on_success_and_error()
         drop(inherited);
     }
 }
+
+#[test]
+fn backup_snapshot_matches_pending_decision_during_wal_writer_commit() {
+    let (dir, file, store) = fixture();
+    store
+        .connection
+        .pragma_update(None, "journal_mode", "WAL")
+        .unwrap();
+    let root = dir.path().join("backups");
+    let (start, begin) = std::sync::mpsc::sync_channel(1);
+    let (committed, done) = std::sync::mpsc::sync_channel(1);
+    std::thread::scope(|scope| {
+        let source = file.clone();
+        let writer = scope.spawn(move || {
+            let connection = Connection::open(source).unwrap();
+            connection.busy_timeout(Duration::from_secs(15)).unwrap();
+            begin
+                .recv_timeout(Duration::from_secs(15))
+                .expect("writer start acknowledgement");
+            connection.execute_batch("BEGIN IMMEDIATE; CREATE TABLE snapshot_migration_marker(value INTEGER NOT NULL); INSERT INTO snapshot_migration_marker VALUES(7); UPDATE grants SET revision=7; COMMIT;").unwrap();
+            committed.send(()).unwrap();
+        });
+        BEFORE_SNAPSHOT.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |_| {
+                start.send(()).unwrap();
+                done.recv_timeout(Duration::from_secs(15))
+                    .expect("WAL writer commit acknowledgement");
+            }));
+        });
+        let result = store.backup_if_pending(&root, keep(1));
+        writer.join().unwrap();
+        let artifacts = entries(&root);
+        assert_eq!(artifacts.len(), 1);
+        let copied: i64 = Connection::open_with_flags(
+            artifacts[0].join("database"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap()
+        .query_row("SELECT revision FROM grants", [], |row| row.get(0))
+        .unwrap();
+        let copied_schema: i64 = Connection::open_with_flags(
+            artifacts[0].join("database"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name='snapshot_migration_marker'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+        assert_eq!(
+            copied_schema, 0,
+            "backup must copy the pending-decision snapshot across a WAL writer commit"
+        );
+        assert_eq!(copied, 1);
+
+        let live: i64 = Connection::open_with_flags(&file, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+            .query_row("SELECT revision FROM grants", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            live, 7,
+            "the independent writer must have committed before copying"
+        );
+        let live_schema: i64 = Connection::open_with_flags(&file, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+            .query_row("SELECT value FROM snapshot_migration_marker", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            live_schema, 7,
+            "the independent WAL schema change must be committed"
+        );
+        assert_eq!(result.unwrap(), BackupResult::Published);
+    });
+}
+
+#[test]
+fn readable_completed_files_are_ignored_without_consuming_retention() {
+    const EFFECT: &str =
+        "readable completed entries must remain untouched and not consume valid backup slots";
+    for filename in ["database", "manifest.json"] {
+        for mode in [0o640, 0o604] {
+            for historical in [true, false] {
+                let (dir, file, store) = fixture();
+                let owner = fs::metadata(&file).unwrap();
+                let root = dir.path().join("backups");
+                let valid = if historical {
+                    backup(&store, &root, 10);
+                    entries(&root).pop()
+                } else {
+                    None
+                };
+                backup(&store, &root, 10);
+                let invalid = entries(&root)
+                    .into_iter()
+                    .find(|path| Some(path) != valid.as_ref())
+                    .unwrap();
+                let mut document: Manifest =
+                    serde_json::from_slice(&fs::read(invalid.join("manifest.json")).unwrap())
+                        .unwrap();
+                document.created_ns = u64::MAX - 1;
+                fs::write(
+                    invalid.join("manifest.json"),
+                    serde_json::to_vec(&document).unwrap(),
+                )
+                .unwrap();
+                let future = root.join(name(&document).unwrap());
+                fs::rename(invalid, &future).unwrap();
+                assert!(
+                    completed(&future, &document.store, &owner).is_some(),
+                    "all non-permission recognition fields must be valid"
+                );
+                fs::set_permissions(future.join(filename), fs::Permissions::from_mode(mode))
+                    .unwrap();
+                let invalid_before = tree(&future);
+                let valid_before = valid.as_ref().map(|path| tree(path));
+                let source_before = tree(&file);
+                let old_paths = entries(&root);
+                let wanted = if historical { 2 } else { 1 };
+                let result = store.backup_if_pending(&root, keep(wanted));
+                assert_eq!(tree(&future), invalid_before, "{EFFECT}");
+                if let Some(path) = valid.as_ref() {
+                    assert_eq!(tree(path), valid_before.unwrap(), "{EFFECT}");
+                }
+                let after = entries(&root);
+                let private: Vec<_> = after
+                    .iter()
+                    .filter(|path| {
+                        fs::metadata(path).unwrap().permissions().mode() & 0o777 == 0o700
+                            && ["database", "manifest.json"].iter().all(|file| {
+                                let metadata = fs::symlink_metadata(path.join(file)).unwrap();
+                                metadata.is_file()
+                                    && metadata.uid() == owner.uid()
+                                    && metadata.permissions().mode() & 0o777 == 0o600
+                            })
+                    })
+                    .collect();
+                assert_eq!(private.len(), wanted, "{EFFECT}");
+                let fresh: Vec<_> = private
+                    .into_iter()
+                    .filter(|path| !old_paths.contains(path))
+                    .collect();
+                assert_eq!(fresh.len(), 1, "a pending store requires a fresh private valid snapshot even with only an invalid entry");
+                assert_eq!(tree(&file), source_before);
+                assert_eq!(result.unwrap(), BackupResult::Published);
+            }
+        }
+    }
+}

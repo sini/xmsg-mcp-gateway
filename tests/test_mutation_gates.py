@@ -174,13 +174,34 @@ class MutationGatesTests(unittest.TestCase):
 
     def test_complete_inventory_and_execution_modes(self):
         self.assertEqual(len(self.suites), 24)
-        self.assertEqual(sum(s["count"] for s in self.suites), 474)
+        self.assertEqual(sum(s["count"] for s in self.suites), 478)
         modes = {(s["script"], tuple(s["args"])) for s in self.suites}
         self.assertIn(("scripts/reservation_lifetime_mutants.py", ("--live",)), modes)
 
+    def test_migration_source_scope_rejects_only_test_instrumentation(self):
+        spec = importlib.util.spec_from_file_location(
+            "migration_scope", ROOT / "scripts/migration_recovery_mutants.py"
+        )
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        source = "fn snapshot() {\n    #[cfg(test)]\n    before_snapshot(target);\n    production_copy();\n}\n#[cfg(test)]\nfn before_snapshot() {}\n"
+        start = source.index("production_copy")
+        runner.production_scope(source, start, start + len("production_copy"))
+        for needle in [
+            "before_snapshot(target)",
+            "fn before_snapshot",
+            "#[cfg(test)]\n    before_snapshot(target);\n    production_copy",
+        ]:
+            start = source.index(needle)
+            with (
+                self.subTest(needle=needle),
+                self.assertRaisesRegex(ValueError, "test-only"),
+            ):
+                runner.production_scope(source, start, start + len(needle))
+
     def test_migration_recovery_requires_all_pairs_and_completion(self):
         suite = next(s for s in self.suites if s["id"] == "migration_recovery")
-        self.assertEqual(suite["count"], 30)
+        self.assertEqual(suite["count"], 34)
         lines = [
             f"{label}-{phase}: exit={status} nonce={'a' * 32}"
             for label in suite["labels"]

@@ -221,6 +221,8 @@ fn lock_directory_with(
     }
 }
 fn snapshot(connection: &Connection, target: &Path) -> Result<(), BackupError> {
+    #[cfg(test)]
+    before_snapshot(target);
     drop(create_private_file(target)?);
     let mut destination = Connection::open_with_flags(target, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     destination.busy_timeout(Duration::ZERO)?;
@@ -421,6 +423,17 @@ impl Store {
         Ok(BackupResult::Published)
     }
 }
+
+#[cfg(test)]
+fn before_snapshot(path: &Path) {
+    BEFORE_SNAPSHOT.with(|hook| {
+        if let Some(callback) = hook.borrow_mut().take() {
+            callback(path);
+        }
+    });
+}
+#[cfg(test)]
+thread_local! { static BEFORE_SNAPSHOT: std::cell::RefCell<Option<PublishHook>> = const { std::cell::RefCell::new(None) }; }
 
 fn before_publish(_path: &Path) {
     #[cfg(test)]

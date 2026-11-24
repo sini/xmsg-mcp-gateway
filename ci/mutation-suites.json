@@ -1674,10 +1674,10 @@
       "id": "migration_recovery",
       "script": "scripts/migration_recovery_mutants.py",
       "args": [],
-      "count": 30,
+      "count": 34,
       "fixture": false,
       "python": false,
-      "completion": "migration-recovery-mutants-complete:30",
+      "completion": "migration-recovery-mutants-complete:34",
       "dependencies": [
         "scripts/migration_recovery_mutants.py",
         "scripts/migration_recovery_mutants.json",
@@ -1722,7 +1722,11 @@
         "backup-retention-checksum",
         "backup-retention-exact-inventory",
         "backup-private-directory-mode",
-        "backup-explicit-unlock-before-close"
+        "backup-explicit-unlock-before-close",
+        "backup-cli-failure-propagates",
+        "init-existing-hot-journal-readonly",
+        "backup-pending-decision-read-transaction",
+        "backup-retention-private-file-mode"
       ],
       "required_output": [
         "^hot\\-journal\\-cli\\-readonly-red: exit=101 nonce=[0-9a-f]{32}$",
@@ -1784,9 +1788,17 @@
         "^backup\\-private\\-directory\\-mode-red: exit=101 nonce=[0-9a-f]{32}$",
         "^backup\\-private\\-directory\\-mode-green: exit=0 nonce=[0-9a-f]{32}$",
         "^backup\\-explicit\\-unlock\\-before\\-close-red: exit=101 nonce=[0-9a-f]{32}$",
-        "^backup\\-explicit\\-unlock\\-before\\-close-green: exit=0 nonce=[0-9a-f]{32}$"
+        "^backup\\-explicit\\-unlock\\-before\\-close-green: exit=0 nonce=[0-9a-f]{32}$",
+        "^backup\\-cli\\-failure\\-propagates-red: exit=101 nonce=[0-9a-f]{32}$",
+        "^backup\\-cli\\-failure\\-propagates-green: exit=0 nonce=[0-9a-f]{32}$",
+        "^init\\-existing\\-hot\\-journal\\-readonly-red: exit=101 nonce=[0-9a-f]{32}$",
+        "^init\\-existing\\-hot\\-journal\\-readonly-green: exit=0 nonce=[0-9a-f]{32}$",
+        "^backup\\-pending\\-decision\\-read\\-transaction-red: exit=101 nonce=[0-9a-f]{32}$",
+        "^backup\\-pending\\-decision\\-read\\-transaction-green: exit=0 nonce=[0-9a-f]{32}$",
+        "^backup\\-retention\\-private\\-file\\-mode-red: exit=101 nonce=[0-9a-f]{32}$",
+        "^backup\\-retention\\-private\\-file\\-mode-green: exit=0 nonce=[0-9a-f]{32}$"
       ],
-      "script_sha256": "72461dd2311e5761cfbc57dfdbefd91f417d6e102a583d329397110511ba4489"
+      "script_sha256": "52b4f18d87277e47298955a59690397597496a7321d1383780748a2e43618663"
     }
   ]
 }

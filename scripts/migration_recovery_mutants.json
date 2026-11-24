@@ -145,8 +145,8 @@
   {
     "id": "backup-sqlite-api-wal",
     "file": "src/grants_backup.rs",
-    "needle": "fn snapshot(connection: &Connection, target: &Path) -> Result<(), BackupError> {\n    drop(create_private_file(target)?);\n    let mut destination = Connection::open_with_flags(target, OpenFlags::SQLITE_OPEN_READ_WRITE)?;\n    destination.busy_timeout(Duration::ZERO)?;\n    destination.pragma_update(None, \"synchronous\", \"FULL\")?;\n    {\n        let backup = Backup::new(connection, &mut destination)?;\n        let mut busy_since = None;\n        loop {\n            let step_started = Instant::now();\n            match backup.step(64)? {\n                StepResult::Done => break,\n                StepResult::More => busy_since = None,\n                StepResult::Busy | StepResult::Locked => {\n                    if busy_since.get_or_insert(step_started).elapsed() >= Duration::from_secs(30) {\n                        return Err(BackupError::Busy);\n                    }\n                    std::thread::sleep(Duration::from_millis(10));\n                }\n                _ => return Err(BackupError::Metadata),\n            }\n        }\n    }\n    // Published snapshots do not depend on destination WAL sidecars.\n    destination.pragma_update(None, \"journal_mode\", \"DELETE\")?;\n    let integrity: Vec<String> = destination\n        .prepare(\"PRAGMA quick_check\")?\n        .query_map([], |row| row.get(0))?\n        .collect::<Result<_, _>>()?;\n    if integrity != [\"ok\"] {\n        return Err(BackupError::Metadata);\n    }\n    Store::validate_connection(&destination)?;\n    destination\n        .close()\n        .map_err(|(_, error)| BackupError::Database(error))?;\n    File::open(target)?.sync_all()?;\n    Ok(())\n}\n",
-    "replacement": "fn snapshot(connection: &Connection, target: &Path) -> Result<(), BackupError> {\n    drop(create_private_file(target)?);\n    std::fs::copy(connection.path().ok_or(BackupError::Metadata)?, target)?;\n    let destination = Connection::open_with_flags(target, OpenFlags::SQLITE_OPEN_READ_WRITE)?;\n    destination.pragma_update(None, \"journal_mode\", \"DELETE\")?;\n    let integrity: Vec<String> = destination.prepare(\"PRAGMA quick_check\")?.query_map([], |row| row.get(0))?.collect::<Result<_, _>>()?;\n    if integrity != [\"ok\"] { return Err(BackupError::Metadata); }\n    Store::validate_connection(&destination)?;\n    destination.close().map_err(|(_, error)| BackupError::Database(error))?;\n    File::open(target)?.sync_all()?;\n    Ok(())\n}\n",
+    "needle": "    drop(create_private_file(target)?);\n    let mut destination = Connection::open_with_flags(target, OpenFlags::SQLITE_OPEN_READ_WRITE)?;\n    destination.busy_timeout(Duration::ZERO)?;\n    destination.pragma_update(None, \"synchronous\", \"FULL\")?;\n    {\n        let backup = Backup::new(connection, &mut destination)?;\n        let mut busy_since = None;\n        loop {\n            let step_started = Instant::now();\n            match backup.step(64)? {\n                StepResult::Done => break,\n                StepResult::More => busy_since = None,\n                StepResult::Busy | StepResult::Locked => {\n                    if busy_since.get_or_insert(step_started).elapsed() >= Duration::from_secs(30) {\n                        return Err(BackupError::Busy);\n                    }\n                    std::thread::sleep(Duration::from_millis(10));\n                }\n                _ => return Err(BackupError::Metadata),\n            }\n        }\n    }\n    // Published snapshots do not depend on destination WAL sidecars.\n    destination.pragma_update(None, \"journal_mode\", \"DELETE\")?;\n    let integrity: Vec<String> = destination\n        .prepare(\"PRAGMA quick_check\")?\n        .query_map([], |row| row.get(0))?\n        .collect::<Result<_, _>>()?;\n    if integrity != [\"ok\"] {\n        return Err(BackupError::Metadata);\n    }\n    Store::validate_connection(&destination)?;\n    destination\n        .close()\n        .map_err(|(_, error)| BackupError::Database(error))?;\n    File::open(target)?.sync_all()?;\n    Ok(())\n}\n",
+    "replacement": "    drop(create_private_file(target)?);\n    std::fs::copy(connection.path().ok_or(BackupError::Metadata)?, target)?;\n    let destination = Connection::open_with_flags(target, OpenFlags::SQLITE_OPEN_READ_WRITE)?;\n    destination.pragma_update(None, \"journal_mode\", \"DELETE\")?;\n    let integrity: Vec<String> = destination.prepare(\"PRAGMA quick_check\")?.query_map([], |row| row.get(0))?.collect::<Result<_, _>>()?;\n    if integrity != [\"ok\"] { return Err(BackupError::Metadata); }\n    Store::validate_connection(&destination)?;\n    destination.close().map_err(|(_, error)| BackupError::Database(error))?;\n    File::open(target)?.sync_all()?;\n    Ok(())\n}\n",
     "target": "migrations",
     "test_file": "tests/migrations.rs",
     "test": "backup_if_pending_captures_committed_wal_state_with_private_snapshot",
@@ -328,5 +328,49 @@
     "test": "directory_guard_unlocks_with_retained_open_description_on_success_and_error",
     "qualified_test": "grants::backup::tests::directory_guard_unlocks_with_retained_open_description_on_success_and_error",
     "assertion": "guard must explicitly unlock while a retained open description remains alive"
+  },
+  {
+    "id": "backup-cli-failure-propagates",
+    "file": "src/main.rs",
+    "needle": "Store::open_readonly(&state)?.backup_if_pending(&backup_dir, keep)?;",
+    "replacement": "Store::open_readonly(&state)?.backup_if_pending(&backup_dir, keep).unwrap_or(xmsg_mcp_gateway::grants::BackupResult::NoPendingMigrations);",
+    "target": "migrations",
+    "test_file": "tests/migrations.rs",
+    "test": "backup_cli_error_stops_the_next_migration",
+    "qualified_test": "backup_cli_error_stops_the_next_migration",
+    "assertion": "backup failure must stop the next actual migration"
+  },
+  {
+    "id": "init-existing-hot-journal-readonly",
+    "file": "src/grants.rs",
+    "needle": "                Self::open_readonly(file)?;\n                Ok(false)",
+    "replacement": "                Self::open(file)?;\n                Ok(false)",
+    "target": "migrations",
+    "test_file": "tests/migrations.rs",
+    "test": "init_if_needed_preserves_as_found_hot_journal_before_recovery",
+    "qualified_test": "init_if_needed_preserves_as_found_hot_journal_before_recovery",
+    "assertion": "init-if-needed must preserve the as-found hot DB and journal before recovery"
+  },
+  {
+    "id": "backup-pending-decision-read-transaction",
+    "file": "src/grants_backup.rs",
+    "needle": "        create_directory(&pending)?;\n        snapshot(&source.connection, &pending.join(\"database\"))?;\n        drop(snapshot_guard);",
+    "replacement": "        drop(snapshot_guard);\n        create_directory(&pending)?;\n        snapshot(&source.connection, &pending.join(\"database\"))?;",
+    "target": "lib",
+    "test_file": "src/grants_backup_tests.rs",
+    "test": "backup_snapshot_matches_pending_decision_during_wal_writer_commit",
+    "qualified_test": "grants::backup::tests::backup_snapshot_matches_pending_decision_during_wal_writer_commit",
+    "assertion": "backup must copy the pending-decision snapshot across a WAL writer commit"
+  },
+  {
+    "id": "backup-retention-private-file-mode",
+    "file": "src/grants_backup.rs",
+    "needle": "metadata.uid() != owner.uid() || metadata.mode() & 0o777 != 0o600",
+    "replacement": "metadata.uid() != owner.uid() || metadata.mode() & 0o700 != 0o600",
+    "target": "lib",
+    "test_file": "src/grants_backup_tests.rs",
+    "test": "readable_completed_files_are_ignored_without_consuming_retention",
+    "qualified_test": "grants::backup::tests::readable_completed_files_are_ignored_without_consuming_retention",
+    "assertion": "readable completed entries must remain untouched and not consume valid backup slots"
   }
 ]
