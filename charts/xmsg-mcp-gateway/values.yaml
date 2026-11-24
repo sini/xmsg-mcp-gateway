@@ -37,6 +37,20 @@ gateway:
   # Restrict ingress to your proxy with a NetworkPolicy when you turn it on.
   podNetwork: false
   resources: {}
+  probes:
+    readiness:
+      enabled: true
+      # Optional timings (integer seconds/count; null omits the field and uses Kubernetes defaults).
+      initialDelaySeconds: null
+      periodSeconds: 10
+      timeoutSeconds: null
+      failureThreshold: null
+    liveness:
+      enabled: true
+      initialDelaySeconds: 30
+      periodSeconds: 20
+      timeoutSeconds: null
+      failureThreshold: null
 
 # serving.json without the pod-owned fields (bind, allow_non_loopback_bind,
 # grant_store, messaging.xmsg.{service,daemon_uid,register_socket,agent_socket} and

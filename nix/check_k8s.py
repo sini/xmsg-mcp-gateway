@@ -79,6 +79,10 @@ MUTANTS = [
     ("naming", "_helpers.tpl", "{{- if .Values.fullnameOverride -}}", "{{- if false -}}"),
     ("naming", "serviceaccount.yaml", 'name: {{ include "gw.serviceAccountName" . }}', 'name: {{ include "gw.fullname" . }}'),
     ("extra-volumes", "deployment.yaml", "{{- with .Values.extraVolumes }}\n        {{- toYaml . | nindent 8 }}\n        {{- end }}\n", ""),
+    ("probes-default", "deployment.yaml", "periodSeconds: {{ int $r.periodSeconds }}", "periodSeconds: 99"),
+    ("probes-disabled", "deployment.yaml", "{{- if (ternary $r.enabled true (hasKey $r \"enabled\")) }}", "{{- if true }}"),
+    ("probes-timings", "deployment.yaml", "timeoutSeconds: {{ int $r.timeoutSeconds }}", "timeoutSeconds: 99"),
+    ("probes-readiness-allowed-hosts", "_helpers.tpl", "{{- $readinessEnabled := and .Values.gateway.podNetwork (ternary $r.enabled true (hasKey $r \"enabled\")) -}}", "{{- $readinessEnabled := .Values.gateway.podNetwork -}}"),
 ]
 
 
@@ -194,6 +198,25 @@ def assertions(docs, vals):
     yield "envelope", dep.get("strategy", {}).get("type") == "Recreate", dep.get("strategy")
     yield "envelope", psc.get("fsGroupChangePolicy") == "OnRootMismatch", psc.get("fsGroupChangePolicy")
 
+    # 7a. probes-default
+    gw_c = next(c for c in mains if c["name"] == "gateway")
+    if vals.get("gateway", {}).get("podNetwork") and "probes" not in vals.get("gateway", {}):
+        want_r = {
+            "httpGet": {
+                "path": "/.well-known/oauth-protected-resource",
+                "port": "http",
+                "httpHeaders": [{"name": "Host", "value": "127.0.0.1"}],
+            },
+            "periodSeconds": 10,
+        }
+        want_l = {"tcpSocket": {"port": "http"}, "initialDelaySeconds": 30, "periodSeconds": 20}
+        yield "probes-default", gw_c.get("readinessProbe") == want_r, gw_c.get("readinessProbe")
+        yield "probes-default", gw_c.get("livenessProbe") == want_l, gw_c.get("livenessProbe")
+    elif not vals.get("gateway", {}).get("podNetwork"):
+        yield "probes-default", "readinessProbe" not in gw_c and "livenessProbe" not in gw_c, (
+            gw_c.get("readinessProbe"), gw_c.get("livenessProbe")
+        )
+
 
 def run(chart):
     """Return {assertion: [failure details]} over every example values file."""
@@ -273,6 +296,51 @@ def run(chart):
         pod_vols = {v["name"] for d in docs if d["kind"] == "Deployment" for v in d["spec"]["template"]["spec"].get("volumes", [])}
         if "hook-vol" not in pod_vols:
             failed.setdefault("extra-volumes", []).append(f"hook-vol missing from {sorted(pod_vols)}")
+
+    # 10. probes-disabled: each probe can be disabled individually under podNetwork.
+    for dis_key, absent_field, present_field in [
+        ("gateway.probes.readiness.enabled=false", "readinessProbe", "livenessProbe"),
+        ("gateway.probes.liveness.enabled=false", "livenessProbe", "readinessProbe"),
+    ]:
+        r = helm(chart, files[1], "--set", dis_key)
+        if r.returncode != 0:
+            failed.setdefault("probes-disabled", []).append(f"{dis_key} render failed: {r.stderr.strip()}")
+        else:
+            docs = [d for d in yaml.safe_load_all(r.stdout) if d]
+            gw_c = next(c for d in docs if d["kind"] == "Deployment" for c in d["spec"]["template"]["spec"]["containers"] if c["name"] == "gateway")
+            if absent_field in gw_c or present_field not in gw_c:
+                failed.setdefault("probes-disabled", []).append(f"{dis_key}: {absent_field}={gw_c.get(absent_field)} {present_field}={gw_c.get(present_field)}")
+
+    # 11. probes-timings: custom timings reach both readinessProbe and livenessProbe.
+    r = helm(
+        chart, files[1],
+        "--set", "gateway.probes.readiness.initialDelaySeconds=5",
+        "--set", "gateway.probes.readiness.periodSeconds=15",
+        "--set", "gateway.probes.readiness.timeoutSeconds=4",
+        "--set", "gateway.probes.readiness.failureThreshold=6",
+        "--set", "gateway.probes.liveness.initialDelaySeconds=45",
+        "--set", "gateway.probes.liveness.periodSeconds=25",
+        "--set", "gateway.probes.liveness.timeoutSeconds=3",
+        "--set", "gateway.probes.liveness.failureThreshold=5",
+    )
+    if r.returncode != 0:
+        failed.setdefault("probes-timings", []).append(f"render failed: {r.stderr.strip()}")
+    else:
+        docs = [d for d in yaml.safe_load_all(r.stdout) if d]
+        gw_c = next(c for d in docs if d["kind"] == "Deployment" for c in d["spec"]["template"]["spec"]["containers"] if c["name"] == "gateway")
+        rp, lp = gw_c.get("readinessProbe", {}), gw_c.get("livenessProbe", {})
+        if (rp.get("initialDelaySeconds"), rp.get("periodSeconds"), rp.get("timeoutSeconds"), rp.get("failureThreshold")) != (5, 15, 4, 6):
+            failed.setdefault("probes-timings", []).append(f"readinessProbe timings mismatch: {rp}")
+        if (lp.get("initialDelaySeconds"), lp.get("periodSeconds"), lp.get("timeoutSeconds"), lp.get("failureThreshold")) != (45, 25, 3, 5):
+            failed.setdefault("probes-timings", []).append(f"livenessProbe timings mismatch: {lp}")
+
+    # 12. probes-readiness-allowed-hosts: disabling readiness lifts the 127.0.0.1 allowed_hosts requirement.
+    r_req = helm(chart, files[1], "--set", "tunnel.enabled=false", "--set-json", 'serving.allowed_hosts=["gateway.example.com"]')
+    if r_req.returncode == 0 or "allowed_hosts" not in r_req.stderr:
+        failed.setdefault("probes-readiness-allowed-hosts", []).append("expected allowed_hosts failure when readiness is enabled")
+    r_ok = helm(chart, files[1], "--set", "tunnel.enabled=false", "--set", "gateway.probes.readiness.enabled=false", "--set-json", 'serving.allowed_hosts=["gateway.example.com"]')
+    if r_ok.returncode != 0:
+        failed.setdefault("probes-readiness-allowed-hosts", []).append(f"expected render success with readiness disabled: {r_ok.stderr.strip()}")
 
     return failed
 

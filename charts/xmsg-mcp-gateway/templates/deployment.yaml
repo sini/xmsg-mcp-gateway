@@ -157,18 +157,46 @@ spec:
           {{- if .Values.gateway.podNetwork }}
           # The image has no shell, and kubelet reaches only the pod network: probes
           # exist only with podNetwork. Protected-resource metadata is unauthenticated.
+          {{- $probes := .Values.gateway.probes | default dict -}}
+          {{- $r := $probes.readiness | default dict -}}
+          {{- if (ternary $r.enabled true (hasKey $r "enabled")) }}
           readinessProbe:
             httpGet:
               path: /.well-known/oauth-protected-resource
               port: http
               httpHeaders:
                 - {name: Host, value: "127.0.0.1"}
-            periodSeconds: 10
+            {{- if ne $r.initialDelaySeconds nil }}
+            initialDelaySeconds: {{ int $r.initialDelaySeconds }}
+            {{- end }}
+            {{- if ne $r.periodSeconds nil }}
+            periodSeconds: {{ int $r.periodSeconds }}
+            {{- end }}
+            {{- if ne $r.timeoutSeconds nil }}
+            timeoutSeconds: {{ int $r.timeoutSeconds }}
+            {{- end }}
+            {{- if ne $r.failureThreshold nil }}
+            failureThreshold: {{ int $r.failureThreshold }}
+            {{- end }}
+          {{- end }}
+          {{- $l := $probes.liveness | default dict -}}
+          {{- if (ternary $l.enabled true (hasKey $l "enabled")) }}
           livenessProbe:
             tcpSocket:
               port: http
-            initialDelaySeconds: 30
-            periodSeconds: 20
+            {{- if ne $l.initialDelaySeconds nil }}
+            initialDelaySeconds: {{ int $l.initialDelaySeconds }}
+            {{- end }}
+            {{- if ne $l.periodSeconds nil }}
+            periodSeconds: {{ int $l.periodSeconds }}
+            {{- end }}
+            {{- if ne $l.timeoutSeconds nil }}
+            timeoutSeconds: {{ int $l.timeoutSeconds }}
+            {{- end }}
+            {{- if ne $l.failureThreshold nil }}
+            failureThreshold: {{ int $l.failureThreshold }}
+            {{- end }}
+          {{- end }}
           {{- end }}
           securityContext:
             {{- include "gw.hardened" . | nindent 12 }}

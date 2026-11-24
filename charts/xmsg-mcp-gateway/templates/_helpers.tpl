@@ -115,8 +115,10 @@ capabilities:
 {{- end -}}
 {{- end -}}
 {{- end -}}
-{{- if and .Values.gateway.podNetwork (not (has "127.0.0.1" ($s.allowed_hosts | default list))) -}}
-{{- fail "gateway.podNetwork renders probes that send Host: 127.0.0.1; add it to serving.allowed_hosts" -}}
+{{- $r := ((.Values.gateway.probes | default dict).readiness | default dict) -}}
+{{- $readinessEnabled := and .Values.gateway.podNetwork (ternary $r.enabled true (hasKey $r "enabled")) -}}
+{{- if and $readinessEnabled (not (has "127.0.0.1" ($s.allowed_hosts | default list))) -}}
+{{- fail "gateway.podNetwork renders a readiness probe that sends Host: 127.0.0.1; add it to serving.allowed_hosts" -}}
 {{- end -}}
 {{- if and .Values.tunnel.enabled (not (has "127.0.0.1" ($s.allowed_hosts | default list))) -}}
 {{- fail "tunnel-client reaches the gateway at 127.0.0.1; add it to serving.allowed_hosts" -}}

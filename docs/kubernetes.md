@@ -156,8 +156,15 @@ With `gateway.podNetwork: true`, the gateway binds `0.0.0.0` with
 
 - a `Service`;
 - a readiness probe, `GET /.well-known/oauth-protected-resource` with `Host: 127.0.0.1`
-  (this path is unauthenticated, and `127.0.0.1` must be in `serving.allowed_hosts`);
+  (this path is unauthenticated, and `127.0.0.1` must be in `serving.allowed_hosts`
+  when the readiness probe is enabled);
 - a liveness probe, a TCP check on the listener.
+
+Both probes are enabled by default under `gateway.podNetwork: true` and can be
+disabled or tuned via `gateway.probes.readiness` and `gateway.probes.liveness`
+(`enabled`, `initialDelaySeconds`, `periodSeconds`, `timeoutSeconds`,
+`failureThreshold`). Disabling `gateway.probes.readiness.enabled` lifts the
+`127.0.0.1` `serving.allowed_hosts` requirement unless `tunnel.enabled` is true.
 
 Restrict ingress to your proxy with a NetworkPolicy: the listener is plain HTTP.
 
