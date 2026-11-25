@@ -73,6 +73,14 @@ async fn pinned_node_roundtrip_uses_the_registered_service_identity() {
             .recipients
             .iter()
             .any(|recipient| recipient.address == address && recipient.kind == "service"));
+        let tagged = service
+            .list(ListQuery {
+                tag: Some("gw.test".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(tagged.coverage.is_some());
     }
     let first = service
         .send(&address, "untrusted fixture data", Some("roundtrip-key"))

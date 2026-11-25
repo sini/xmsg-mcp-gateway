@@ -1021,6 +1021,7 @@ pub(crate) async fn list_verified(
             status: arguments.status.clone(),
             within: arguments.within,
             limit: None,
+            tag: None,
         }),
     )
     .await
@@ -1041,6 +1042,7 @@ pub(crate) async fn list_verified(
                 nodes: Vec::new(),
                 total: 0,
                 truncated: false,
+                coverage: None,
             }
         }
         Err(error) => return Err(error.into()),
@@ -1730,10 +1732,10 @@ mod reservation_time_tests {
             .find_map(|line| line.strip_prefix("revision = "))
             .expect("missing reviewed xmsg revision");
         assert_eq!(
-            revision, "\"f7354acb70f60c1ade71b750a7e95e1083a4b997\"",
+            revision, "\"50c50c456209198c4000e756a2fa9e3c14a97cf8\"",
             "review the node's idempotency retention boundary after a pin change"
         );
-        // Reviewed xmsg f7354acb storage.rs retains keys through their final TTL tick (`created_at < cutoff`).
+        // Reviewed xmsg 50c50c45 storage.rs retains keys through their final TTL tick (`created_at < cutoff`).
         for nanos in [1, 999_999_999] {
             for ttl in [1, 86_400] {
                 let (created_at, retry_until) =
@@ -1931,6 +1933,56 @@ mod events_reply_tests {
                 .unwrap(),
             1,
             "reply eligibility rewrote acceptance snapshot"
+        );
+    }
+
+    #[test]
+    fn list_result_parses_and_filters_recipient_carrying_tags_and_coverage() {
+        let payload = serde_json::json!({
+            "recipients": [{
+                "address": "11111111-1111-4111-8111-111111111111@bus",
+                "label": "worker",
+                "kind": "instance",
+                "status": "live",
+                "node": "bus",
+                "user": "alice",
+                "harness": "claude",
+                "tags": ["review", "orchestrator.proj"],
+                "registered_at": 1_728_000_000i64
+            }],
+            "nodes": [{ "node": "bus", "status": "ok" }],
+            "coverage": {
+                "complete": true,
+                "tag_incapable": [],
+                "unanswered": []
+            },
+            "total": 1,
+            "truncated": false
+        });
+        let parsed: xmsg::client::ListResult = serde_json::from_value(payload).unwrap();
+        assert_eq!(
+            parsed.recipients[0].tags,
+            vec!["review", "orchestrator.proj"]
+        );
+        assert!(parsed.coverage.as_ref().is_some_and(|c| c.complete));
+        let policy = Policy {
+            send: Some(Permission {
+                targets: BTreeSet::from(["*@bus".to_string()]),
+                required_scope: "xmsg:send".into(),
+            }),
+            reply: None,
+        };
+        let args = ListArguments {
+            node: None,
+            kind: None,
+            status: None,
+            within: None,
+        };
+        let filtered = filter_recipients(&policy, &args, parsed).unwrap();
+        assert_eq!(filtered.recipients.len(), 1);
+        assert_eq!(
+            filtered.recipients[0].address,
+            "11111111-1111-4111-8111-111111111111@bus"
         );
     }
 }

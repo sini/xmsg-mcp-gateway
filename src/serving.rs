@@ -827,6 +827,7 @@ struct CurrentAuthority {
     store: Store,
 }
 
+#[allow(clippy::result_large_err)]
 async fn authorize_current(
     app: &App,
     identity: Arc<VerifiedIdentity>,
