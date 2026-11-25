@@ -226,11 +226,53 @@ def validate(cases):
             raise ValueError("CLI invocation helper must be unique")
 
 
-def ci_main():
+PER_CASE_BUDGET_SECONDS = 240
+MIN_FLIGHT_BUDGET_SECONDS = 900
+
+
+def parse_shard(shard):
+    match = re.fullmatch(r"([1-9][0-9]*)/([1-9][0-9]*)", shard)
+    if not match:
+        raise ValueError("invalid shard specification: " + shard)
+    index, total = int(match.group(1)), int(match.group(2))
+    if index > total:
+        raise ValueError("shard index exceeds total: " + shard)
+    return index, total
+
+
+def select_shard(cases, shard):
+    index, total = parse_shard(shard)
+    base, extra = divmod(len(cases), total)
+    start = (index - 1) * base + min(index - 1, extra)
+    end = start + base + (1 if index <= extra else 0)
+    return cases[start:end]
+
+
+def ci_main(shard=None):
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
-    destination = ROOT / ".artifacts/mutation-receipts/migration_recovery"
+    manifest = ROOT / "scripts/migration_recovery_mutants.json"
+    cases = json.loads(manifest.read_text())
+    validate(cases)
+    if shard is not None:
+        index, total = parse_shard(shard)
+        shard_cases = select_shard(cases, shard)
+        destination = ROOT / f".artifacts/mutation-receipts/migration_recovery_{index}_of_{total}"
+        case_args = [arg for case in shard_cases for arg in ("--case", case["id"])]
+    else:
+        shard_cases = cases
+        destination = ROOT / ".artifacts/mutation-receipts/migration_recovery"
+        case_args = []
+    flight_budget = max(
+        MIN_FLIGHT_BUDGET_SECONDS, len(shard_cases) * PER_CASE_BUDGET_SECONDS
+    )
     destination.mkdir(parents=True, exist_ok=False)
-    receipt = {"commands": [], "status": "running"}
+    receipt = {
+        "shard": shard,
+        "case_count": len(shard_cases),
+        "flight_budget_seconds": flight_budget,
+        "commands": [],
+        "status": "running",
+    }
     environment = {**os.environ, "CARGO_NET_OFFLINE": "true", "CARGO_BUILD_JOBS": "8"}
 
     def run(argv, budget, log=None):
@@ -298,15 +340,16 @@ def ci_main():
                     sys.executable,
                     str(Path(__file__).resolve()),
                     "--manifest",
-                    str(ROOT / "scripts/migration_recovery_mutants.json"),
+                    str(manifest),
                     "--evidence",
                     str(evidence),
                     "--work-root",
                     str(scratch / "work"),
                     "--seed-target",
                     str(scratch / "seed"),
+                    *case_args,
                 ],
-                4200,
+                flight_budget,
             )
         except BaseException as error:
             receipt["status"] = "failed"
@@ -548,6 +591,7 @@ def main():
         persist()
 
     def arm(case, phase):
+        arm_started = time.monotonic()
         record = {"case": case["id"], "phase": phase, "status": "preparing"}
         ledger["arms"].append(record)
         persist()
@@ -808,17 +852,22 @@ def main():
                 raise RuntimeError("retained executable copy changed")
             item["retained_path"] = str(destination)
         shutil.rmtree(variant)
+        arm_elapsed = time.monotonic() - arm_started
+        record["elapsed_seconds"] = arm_elapsed
         record["isolated_build_tree_removed_after_receipts"] = True
         persist()
         print(stem + ": exit=" + str(result.returncode) + " nonce=" + nonce, flush=True)
+        print(f"{stem}: elapsed={arm_elapsed:.2f}s", flush=True)
+        return arm_elapsed
 
     persist()
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
     try:
         for case in cases:
+            case_elapsed = 0.0
             for phase in ["red", "green"]:
                 try:
-                    arm(case, phase)
+                    case_elapsed += arm(case, phase)
                 except BaseException as error:
                     if ledger["arms"]:
                         ledger["arms"][-1]["failure"] = (
@@ -831,6 +880,7 @@ def main():
                         )
                     persist()
                     raise
+            print(f"{case['id']}: elapsed={case_elapsed:.2f}s", flush=True)
         ledger["status"] = "passed"
         ledger["completed_at"] = time.time()
     except BaseException as error:
@@ -853,5 +903,7 @@ def main():
 if __name__ == "__main__":
     if len(sys.argv) == 1:
         ci_main()
+    elif len(sys.argv) == 3 and sys.argv[1] == "--shard":
+        ci_main(shard=sys.argv[2])
     else:
         main()

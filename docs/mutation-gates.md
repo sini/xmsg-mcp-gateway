@@ -58,14 +58,17 @@ and `--preflight` verifies unique source anchors and named tests without compili
 A `--case` invocation reports partial completion and cannot satisfy the registered
 full-suite completion marker.
 
-The `migration_recovery` suite registers all 34 bootstrap, exact-enrollment,
-CLI hot-journal and backup publication/retention faults. Its no-argument CI entrypoint
-runs the same isolated controller, with a 10-minute dependency-warmup bound and a
-70-minute flight bound inside the existing 90-minute job. Each named RED and restored
-GREEN line is required. Atomic arm records, compiler logs, CLI hash receipts and
-bootstrap metadata are copied into the existing mutation-receipt artifact; temporary
-executables are not uploaded. Unsupported-lock simulation is classifier-level and
-is not qualification of a filesystem without directory-lock support.
+The `migration_recovery_1`, `migration_recovery_2`, and `migration_recovery_3` shards
+register all 34 bootstrap, exact-enrollment, CLI hot-journal and backup
+publication/retention faults (12, 11, and 11 mutants respectively, invoked via
+`--shard 1/3`, `--shard 2/3`, and `--shard 3/3`). Each shard runs the same isolated
+controller, with a 10-minute dependency-warmup bound, a per-shard flight bound of
+240 seconds per case (900-second floor; 2880s for 12 cases, 2640s for 11 cases) inside
+the existing 90-minute job, and per-arm and per-case elapsed timing lines in stdout.
+Each named RED and restored GREEN line is required. Atomic arm records, compiler logs,
+CLI hash receipts and bootstrap metadata are copied into the existing mutation-receipt
+artifact; temporary executables are not uploaded. Unsupported-lock simulation is
+classifier-level and is not qualification of a filesystem without directory-lock support.
 
 The backup directory guard explicitly unlocks before closing its File. A safe
 `File::try_clone` fixture retains the same open description across success/error

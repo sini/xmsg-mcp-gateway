@@ -1671,13 +1671,16 @@
       "script_sha256": "726539f5f7918c99298dc7531e00f923de139ed1900b359de61ced063b90a4c5"
     },
     {
-      "id": "migration_recovery",
+      "id": "migration_recovery_1",
       "script": "scripts/migration_recovery_mutants.py",
-      "args": [],
-      "count": 34,
+      "args": [
+        "--shard",
+        "1/3"
+      ],
+      "count": 12,
       "fixture": false,
       "python": false,
-      "completion": "migration-recovery-mutants-complete:34",
+      "completion": "migration-recovery-mutants-complete:12",
       "dependencies": [
         "scripts/migration_recovery_mutants.py",
         "scripts/migration_recovery_mutants.json",
@@ -1704,29 +1707,7 @@
         "enrollment-disabled-new",
         "enrollment-legacy-no-replace",
         "backup-initial-complete-noeffects",
-        "backup-final-complete-recheck",
-        "backup-lock-before-final-snapshot",
-        "backup-sqlite-api-wal",
-        "backup-publish-before-prune",
-        "backup-publication-error-stops-prune",
-        "backup-no-adopt-destination",
-        "backup-reservation-drift",
-        "backup-directory-lock-held",
-        "backup-directory-lock-through-prune",
-        "backup-lock-error-refusal",
-        "backup-current-publication-retained",
-        "backup-newest-historical-retained",
-        "backup-minimum-one-retained",
-        "backup-retention-store-scope",
-        "backup-retention-name-binding",
-        "backup-retention-checksum",
-        "backup-retention-exact-inventory",
-        "backup-private-directory-mode",
-        "backup-explicit-unlock-before-close",
-        "backup-cli-failure-propagates",
-        "init-existing-hot-journal-readonly",
-        "backup-pending-decision-read-transaction",
-        "backup-retention-private-file-mode"
+        "backup-final-complete-recheck"
       ],
       "required_output": [
         "^hot\\-journal\\-cli\\-readonly-red: exit=101 nonce=[0-9a-f]{32}$",
@@ -1752,7 +1733,49 @@
         "^backup\\-initial\\-complete\\-noeffects-red: exit=101 nonce=[0-9a-f]{32}$",
         "^backup\\-initial\\-complete\\-noeffects-green: exit=0 nonce=[0-9a-f]{32}$",
         "^backup\\-final\\-complete\\-recheck-red: exit=101 nonce=[0-9a-f]{32}$",
-        "^backup\\-final\\-complete\\-recheck-green: exit=0 nonce=[0-9a-f]{32}$",
+        "^backup\\-final\\-complete\\-recheck-green: exit=0 nonce=[0-9a-f]{32}$"
+      ],
+      "script_sha256": "4091a3ecc84b2860d1d51fc0e5296a6f33536d35a3e96415b2151a36988724b3"
+    },
+    {
+      "id": "migration_recovery_2",
+      "script": "scripts/migration_recovery_mutants.py",
+      "args": [
+        "--shard",
+        "2/3"
+      ],
+      "count": 11,
+      "fixture": false,
+      "python": false,
+      "completion": "migration-recovery-mutants-complete:11",
+      "dependencies": [
+        "scripts/migration_recovery_mutants.py",
+        "scripts/migration_recovery_mutants.json",
+        "src/grants.rs",
+        "src/grants_recovery.rs",
+        "src/grants_backup.rs",
+        "src/grants_bootstrap_tests.rs",
+        "src/grants_backup_tests.rs",
+        "src/main.rs",
+        "tests/migrations.rs",
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml"
+      ],
+      "labels": [
+        "backup-lock-before-final-snapshot",
+        "backup-sqlite-api-wal",
+        "backup-publish-before-prune",
+        "backup-publication-error-stops-prune",
+        "backup-no-adopt-destination",
+        "backup-reservation-drift",
+        "backup-directory-lock-held",
+        "backup-directory-lock-through-prune",
+        "backup-lock-error-refusal",
+        "backup-current-publication-retained",
+        "backup-newest-historical-retained"
+      ],
+      "required_output": [
         "^backup\\-lock\\-before\\-final\\-snapshot-red: exit=101 nonce=[0-9a-f]{32}$",
         "^backup\\-lock\\-before\\-final\\-snapshot-green: exit=0 nonce=[0-9a-f]{32}$",
         "^backup\\-sqlite\\-api\\-wal-red: exit=101 nonce=[0-9a-f]{32}$",
@@ -1774,7 +1797,49 @@
         "^backup\\-current\\-publication\\-retained-red: exit=101 nonce=[0-9a-f]{32}$",
         "^backup\\-current\\-publication\\-retained-green: exit=0 nonce=[0-9a-f]{32}$",
         "^backup\\-newest\\-historical\\-retained-red: exit=101 nonce=[0-9a-f]{32}$",
-        "^backup\\-newest\\-historical\\-retained-green: exit=0 nonce=[0-9a-f]{32}$",
+        "^backup\\-newest\\-historical\\-retained-green: exit=0 nonce=[0-9a-f]{32}$"
+      ],
+      "script_sha256": "4091a3ecc84b2860d1d51fc0e5296a6f33536d35a3e96415b2151a36988724b3"
+    },
+    {
+      "id": "migration_recovery_3",
+      "script": "scripts/migration_recovery_mutants.py",
+      "args": [
+        "--shard",
+        "3/3"
+      ],
+      "count": 11,
+      "fixture": false,
+      "python": false,
+      "completion": "migration-recovery-mutants-complete:11",
+      "dependencies": [
+        "scripts/migration_recovery_mutants.py",
+        "scripts/migration_recovery_mutants.json",
+        "src/grants.rs",
+        "src/grants_recovery.rs",
+        "src/grants_backup.rs",
+        "src/grants_bootstrap_tests.rs",
+        "src/grants_backup_tests.rs",
+        "src/main.rs",
+        "tests/migrations.rs",
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml"
+      ],
+      "labels": [
+        "backup-minimum-one-retained",
+        "backup-retention-store-scope",
+        "backup-retention-name-binding",
+        "backup-retention-checksum",
+        "backup-retention-exact-inventory",
+        "backup-private-directory-mode",
+        "backup-explicit-unlock-before-close",
+        "backup-cli-failure-propagates",
+        "init-existing-hot-journal-readonly",
+        "backup-pending-decision-read-transaction",
+        "backup-retention-private-file-mode"
+      ],
+      "required_output": [
         "^backup\\-minimum\\-one\\-retained-red: exit=101 nonce=[0-9a-f]{32}$",
         "^backup\\-minimum\\-one\\-retained-green: exit=0 nonce=[0-9a-f]{32}$",
         "^backup\\-retention\\-store\\-scope-red: exit=101 nonce=[0-9a-f]{32}$",
@@ -1798,7 +1863,7 @@
         "^backup\\-retention\\-private\\-file\\-mode-red: exit=101 nonce=[0-9a-f]{32}$",
         "^backup\\-retention\\-private\\-file\\-mode-green: exit=0 nonce=[0-9a-f]{32}$"
       ],
-      "script_sha256": "52b4f18d87277e47298955a59690397597496a7321d1383780748a2e43618663"
+      "script_sha256": "4091a3ecc84b2860d1d51fc0e5296a6f33536d35a3e96415b2151a36988724b3"
     }
   ]
 }

@@ -55,7 +55,7 @@ def load_registry(root=ROOT):
         raise ValueError("unknown mutation registry version")
     suites = value["suites"]
     ids = [s["id"] for s in suites]
-    if len(ids) != len(set(ids)) or len(suites) != 24:
+    if len(ids) != len(set(ids)) or len(suites) != 26:
         raise ValueError("mutation suite inventory drift")
     registered = {s["script"] for s in suites}
     discovered = {
