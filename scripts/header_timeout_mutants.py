@@ -48,8 +48,8 @@ CASES = [
     ),
     (
         "header-reason-removed",
-        'tracing::warn!(target: "gateway_transport", reason = ?reason, "transport refused");',
-        "let _ = reason;",
+        'tracing::warn!(target: "gateway_transport", reason = ?reason, %peer, bytes_read, "transport refused");',
+        "let _ = (reason, peer, bytes_read);",
         [
             (TEST, "header timeout reason was not emitted"),
         ],

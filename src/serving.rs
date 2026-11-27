@@ -3,12 +3,17 @@ use crate::dispatch_outcome as diagnostic;
 use std::collections::BTreeSet;
 use std::error::Error as _;
 use std::fs::File;
-use std::io::Read;
+use std::io::{self, IoSlice, Read};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 
 use axum::body::to_bytes;
@@ -381,6 +386,58 @@ fn default_max_connections() -> usize {
 #[error("connection capacity exhausted")]
 pub struct ConnectionCapacityRefusal;
 
+struct CountedConnection {
+    socket: TcpStream,
+    bytes_read: Arc<AtomicU64>,
+}
+
+impl AsyncRead for CountedConnection {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let before = buf.filled().len();
+        let result = Pin::new(&mut this.socket).poll_read(cx, buf);
+        if let Poll::Ready(Ok(())) = result {
+            this.bytes_read
+                .fetch_add((buf.filled().len() - before) as u64, Ordering::Relaxed);
+        }
+        result
+    }
+}
+
+impl AsyncWrite for CountedConnection {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.socket).poll_write(cx, buf)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.socket).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.socket.is_write_vectored()
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.socket).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.socket).poll_shutdown(cx)
+    }
+}
+
 pub struct Serving {
     header_read_timeout: Duration,
     state: Arc<App>,
@@ -683,7 +740,7 @@ impl Serving {
                 _ = &mut shutdown => break Ok(()),
                 Some(_) = connections.join_next(), if !connections.is_empty() => {},
                 accepted = listener.accept() => {
-                    let (socket, _) = match accepted {
+                    let (socket, peer) = match accepted {
                         Ok(accepted) => accepted,
                         Err(error) => {
                             if matches!(error.kind(), std::io::ErrorKind::ConnectionRefused
@@ -715,8 +772,13 @@ impl Serving {
                         let mut builder = hyper::server::conn::http1::Builder::new();
                         builder.timer(hyper_util::rt::TokioTimer::new());
                         builder.header_read_timeout(deadline);
+                        let bytes_read = Arc::new(AtomicU64::new(0));
+                        let stream = CountedConnection {
+                            socket,
+                            bytes_read: bytes_read.clone(),
+                        };
                         let connection = builder.serve_connection(
-                            hyper_util::rt::TokioIo::new(socket),
+                            hyper_util::rt::TokioIo::new(stream),
                             hyper_util::service::TowerToHyperService::new(router),
                         ).with_upgrades();
                         tokio::pin!(connection);
@@ -727,11 +789,16 @@ impl Serving {
                                 connection.await
                             }
                         };
-                        if let Err(error) = outcome {
-                            if error.is_timeout() {
-                                let reason = HeaderReadTimeout;
-                                tracing::warn!(target: "gateway_transport", reason = ?reason, "transport refused");
+                        let bytes_read = bytes_read.load(Ordering::Relaxed);
+                        if outcome.is_err_and(|error| error.is_timeout()) {
+                            let reason = HeaderReadTimeout;
+                            if bytes_read == 0 {
+                                tracing::debug!(target: "gateway_transport", reason = ?reason, %peer, bytes_read, "empty connection timed out");
+                            } else {
+                                tracing::warn!(target: "gateway_transport", reason = ?reason, %peer, bytes_read, "transport refused");
                             }
+                        } else if bytes_read == 0 {
+                            tracing::debug!(target: "gateway_transport", %peer, bytes_read, "empty connection closed");
                         }
                     });
                 }

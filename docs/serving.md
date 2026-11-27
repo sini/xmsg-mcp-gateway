@@ -420,8 +420,13 @@ coalescing over-estimate. A failure to persist that observation exits visibly.
 
 `header_read_timeout_ms` defaults to 5000 and accepts integers from 1 through
 60000. Each HTTP/1 request must complete its headers within this absolute deadline;
-receiving another byte does not renew it. Expiry closes the connection with the
-typed `HeaderReadTimeout` reason on stderr. Completed headers release the
+receiving another byte does not renew it. Expiry closes the connection. If the
+gateway has received bytes on that connection, it logs a WARN with the
+`HeaderReadTimeout` reason, the remote socket address (`peer`) and the total
+bytes read on the connection (`bytes_read`). Connections that close or time
+out before sending any bytes are logged at DEBUG. Set
+`RUST_LOG=gateway_transport=debug` to see those events on stderr.
+Completed headers release the
 deadline, so it does not limit request body delivery or response work. Hyper
 re-arms it for the next request, bounding idle keep-alive with the same setting
 rather than a separate idle deadline.

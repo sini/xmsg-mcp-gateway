@@ -209,6 +209,14 @@ async fn header_deadline_configuration_is_typed_and_optional() {
 }
 
 async fn listener(fixture: &Fixture, limited_descriptors: bool) -> (tokio::process::Child, String) {
+    listener_with_logging(fixture, limited_descriptors, None).await
+}
+
+async fn listener_with_logging(
+    fixture: &Fixture,
+    limited_descriptors: bool,
+    log_filter: Option<&str>,
+) -> (tokio::process::Child, String) {
     let mut command = if limited_descriptors {
         let mut command = tokio::process::Command::new("prlimit");
         command.args([
@@ -220,6 +228,10 @@ async fn listener(fixture: &Fixture, limited_descriptors: bool) -> (tokio::proce
     } else {
         tokio::process::Command::new(env!("CARGO_BIN_EXE_xmsg-mcp-gateway"))
     };
+    if let Some(filter) = log_filter {
+        command.env("RUST_LOG", filter);
+        command.env("NO_COLOR", "1");
+    }
     let mut child = command
         .args(["serve", "--config"])
         .arg(&fixture.config_file)
@@ -238,6 +250,60 @@ async fn listener(fixture: &Fixture, limited_descriptors: bool) -> (tokio::proce
         child,
         ready.strip_prefix("serving MCP at ").unwrap().to_owned(),
     )
+}
+
+#[tokio::test]
+async fn transport_logs_distinguish_empty_connections_from_partial_headers() {
+    let mut fixture = Fixture::new();
+    fixture.config["header_read_timeout_ms"] = serde_json::json!(300);
+    fixture::private_file(
+        &fixture.config_file,
+        &serde_json::to_vec(&fixture.config).unwrap(),
+    );
+    let (mut child, address) =
+        listener_with_logging(&fixture, false, Some("gateway_transport=debug")).await;
+    let mut logs = BufReader::new(child.stderr.take().unwrap()).lines();
+
+    let mut closed = TcpStream::connect(&address).await.unwrap();
+    let closed_peer = closed.local_addr().unwrap();
+    closed.shutdown().await.unwrap();
+
+    let idle = TcpStream::connect(&address).await.unwrap();
+    let idle_peer = idle.local_addr().unwrap();
+
+    let mut partial = TcpStream::connect(&address).await.unwrap();
+    let partial_peer = partial.local_addr().unwrap();
+    let header = b"GET /mcp HTTP/1.1\r\nHost: gateway.example\r\n";
+    partial.write_all(header).await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut pending = vec![
+            (closed_peer, "DEBUG", 0),
+            (idle_peer, "DEBUG", 0),
+            (partial_peer, "WARN", header.len()),
+        ];
+        while !pending.is_empty() {
+            let line = logs.next_line().await.unwrap().unwrap();
+            if !line.contains("gateway_transport:") {
+                continue;
+            }
+            let Some(index) = pending
+                .iter()
+                .position(|(peer, _, _)| line.contains(&format!("peer={peer} ")))
+            else {
+                panic!("unexpected transport diagnostic: {line}");
+            };
+            let (_, level, bytes) = pending.swap_remove(index);
+            assert!(line.contains(level), "wrong transport log level: {line}");
+            assert!(
+                line.ends_with(&format!("bytes_read={bytes}")),
+                "wrong transport byte count: {line}"
+            );
+        }
+    })
+    .await
+    .expect("missing transport diagnostics");
+    child.kill().await.unwrap();
 }
 
 #[tokio::test]
