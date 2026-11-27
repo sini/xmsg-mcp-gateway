@@ -429,7 +429,9 @@ out before sending any bytes are logged at DEBUG. Set
 Completed headers release the
 deadline, so it does not limit request body delivery or response work. Hyper
 re-arms it for the next request, bounding idle keep-alive with the same setting
-rather than a separate idle deadline.
+rather than a separate idle deadline. A reused connection that idles past the
+next header deadline also logs this WARN, with the total bytes read on that
+connection.
 
 `cargo test --test header_timeout` exercises this bound through the real CLI and
 listener, including a delayed-body positive control. Run
